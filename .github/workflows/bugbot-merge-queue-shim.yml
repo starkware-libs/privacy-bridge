@@ -1,0 +1,26 @@
+name: Bugbot merge-queue shim
+# Cursor Bugbot reviews pull_request diffs and does not run on merge_group
+# branches. So that `Cursor Bugbot` can be a REQUIRED status check without
+# freezing the GitHub merge queue (which evaluates required checks on the
+# merge_group commit, with a 60-min timeout), this job posts a `Cursor Bugbot`
+# success commit-status on each merge group. The real review still gates every
+# PR at queue-entry; merge groups themselves are not re-reviewed by Bugbot.
+on:
+  merge_group:
+
+permissions:
+  statuses: write
+
+jobs:
+  bugbot-merge-group:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Satisfy "Cursor Bugbot" on the merge group
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/statuses/${{ github.event.merge_group.head_sha }}" \
+            -f state=success \
+            -f context='Cursor Bugbot' \
+            -f description='Bugbot reviews PRs at queue-entry; merge groups are not re-reviewed'

@@ -27,3 +27,9 @@ coverage/
 
 # Scratch workflow harness scripts (session-local; not part of the repo)
 .workflow-*.js
+
+# These are checked-in team artifacts for this repo, overriding any global
+# gitignore that excludes them (project instructions + Cursor Bugbot rules).
+!CLAUDE.md
+!.cursor/
+!.cursor/BUGBOT.md

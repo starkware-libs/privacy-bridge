@@ -1,0 +1,95 @@
+name: Bugbot Gate
+# Cursor Bugbot's own "Cursor Bugbot" check is always pass/neutral/skipping — it
+# never reports fail, so it cannot block the merge queue by itself (issue #194:
+# PR #167 merged with an unresolved MEDIUM finding still open, now #193).
+#
+# This job makes that gap enforceable: it reads a PR's review threads via the
+# GitHub GraphQL API and FAILS if any thread authored by cursor[bot] is
+# - not resolved,
+# - not outdated (GitHub marks a thread outdated once the lines it anchored to
+#   have changed — this is how a stale carried-forward finding is told apart
+#   from a fresh one, per the issue's ask), and
+# - MEDIUM severity or higher (parsed from the "**<Severity> Severity**" marker
+#   Bugbot puts in every finding body).
+# The check is a shared script (.github/scripts/bugbot-gate-check.sh) so the
+# pull_request path and the merge_group path run identical logic.
+#
+# On merge_group the gate re-checks the queued PR(s): a MEDIUM+ finding that
+# lands AFTER a PR's green run but BEFORE the merge finishes would otherwise
+# slip through (the #194 window). A merge_group's head_ref embeds each queued
+# PR number as "gh-readonly-queue/<base>/pr-<N>-<sha>" (a batch may contain
+# several pr-<N>- segments); we derive every N and run the shared check per PR.
+# Fail-open caveat: if NO pr-<N> can be parsed (unexpected head_ref format) we
+# log a loud warning and PASS rather than freeze the queue — the pull_request
+# path already gated at queue-entry, and failing closed on an unparseable ref
+# would deadlock ALL merges (the ~60-min merge-queue timeout).
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  merge_group:
+
+permissions:
+  contents: read # actions/checkout needs it; explicit permissions deny omitted scopes
+  pull-requests: read
+
+jobs:
+  bugbot-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out gate script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts/bugbot-gate-check.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check for unresolved MEDIUM+ Bugbot findings (pull_request)
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .github/scripts/bugbot-gate-check.sh
+
+      - name: Re-check queued PR(s) for unresolved MEDIUM+ Bugbot findings (merge_group)
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          set -euo pipefail
+
+          # head_ref looks like gh-readonly-queue/<base>/pr-<N>-<sha>; a batch may
+          # carry several pr-<N>- segments. Extract every PR number.
+          mapfile -t pr_numbers < <(echo "$HEAD_REF" | grep -oE 'pr-[0-9]+' | grep -oE '[0-9]+' | sort -u)
+
+          if [ "${#pr_numbers[@]}" -eq 0 ]; then
+            # Fail-open: an unparseable head_ref must NOT freeze the queue. The
+            # pull_request path already gated each PR at queue-entry, so this
+            # merge-time re-check is best-effort; failing closed here would
+            # deadlock ALL merges until the ~60-min timeout.
+            echo "::warning::Could not parse any pr-<N> from merge_group head_ref '$HEAD_REF'; skipping re-check (fail-open)."
+            {
+              echo "WARNING: Bugbot Gate could not parse a PR number from merge_group head_ref:"
+              echo ""
+              echo "    $HEAD_REF"
+              echo ""
+              echo "Passing fail-open (queue-entry gate already ran). Investigate the head_ref format."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Run the shared check per PR; collect a nonzero exit across ALL PRs so
+          # one failure doesn't mask another and the set -e doesn't short-circuit.
+          rc=0
+          for pr in "${pr_numbers[@]}"; do
+            echo "Re-checking PR #$pr from merge group..."
+            if ! PR_NUMBER="$pr" bash .github/scripts/bugbot-gate-check.sh; then
+              rc=1
+            fi
+          done
+          exit "$rc"
