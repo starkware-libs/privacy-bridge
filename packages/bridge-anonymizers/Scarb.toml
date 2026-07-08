@@ -1,0 +1,20 @@
+[package]
+name = "bridge_anonymizers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+starknet.workspace = true
+
+[dev-dependencies]
+snforge_std.workspace = true
+assert_macros.workspace = true
+
+[[target.starknet-contract]]
+sierra = true
+casm = true
+
+# Route `scarb test` to snforge (scripts are package-specific and are NOT
+# inherited from the workspace root, so the runner override lives here too).
+[scripts]
+test = "snforge test"
