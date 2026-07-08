@@ -3,4 +3,9 @@
 //!   - `outbound_anonymizer` — pool withdraw recipient → CCTP (the BUY leg).
 
 pub mod outbound_anonymizer;
+
+#[cfg(test)]
+pub mod test_mocks;
+#[cfg(test)]
+mod tests;
 pub mod types;
