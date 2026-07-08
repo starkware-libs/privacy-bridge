@@ -1,18 +1,37 @@
 # privacy-bridge
 
-Standalone home for the **bridge** — a value-movement engine for the `starknet-privacy`
-privacy pool that moves USDC between EVM chains and the pool via Circle CCTP, driven by two
-Cairo "anonymizer" contracts.
+A value-movement engine for the [`starknet-privacy`](https://github.com/starkware-libs) privacy
+pool. It moves USDC between everyday EVM wallets/chains and the privacy pool, so users can fund a
+private balance and later withdraw it — without linking the two sides on-chain.
 
-The code is being extracted here **in small, human-reviewable PRs** from the
-`starkware-libs/polymarket-privacy` monorepo (branch `feat/inbound-anonymizer-privacy-compute`).
-See [`CLAUDE.md`](./CLAUDE.md) for architecture and the migration plan.
+## What it does
 
-## Layout (as it fills in)
+- **Into the pool** — takes USDC from an EVM wallet and deposits it into the privacy pool as a
+  private note.
+- **Out of the pool (BUY leg)** — withdraws from the pool and bridges USDC to a destination EVM
+  chain, driven by the outbound **`Anonymizer`** Cairo contract.
+- **Back into the pool (RETURN leg)** — bridges USDC from an EVM chain back into the pool via the
+  inbound **`InboundAnonymizer`** Cairo contract, which binds the incoming funds to a private note.
+- **Cash out** — withdraws from the pool to the user's own EVM wallet.
+
+Cross-chain USDC transfers use **Circle's CCTP** (burn-and-mint with attestation). All client-side
+key material — Starknet key, viewing key, per-account EVM keys, and the note commitments — is
+derived from a single wallet signature.
+
+## Privacy model
+
+The bridge is designed so that the deposit side and the withdrawal side of a transfer cannot be
+linked on-chain. Secrets (the wallet signature and derived private keys) are never logged, persisted,
+or revealed on-chain — the on-chain claim recomputes everything from the authenticated signer. The
+only capability that may be persisted is the read-only **viewing key** (it can discover notes but
+cannot move funds).
+
+## Components
 
 - `packages/contracts-cairo` — the outbound `Anonymizer` and inbound `InboundAnonymizer` Cairo
-  contracts (Scarb workspace). Build: `scarb build` · Test: `scarb test` (Starknet Foundry).
-- `packages/bridge-core` — the TypeScript value-movement engine (arriving in later PRs).
-- `apps/bridge` — a demo app consuming `bridge-core` (arriving in later PRs).
+  contracts (Scarb workspace). Build: `scarb build` · Test: `scarb test`.
+- `packages/bridge-core` — the framework-agnostic TypeScript engine: value-movement orchestrators,
+  key derivation, CCTP integration, and optional React hooks.
+- `apps/bridge` — a demo web app built on `bridge-core`.
 
-Toolchain versions are pinned in [`.tool-versions`](./.tool-versions).
+See [`CLAUDE.md`](./CLAUDE.md) for the full architecture.
