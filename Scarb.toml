@@ -1,0 +1,20 @@
+[workspace]
+members = ["packages/contracts-cairo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024_07"
+
+[workspace.dependencies]
+starknet = "2.17.0"
+snforge_std = "0.59.0"
+assert_macros = "2.17.0"
+
+# Use the registry-distributed prebuilt snforge plugin binary instead of
+# compiling `snforge_scarb_plugin` from source (which fails against the system
+# rustc). Mirrors the reference starknet-privacy workspace config.
+[workspace.tool.scarb]
+allow-prebuilt-plugins = ["snforge_std"]
+
+[scripts]
+test = "snforge test"
