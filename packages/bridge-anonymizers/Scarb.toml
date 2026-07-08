@@ -1,0 +1,27 @@
+[package]
+name = "bridge_anonymizers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+starknet.workspace = true
+
+[dev-dependencies]
+snforge_std.workspace = true
+assert_macros.workspace = true
+
+[tool.scarb]
+# Use the registry-distributed prebuilt snforge plugin binary instead of
+# compiling `snforge_scarb_plugin` from source (which fails against the system
+# rustc). The workspace-level `[workspace.tool.scarb]` entry is NOT inherited by
+# package compilation, so the allowance must be repeated here at package level.
+allow-prebuilt-plugins = ["snforge_std"]
+
+[[target.starknet-contract]]
+sierra = true
+casm = true
+
+# Route `scarb test` to snforge (scripts are package-specific and are NOT
+# inherited from the workspace root, so the runner override lives here too).
+[scripts]
+test = "snforge test"
