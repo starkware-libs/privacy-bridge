@@ -33,3 +33,7 @@ coverage/
 !CLAUDE.md
 !.cursor/
 !.cursor/BUGBOT.md
+# Checked-in Claude Code skills (shared team review conventions), overriding a
+# global gitignore that excludes `.claude/`.
+!.claude/
+!.claude/skills/
