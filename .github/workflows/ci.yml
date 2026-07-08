@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'PR' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds + tests the Cairo anonymizer contracts. Guarded so it is a stable,
+  # always-reporting required check: on the near-empty bootstrap `main` there is
+  # no Scarb.toml yet, so the guard skips build/test and the job reports green.
+  # Once packages/contracts-cairo lands, the guard passes and the real
+  # `scarb build` + `scarb test` run. (The guard is a harmless no-op thereafter.)
+  cairo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Cairo workspace
+        id: guard
+        run: |
+          if [ -f Scarb.toml ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No Scarb.toml at repo root yet — skipping Cairo build/test."
+          fi
+
+      - name: Set up Scarb
+        if: steps.guard.outputs.run == 'true'
+        uses: software-mansion/setup-scarb@v1
+        with:
+          scarb-version: '2.17.0'
+
+      - name: Set up Starknet Foundry
+        if: steps.guard.outputs.run == 'true'
+        uses: foundry-rs/setup-snfoundry@v4
+        with:
+          starknet-foundry-version: '0.59.0'
+
+      - name: scarb build
+        if: steps.guard.outputs.run == 'true'
+        run: scarb build
+
+      - name: scarb test
+        if: steps.guard.outputs.run == 'true'
+        run: scarb test

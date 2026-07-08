@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+.turbo/
+*.tsbuildinfo
+
+# env (only the committed template env.example is tracked)
+.env
+.env.*
+!env.example
+!.env.example
+
+# cairo / scarb
+target/
+.snfoundry_cache/
+
+# session-local scratch artifacts (screenshots, scratch output)
+.artifacts/
+
+# misc
+.DS_Store
+coverage/
+*.log
+
+# Scratch workflow harness scripts (session-local; not part of the repo)
+.workflow-*.js
