@@ -1,14 +1,17 @@
-//! snforge suite for the inbound anonymizer (the CCTP → pool RETURN leg). CCTP
-//! MessageTransmitter + USDC are mocked; the contract under test is real, and
-//! messages are built with the exact CCTP-v2 big-endian layout. Covers:
-//!  - bind credits ledger[commitment] by the real minted delta (happy path);
-//!  - no bypass: a direct receive_message from another caller hits the
-//!    destination_caller gate, so funds arrive only via receive_and_bind;
-//!  - no mixing across commitments or with stranded balance;
-//!  - a front-running submitter binds to the message's commitment, not their own;
-//!  - wrong mint recipient credits nothing (NOTHING_MINTED);
-//!  - claim is pool-only (CALLER_NOT_POOL) and single-use (double-claim reverts);
-//!  - replay/double-bind reverts (NONCE_ALREADY_USED);
+//! snforge suite for the inbound anonymizer (the CCTP → pool RETURN leg), fold
+//! design: the CCTP mint is folded into the pool-only
+//! `privacy_invoke_with_computation`, so the whole return is one proof-authorized
+//! pool tx. CCTP MessageTransmitter + USDC are mocked; the contract under test is
+//! real, and messages are built with the exact CCTP-v2 big-endian layout. Covers:
+//!  - happy path: one call mints the real delta and returns it as an open note;
+//!  - claim is pool-only (CALLER_NOT_POOL);
+//!  - the mint binds to the proven commitment (COMMITMENT_MISMATCH) and to this
+//!    contract as destinationCaller (DEST_CALLER_MISMATCH), both asserted pre-mint;
+//!  - a direct receive_message from another caller hits the mock's destination_caller
+//!    gate, so funds can only be minted through the fold;
+//!  - wrong mint recipient mints nothing (NOTHING_MINTED);
+//!  - replay reverts on the consumed nonce (NONCE_ALREADY_USED);
+//!  - each mint's delta is isolated from stranded balance and other mints;
 //!  - privacy_compute = poseidon([poseidon([identity_key, dapp_name, source_domain]), nonce])
 //!    (cross-language vector).
 
@@ -32,9 +35,6 @@ use starknet::ContractAddress;
 
 fn pool_addr() -> ContractAddress {
     'POOL'.try_into().unwrap()
-}
-fn attacker_addr() -> ContractAddress {
-    'ATTACKER'.try_into().unwrap()
 }
 const DAPP: felt252 = 'pmp-return';
 const SOURCE_DOMAIN: felt252 = 7; // CCTP source domain (Polygon)
@@ -134,23 +134,93 @@ fn attn() -> ByteArray {
     "att" // mock ignores the attestation
 }
 
-// --- 1 + happy path ---------------------------------------------------------
-#[test]
-fn bind_credits_minted_delta_to_message_commitment() {
-    let d = deploy();
+/// Run the fold as the pool for a matching (commitment, message) pair.
+fn fold(
+    d: Deployed, commitment: felt252, note_id: felt252, message: ByteArray,
+) -> Span<OpenNoteDeposit> {
     let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    let commitment: felt252 = 0x1234;
-    let msg = build_message(1, d.inbound, AMOUNT_A, d.inbound, commitment);
-
-    inbound.receive_and_bind(msg, attn());
-
-    // Ledger credited by the real minted delta; USDC actually landed on inbound.
-    assert(inbound.claimable_of(commitment) == AMOUNT_A.try_into().unwrap(), 'BAD_LEDGER');
-    let usdc = IMockUsdcDispatcher { contract_address: d.usdc };
-    assert(usdc.balance_of(d.inbound) == AMOUNT_A, 'BAD_BALANCE');
+    start_cheat_caller_address(d.inbound, pool_addr());
+    let deposits = inbound.privacy_invoke_with_computation(commitment, note_id, message, attn());
+    stop_cheat_caller_address(d.inbound);
+    deposits
 }
 
-// --- 1b no bypass: direct receive_message from a non-inbound caller reverts --
+// --- 1 happy path: one call mints the real delta and returns it as a note ----
+#[test]
+fn fold_mints_delta_and_returns_open_note() {
+    let d = deploy();
+    let commitment: felt252 = 0x1234;
+    let note_id: felt252 = 0x99;
+    let msg = build_message(1, d.inbound, AMOUNT_A, d.inbound, commitment);
+
+    let deposits = fold(d, commitment, note_id, msg);
+
+    assert(deposits.len() == 1, 'BAD_LEN');
+    let dep: OpenNoteDeposit = *deposits.at(0);
+    assert(dep.note_id == note_id, 'BAD_NOTE');
+    assert(dep.token == d.usdc, 'BAD_TOKEN');
+    assert(dep.amount == AMOUNT_A.try_into().unwrap(), 'BAD_AMT');
+    // USDC actually landed on inbound and the pool is approved for exactly it.
+    let usdc = IMockUsdcDispatcher { contract_address: d.usdc };
+    assert(usdc.balance_of(d.inbound) == AMOUNT_A, 'BAD_BALANCE');
+    let ctrl = IMockUsdcControlDispatcher { contract_address: d.usdc };
+    assert(ctrl.last_approve_spender() == pool_addr(), 'BAD_APPROVE_SPENDER');
+    assert(ctrl.last_approve_amount() == AMOUNT_A, 'BAD_APPROVE_AMT');
+}
+
+// --- 2 claim is pool-only ----------------------------------------------------
+#[test]
+#[feature("safe_dispatcher")]
+fn fold_non_pool_reverts() {
+    let d = deploy();
+    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
+    let commitment: felt252 = 0x66;
+    let msg = build_message(60, d.inbound, AMOUNT_A, d.inbound, commitment);
+    // Default caller (not the pool) → CALLER_NOT_POOL.
+    match safe.privacy_invoke_with_computation(commitment, 0x1, msg, attn()) {
+        Result::Ok(_) => panic!("non-pool fold should revert"),
+        Result::Err(e) => assert(*e.at(0) == errors::CALLER_NOT_POOL, 'WRONG_ERR'),
+    }
+}
+
+// --- 3 the mint binds to the proven commitment ------------------------------
+#[test]
+#[feature("safe_dispatcher")]
+fn fold_reverts_on_commitment_mismatch() {
+    let d = deploy();
+    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
+    // Message carries 0xAAA in hookData; the pool proved a different commitment.
+    let msg = build_message(70, d.inbound, AMOUNT_A, d.inbound, 0xAAA);
+    start_cheat_caller_address(d.inbound, pool_addr());
+    let r = safe.privacy_invoke_with_computation(0xBBB, 0x1, msg, attn());
+    stop_cheat_caller_address(d.inbound);
+    match r {
+        Result::Ok(_) => panic!("commitment mismatch should revert"),
+        Result::Err(e) => assert(*e.at(0) == errors::COMMITMENT_MISMATCH, 'WRONG_ERR'),
+    }
+}
+
+// --- 4 the mint binds to this contract as destinationCaller (pre-mint) -------
+#[test]
+#[feature("safe_dispatcher")]
+fn fold_reverts_on_destination_caller_mismatch() {
+    let d = deploy();
+    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
+    let commitment: felt252 = 0xC0FFEE;
+    // destination_caller names some OTHER address → the contract's own check rejects
+    // it before receive_message ever runs.
+    let other: ContractAddress = 'OTHER'.try_into().unwrap();
+    let msg = build_message(80, d.inbound, AMOUNT_A, other, commitment);
+    start_cheat_caller_address(d.inbound, pool_addr());
+    let r = safe.privacy_invoke_with_computation(commitment, 0x1, msg, attn());
+    stop_cheat_caller_address(d.inbound);
+    match r {
+        Result::Ok(_) => panic!("dest-caller mismatch should revert"),
+        Result::Err(e) => assert(*e.at(0) == errors::DESTINATION_CALLER_MISMATCH, 'WRONG_ERR'),
+    }
+}
+
+// --- 4b no bypass: a direct receive_message from another caller reverts -------
 #[test]
 #[feature("safe_dispatcher")]
 fn direct_receive_message_reverts_on_destination_caller_gate() {
@@ -159,146 +229,72 @@ fn direct_receive_message_reverts_on_destination_caller_gate() {
     let msg = build_message(7, d.inbound, AMOUNT_A, d.inbound, 0xbeef);
     let tx = IMessageTransmitterV2SafeDispatcher { contract_address: d.transmitter };
     // Called directly from the test (caller != inbound) → the gate must reject it,
-    // so funds can never be minted outside receive_and_bind.
+    // so funds can never be minted outside the fold.
     match tx.receive_message(msg, attn()) {
         Result::Ok(_) => panic!("direct receive_message should revert"),
         Result::Err(e) => assert(*e.at(0) == 'INVALID_DESTINATION_CALLER', 'WRONG_ERR'),
     }
 }
 
-// --- 2 no mixing: stranded balance + second bind don't cross-credit ----------
-#[test]
-fn no_mixing_across_commitments_or_stranded_balance() {
-    let d = deploy();
-    let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    // Pre-existing stranded balance (e.g. a stray transfer or prior residue).
-    IMockUsdcControlDispatcher { contract_address: d.usdc }.set_balance(d.inbound, 500000);
-
-    let c_a: felt252 = 0xaaa;
-    let c_b: felt252 = 0xbbb;
-    inbound.receive_and_bind(build_message(10, d.inbound, AMOUNT_A, d.inbound, c_a), attn());
-    inbound.receive_and_bind(build_message(11, d.inbound, AMOUNT_B, d.inbound, c_b), attn());
-
-    // Each commitment credited exactly its own minted delta; the 0.5 stranded USDC
-    // is bound to NEITHER commitment.
-    assert(inbound.claimable_of(c_a) == AMOUNT_A.try_into().unwrap(), 'MIX_A');
-    assert(inbound.claimable_of(c_b) == AMOUNT_B.try_into().unwrap(), 'MIX_B');
-}
-
-// --- 3 no theft via front-run: submitter binds to the MESSAGE's commitment ---
-#[test]
-fn arbitrary_submitter_binds_to_message_commitment_not_theirs() {
-    let d = deploy();
-    let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    let victim_commitment: felt252 = 0xdead;
-    let msg = build_message(20, d.inbound, AMOUNT_A, d.inbound, victim_commitment);
-
-    // An attacker submits the victim's (attested) message.
-    start_cheat_caller_address(d.inbound, attacker_addr());
-    inbound.receive_and_bind(msg, attn());
-    stop_cheat_caller_address(d.inbound);
-
-    // Funds are bound to the victim's commitment (from the message), gaining the
-    // attacker nothing.
-    assert(inbound.claimable_of(victim_commitment) == AMOUNT_A.try_into().unwrap(), 'THEFT');
-}
-
-// --- 4 wrong mint recipient credits nothing ---------------------------------
+// --- 5 wrong mint recipient mints nothing ------------------------------------
 #[test]
 #[feature("safe_dispatcher")]
-fn bind_reverts_when_nothing_minted_to_inbound() {
+fn fold_reverts_when_nothing_minted() {
     let d = deploy();
-    let inbound = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
-    // mint_recipient is some OTHER address → inbound's balance delta is 0.
+    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
+    let commitment: felt252 = 0xD00D;
+    // destination_caller is this contract (passes the gate), but mint_recipient is
+    // some OTHER address → inbound's balance delta is 0.
     let other: ContractAddress = 'OTHER'.try_into().unwrap();
-    let msg = build_message(30, other, AMOUNT_A, d.inbound, 0xc0ffee);
-    match inbound.receive_and_bind(msg, attn()) {
+    let msg = build_message(30, other, AMOUNT_A, d.inbound, commitment);
+    start_cheat_caller_address(d.inbound, pool_addr());
+    let r = safe.privacy_invoke_with_computation(commitment, 0x1, msg, attn());
+    stop_cheat_caller_address(d.inbound);
+    match r {
         Result::Ok(_) => panic!("should revert NOTHING_MINTED"),
         Result::Err(e) => assert(*e.at(0) == errors::NOTHING_MINTED, 'WRONG_ERR'),
     }
 }
 
-// --- 6 replay / double-bind reverts -----------------------------------------
+// --- 6 replay: a second fold with the same nonce reverts on the consumed nonce
 #[test]
 #[feature("safe_dispatcher")]
-fn double_bind_same_message_reverts_on_nonce() {
+fn replay_same_nonce_reverts() {
     let d = deploy();
-    let ok = IInboundAnonymizerDispatcher { contract_address: d.inbound };
     let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
-    let msg1 = build_message(40, d.inbound, AMOUNT_A, d.inbound, 0xdd);
-    ok.receive_and_bind(msg1, attn());
+    let commitment: felt252 = 0xdd;
+    fold(d, commitment, 0x1, build_message(40, d.inbound, AMOUNT_A, d.inbound, commitment));
+
     // Rebuild the identical message (ByteArray is consumed) and replay it.
-    let msg2 = build_message(40, d.inbound, AMOUNT_A, d.inbound, 0xdd);
-    match safe.receive_and_bind(msg2, attn()) {
+    let msg2 = build_message(40, d.inbound, AMOUNT_A, d.inbound, commitment);
+    start_cheat_caller_address(d.inbound, pool_addr());
+    let r = safe.privacy_invoke_with_computation(commitment, 0x2, msg2, attn());
+    stop_cheat_caller_address(d.inbound);
+    match r {
         Result::Ok(_) => panic!("replay should revert"),
         Result::Err(e) => assert(*e.at(0) == 'NONCE_ALREADY_USED', 'WRONG_ERR'),
     }
 }
 
-// --- 5 claim: pool-only, happy, and idempotent ------------------------------
+// --- 7 each mint's delta is isolated from stranded balance and other mints ----
 #[test]
-fn claim_as_pool_returns_open_note_and_zeroes_ledger() {
+fn each_mint_delta_isolated_from_stranded_and_others() {
     let d = deploy();
-    let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    let commitment: felt252 = 0x55;
-    let note_id: felt252 = 0x99;
-    inbound.receive_and_bind(build_message(50, d.inbound, AMOUNT_A, d.inbound, commitment), attn());
+    // Pre-existing stranded balance (e.g. a stray transfer or prior residue).
+    IMockUsdcControlDispatcher { contract_address: d.usdc }.set_balance(d.inbound, 500000);
 
-    start_cheat_caller_address(d.inbound, pool_addr());
-    let deposits = inbound.privacy_invoke_with_computation(commitment, note_id);
-    stop_cheat_caller_address(d.inbound);
+    let c_a: felt252 = 0xaaa;
+    let c_b: felt252 = 0xbbb;
+    let dep_a = *fold(d, c_a, 0x1, build_message(10, d.inbound, AMOUNT_A, d.inbound, c_a)).at(0);
+    let dep_b = *fold(d, c_b, 0x2, build_message(11, d.inbound, AMOUNT_B, d.inbound, c_b)).at(0);
 
-    assert(deposits.len() == 1, 'BAD_LEN');
-    let dep: OpenNoteDeposit = *deposits.at(0);
-    assert(dep.note_id == note_id, 'BAD_NOTE');
-    assert(dep.token == d.usdc, 'BAD_TOKEN');
-    assert(dep.amount == AMOUNT_A.try_into().unwrap(), 'BAD_AMT');
-    // Pool approved for exactly the claimed amount; ledger drained.
-    let usdc = IMockUsdcControlDispatcher { contract_address: d.usdc };
-    assert(usdc.last_approve_spender() == pool_addr(), 'BAD_APPROVE_SPENDER');
-    assert(usdc.last_approve_amount() == AMOUNT_A, 'BAD_APPROVE_AMT');
-    assert(inbound.claimable_of(commitment) == 0, 'NOT_DRAINED');
+    // Each fold returns exactly its own minted delta; the 0.5 stranded USDC and the
+    // other mint never leak into either note.
+    assert(dep_a.amount == AMOUNT_A.try_into().unwrap(), 'MIX_A');
+    assert(dep_b.amount == AMOUNT_B.try_into().unwrap(), 'MIX_B');
 }
 
-#[test]
-#[feature("safe_dispatcher")]
-fn claim_non_pool_reverts() {
-    let d = deploy();
-    let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
-    let commitment: felt252 = 0x66;
-    inbound.receive_and_bind(build_message(60, d.inbound, AMOUNT_A, d.inbound, commitment), attn());
-
-    // Default caller (not the pool) → CALLER_NOT_POOL.
-    match safe.privacy_invoke_with_computation(commitment, 0x1) {
-        Result::Ok(_) => panic!("non-pool claim should revert"),
-        Result::Err(e) => assert(*e.at(0) == errors::CALLER_NOT_POOL, 'WRONG_ERR'),
-    }
-}
-
-#[test]
-#[feature("safe_dispatcher")]
-fn double_claim_reverts_nothing_to_claim() {
-    let d = deploy();
-    let inbound = IInboundAnonymizerDispatcher { contract_address: d.inbound };
-    let safe = IInboundAnonymizerSafeDispatcher { contract_address: d.inbound };
-    let commitment: felt252 = 0x77;
-    inbound.receive_and_bind(build_message(70, d.inbound, AMOUNT_A, d.inbound, commitment), attn());
-
-    start_cheat_caller_address(d.inbound, pool_addr());
-    inbound.privacy_invoke_with_computation(commitment, 0x1);
-    stop_cheat_caller_address(d.inbound);
-
-    start_cheat_caller_address(d.inbound, pool_addr());
-    let r = safe.privacy_invoke_with_computation(commitment, 0x2);
-    stop_cheat_caller_address(d.inbound);
-    match r {
-        Result::Ok(_) => panic!("double claim should revert"),
-        Result::Err(e) => assert(*e.at(0) == errors::NOTHING_TO_CLAIM, 'WRONG_ERR'),
-    }
-}
-
-// --- 7 privacy_compute parity (cross-language vector; TS mirrors this) -------
+// --- 8 privacy_compute parity (cross-language vector; TS mirrors this) --------
 #[test]
 fn privacy_compute_matches_poseidon() {
     let d = deploy();
