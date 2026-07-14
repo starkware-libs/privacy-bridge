@@ -1,23 +1,27 @@
 //! Inbound anonymizer: CCTP → pool RETURN leg via the pool's privacy-compute
-//! feature (`ComputeAndInvoke`), keying escrowed mints by commitment in a ledger.
+//! feature (`ComputeAndInvoke`).
 //!
-//! Flow:
-//!   - `receive_and_bind(message, attestation)` (permissionless): calls
-//!     `MessageTransmitterV2.receive_message` (verifies the attestation and mints
-//!     USDC to this contract), then credits `ledger[commitment]` by the real minted
-//!     delta, where `commitment` is the attested message's hookData.
-//!   - the pool's ComputeAndInvoke: `privacy_compute` derives the commitment from
-//!     the authenticated signer; `privacy_invoke_with_computation` (pool-only)
-//!     drains `ledger[commitment]` into an open note and approves the pool.
+//! Single-transaction flow:
+//!   - the pool derives the commitment from the authenticated signer via
+//!     `privacy_compute`, then calls `privacy_invoke_with_computation` (pool-only),
+//!     which atomically verifies the attested message binds to that commitment, mints
+//!     the CCTP return via `MessageTransmitterV2.receive_message`, and hands the
+//!     minted USDC to the pool as a fresh open note.
 //!
-//! Invariants: the burn sets `destination_caller = this contract`, so the mint can
-//! arrive only via `receive_and_bind`; the commitment comes from the attested
-//! message, not caller args; `sum(ledger) <= balance_of(self)` always.
+//! There is no decoupled "bind now, claim later" state: mint and claim are atomic. A
+//! return whose tx reverts strands nothing — the Circle-attested message stays
+//! replayable, so the client retries from the persisted burn.
+//!
+//! Invariants: the only function that calls `receive_message` is the pool-only
+//! `privacy_invoke_with_computation`; the burn sets `destination_caller = this
+//! contract`, re-asserted on-chain; the minted funds bind to the commitment the pool
+//! proved for the signer, and that commitment rides in the attested message's
+//! hookData (not a caller arg), so it cannot be forged.
 
 pub mod errors;
 pub mod internal_errors;
 
-/// Ledger key / compute-result type (the poseidon commitment).
+/// Compute-result / commitment type (the poseidon commitment).
 pub type Commitment = felt252;
 
 /// Minimal `MessageTransmitterV2` surface. Signature mirrors circlefin/starknet-cctp:
@@ -29,15 +33,10 @@ pub trait IMessageTransmitterV2<TContractState> {
     ) -> bool;
 }
 
-/// Inbound anonymizer entrypoints. `privacy_compute` / `privacy_invoke_with_computation`
-/// are the pool's `ComputeAndInvoke` hooks; `receive_and_bind` is the atomic CCTP
-/// receive + bind.
+/// Inbound anonymizer entrypoints — the pool's `ComputeAndInvoke` hooks. The CCTP
+/// receive+mint is folded into `privacy_invoke_with_computation`.
 #[starknet::interface]
 pub trait IInboundAnonymizer<TContractState> {
-    /// Atomic receive + bind. Permissionless: the commitment is sourced from the
-    /// attested message, not the caller.
-    fn receive_and_bind(ref self: TContractState, message: ByteArray, attestation: ByteArray);
-
     /// Pool compute hook:
     /// `commitment = poseidon([poseidon([identity_key, dapp_name, source_domain]), nonce])`.
     /// `identity_key` is supplied by the pool from the authenticated signer; `source_domain`
@@ -50,15 +49,18 @@ pub trait IInboundAnonymizer<TContractState> {
         nonce: felt252,
     ) -> Commitment;
 
-    /// Pool invoke hook (pool-only): drain `ledger[commitment]` into a fresh open
-    /// note. `commitment` is the raw return of `privacy_compute`; `note_id` is the
-    /// invoke_additional_data.
+    /// Pool invoke hook (pool-only): atomically mint the CCTP return (verifying the
+    /// attested message binds to `commitment`) and hand the minted USDC to the pool as
+    /// a fresh open note. `commitment` is the raw return of `privacy_compute`;
+    /// `note_id`, `message`, `attestation` are the invoke_additional_data (the latter
+    /// two are the CCTP receive inputs).
     fn privacy_invoke_with_computation(
-        ref self: TContractState, commitment: Commitment, note_id: felt252,
+        ref self: TContractState,
+        commitment: Commitment,
+        note_id: felt252,
+        message: ByteArray,
+        attestation: ByteArray,
     ) -> Span<crate::types::OpenNoteDeposit>;
-
-    /// Read the bound-but-unclaimed balance for a commitment (used by recovery).
-    fn claimable_of(self: @TContractState, commitment: Commitment) -> u128;
 }
 
 #[starknet::contract]
@@ -66,10 +68,7 @@ pub mod InboundAnonymizer {
     use core::byte_array::ByteArrayTrait;
     use core::num::traits::Zero;
     use core::poseidon::poseidon_hash_span;
-    use starknet::storage::{
-        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
-        StoragePointerWriteAccess,
-    };
+    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
     use crate::types::{IERC20Dispatcher, IERC20DispatcherTrait, OpenNoteDeposit};
     use super::{
@@ -82,14 +81,17 @@ pub mod InboundAnonymizer {
     /// hookData. Mirrors circlefin/starknet-cctp's message layout.
     const HOOK_DATA_OFFSET: usize = 376;
 
+    /// Byte offset of destinationCaller in the CCTP-v2 MessageV2 header:
+    /// version(4) + sourceDomain(4) + destinationDomain(4) + nonce(32) + sender(32)
+    /// + recipient(32) = 108.
+    const DESTINATION_CALLER_OFFSET: usize = 108;
+
     #[storage]
     struct Storage {
         // Baked at construction.
         usdc: ContractAddress,
         message_transmitter: ContractAddress,
         pool: ContractAddress,
-        // Bound-but-unclaimed USDC per commitment.
-        ledger: Map<Commitment, u128>,
     }
 
     #[event]
@@ -99,7 +101,7 @@ pub mod InboundAnonymizer {
         Claimed: Claimed,
     }
 
-    /// Emitted when a CCTP mint is bound to its commitment.
+    /// Emitted for the mint leg of the atomic return; `minted` is the real balance delta.
     #[derive(Drop, starknet::Event)]
     pub struct ReturnBound {
         #[key]
@@ -107,7 +109,7 @@ pub mod InboundAnonymizer {
         pub minted: u128,
     }
 
-    /// Emitted when a commitment is claimed into the pool.
+    /// Emitted for the claim leg: the minted funds handed to the pool.
     #[derive(Drop, starknet::Event)]
     pub struct Claimed {
         #[key]
@@ -129,31 +131,6 @@ pub mod InboundAnonymizer {
 
     #[abi(embed_v0)]
     pub impl InboundAnonymizerImpl of IInboundAnonymizer<ContractState> {
-        fn receive_and_bind(ref self: ContractState, message: ByteArray, attestation: ByteArray) {
-            // Parse the commitment from the message's hookData. A bad/replayed
-            // attestation reverts the whole tx in receive_message below, discarding
-            // this parse, so parsing pre-verification is safe.
-            let commitment = parse_hook_commitment(@message);
-
-            let usdc = self.usdc.read();
-            let usdc_disp = IERC20Dispatcher { contract_address: usdc };
-            let before: u256 = usdc_disp.balance_of(get_contract_address());
-
-            // receive_message verifies the attestation, enforces the message's
-            // destination_caller (== this contract, so only this path can mint these
-            // funds), mints to the recipient (this contract), and consumes the nonce.
-            IMessageTransmitterV2Dispatcher { contract_address: self.message_transmitter.read() }
-                .receive_message(message, attestation);
-
-            let after: u256 = usdc_disp.balance_of(get_contract_address());
-            // Real delta of this mint, isolating it from any pre-existing balance.
-            let minted: u128 = (after - before).try_into().expect(internal_errors::AMOUNT_OVERFLOW);
-            assert(minted.is_non_zero(), errors::NOTHING_MINTED);
-
-            self.ledger.write(commitment, self.ledger.read(commitment) + minted);
-            self.emit(Event::ReturnBound(ReturnBound { commitment, minted }));
-        }
-
         fn privacy_compute(
             self: @ContractState,
             identity_key: felt252,
@@ -168,7 +145,11 @@ pub mod InboundAnonymizer {
         }
 
         fn privacy_invoke_with_computation(
-            ref self: ContractState, commitment: Commitment, note_id: felt252,
+            ref self: ContractState,
+            commitment: Commitment,
+            note_id: felt252,
+            message: ByteArray,
+            attestation: ByteArray,
         ) -> Span<OpenNoteDeposit> {
             // Pool-only: the pool feeds the commitment straight from privacy_compute
             // over the authenticated signer, so a caller can only reach a commitment
@@ -176,36 +157,58 @@ pub mod InboundAnonymizer {
             let pool = self.pool.read();
             assert(get_caller_address() == pool, errors::CALLER_NOT_POOL);
 
-            let amount = self.ledger.read(commitment);
-            assert(amount.is_non_zero(), errors::NOTHING_TO_CLAIM);
+            // Bind the mint to the signer: the attested message's hookData commitment
+            // must equal the proven commitment. This runs before the mint, so a
+            // mismatch reverts without consuming the CCTP nonce (the message stays
+            // replayable). The commitment rides in the attested message, not a caller arg.
+            assert(
+                read_word(@message, HOOK_DATA_OFFSET) == commitment, errors::COMMITMENT_MISMATCH,
+            );
 
-            self.ledger.write(commitment, 0);
+            // Defense-in-depth atop receive_message's own gate: the message must name
+            // this contract as its destinationCaller, so only this path can drive the
+            // mint. Pre-mint, so a mis-addressed message fails closed without burning
+            // the nonce.
+            let self_felt: felt252 = get_contract_address().into();
+            assert(
+                read_word(@message, DESTINATION_CALLER_OFFSET) == self_felt,
+                errors::DESTINATION_CALLER_MISMATCH,
+            );
 
             let usdc = self.usdc.read();
-            IERC20Dispatcher { contract_address: usdc }
-                .approve(spender: pool, amount: amount.into());
+            let usdc_disp = IERC20Dispatcher { contract_address: usdc };
+            let before: u256 = usdc_disp.balance_of(get_contract_address());
 
-            self.emit(Event::Claimed(Claimed { commitment, amount }));
-            array![OpenNoteDeposit { note_id, token: usdc, amount }].span()
-        }
+            // receive_message verifies the attestation, enforces destination_caller
+            // (== this contract), mints to this contract, and consumes the nonce.
+            IMessageTransmitterV2Dispatcher { contract_address: self.message_transmitter.read() }
+                .receive_message(message, attestation);
 
-        fn claimable_of(self: @ContractState, commitment: Commitment) -> u128 {
-            self.ledger.read(commitment)
+            let after: u256 = usdc_disp.balance_of(get_contract_address());
+            // Real delta of this mint, isolating it from any pre-existing balance.
+            let minted: u128 = (after - before).try_into().expect(internal_errors::AMOUNT_OVERFLOW);
+            assert(minted.is_non_zero(), errors::NOTHING_MINTED);
+            self.emit(Event::ReturnBound(ReturnBound { commitment, minted }));
+
+            // Hand the minted USDC to the pool as a fresh open note (atomic claim).
+            usdc_disp.approve(spender: pool, amount: minted.into());
+            self.emit(Event::Claimed(Claimed { commitment, amount: minted }));
+            array![OpenNoteDeposit { note_id, token: usdc, amount: minted }].span()
         }
     }
 
-    /// Read the 32-byte big-endian hookData word at the fixed CCTP-v2 offset as the
-    /// commitment. hookData is opaque (CCTP does not endianness-convert it), so both
-    /// sides must agree on byte order.
-    fn parse_hook_commitment(message: @ByteArray) -> Commitment {
-        assert(message.len() >= HOOK_DATA_OFFSET + 32, errors::MESSAGE_TOO_SHORT);
+    /// Read the 32-byte big-endian word at `offset` as a felt (the commitment / a
+    /// header address). hookData is opaque (CCTP does not endianness-convert it), so
+    /// both sides must agree on byte order.
+    fn read_word(message: @ByteArray, offset: usize) -> Commitment {
+        assert(message.len() >= offset + 32, errors::MESSAGE_TOO_SHORT);
         let mut result: u256 = 0;
         let mut i: usize = 0;
         while i != 32 {
-            let byte_val: u256 = message.at(HOOK_DATA_OFFSET + i).unwrap().into();
+            let byte_val: u256 = message.at(offset + i).unwrap().into();
             result = result * 256 + byte_val;
             i += 1;
         }
-        result.try_into().expect(internal_errors::COMMITMENT_OVERFLOW)
+        result.try_into().expect(internal_errors::WORD_OVERFLOW)
     }
 }

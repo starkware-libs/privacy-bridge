@@ -3,5 +3,5 @@
 
 /// CCTP minted amount (u256) does not fit u128.
 pub const AMOUNT_OVERFLOW: felt252 = 'AMOUNT_OVERFLOW';
-/// hookData 32-byte word exceeds the felt252 field.
-pub const COMMITMENT_OVERFLOW: felt252 = 'COMMITMENT_OVERFLOW';
+/// A 32-byte word read from the message exceeds the felt252 field.
+pub const WORD_OVERFLOW: felt252 = 'WORD_OVERFLOW';
