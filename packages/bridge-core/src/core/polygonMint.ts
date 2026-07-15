@@ -43,7 +43,15 @@ interface IrisResponse {
   messages?: IrisMessage[];
 }
 
+// Base Iris poll cadence for the STANDARD finality tier (threshold 2000). Standard
+// finality on Polygon can take many minutes, so a tight interval would hammer Iris
+// pointlessly for the whole window — 5s is the right cadence there.
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+// Iris poll cadence for the FAST finality tier (threshold 1000). A Fast burn attests
+// in ~10-15s, so the fixed 5s Standard cadence wastes up to ~5s of that window on
+// BOTH the attestation and the forwarded-mint poll. Polling ~3x tighter recovers
+// most of that latency without meaningfully loading Iris (the Fast window is short).
+const FAST_POLL_INTERVAL_MS = 1_500;
 // Standard CCTP finality on Polygon can take many minutes; allow up to 30.
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60_000;
 
@@ -82,7 +90,14 @@ function isTransientHttpStatus(status: number): boolean {
 // waitForForwardedMint). Timing (sleep/random) + the backoff bounds are injectable
 // so tests are deterministic without real waiting.
 interface PollOpts {
+  // Poll cadence. An explicit `intervalMs` ALWAYS wins (tests inject a tiny value);
+  // otherwise the interval is derived from the finality tier via `fast` below.
   intervalMs?: number;
+  // Finality tier of the burn, threaded from the caller (fundAccountFromPool /
+  // cashOut already know config.cctp.fast). When no explicit `intervalMs` is given,
+  // Fast polls at FAST_POLL_INTERVAL_MS (~1.5s) and Standard at DEFAULT_POLL_INTERVAL_MS
+  // (5s). Only selects the base cadence — the transient (5xx/429) backoff is unchanged.
+  fast?: boolean;
   timeoutMs?: number;
   backoffBaseMs?: number;
   backoffCapMs?: number;
@@ -107,7 +122,11 @@ async function pollIris<T>(
   statusLabel: string,
   timeoutLabel: string,
 ): Promise<T> {
-  const intervalMs = opts?.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  // Explicit interval wins; otherwise pick the tier's base cadence (Fast ~1.5s vs
+  // Standard 5s). Only the base poll interval is tier-aware — the transient-error
+  // backoff bounds (base/cap) below are unchanged for both tiers.
+  const intervalMs =
+    opts?.intervalMs ?? (opts?.fast ? FAST_POLL_INTERVAL_MS : DEFAULT_POLL_INTERVAL_MS);
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
   // Clamp the effective backoff base to ≥ 1ms (NIT, B-logic audit): a degenerate
   // `backoffBaseMs: 0` override would make the transient (5xx/429) branch compute
@@ -331,19 +350,25 @@ export async function waitForForwardedMint(
 }
 
 // Combined attest → forwarded-mint leg (Slice F). The fund-account leg
-// (fundAccountFromPool) and the cash-out leg (cashOut, Slice G) both do the SAME
-// two Iris polls back-to-back — waitForAttestation (surface the attestation
-// progress + catch a terminal Iris status early) then waitForForwardedMint (the
-// mint Circle's Forwarding Service submits for us, gated on expectedMintRecipient
-// via the A1 fund-safety check). This wrapper extracts the pair that was
-// duplicated inline in the app's account-funding + return contexts so the sequence + the
-// mint-recipient gate live in ONE place.
+// (fundAccountFromPool) and the cash-out leg (cashOut, Slice G) both need the SAME
+// milestones — surface the attestation progress (and catch a terminal Iris status
+// early), then wait for the mint Circle's Forwarding Service submits for us, gated
+// on expectedMintRecipient via the A1 fund-safety check. This wrapper owns the
+// sequence + the mint-recipient gate in ONE place.
 //
-// Idempotent + resumable exactly like its two legs: re-running with the same
-// burnTxHash re-polls attest (idempotent) and immediately sees a present
-// forwardTxHash. `onAttested` fires once the attestation completes and before the
-// forwarded-mint poll starts, so a caller with a per-leg progress tracker can flip
-// its attest step done + its mint step running.
+// MERGED into a SINGLE Iris poll loop: attestation and forwardTxHash ride the SAME
+// Iris message shape, so once the attestation is found we keep inspecting the SAME
+// loop's responses for forwardTxHash instead of tearing down and restarting a fresh
+// poll cycle (which re-paid the base interval from scratch — up to a full interval
+// of dead latency between the two steps). `onAttested` still fires exactly once, the
+// first poll the attestation completes, so a caller with a per-leg progress tracker
+// can flip its attest step done + its mint step running; status callbacks route to
+// onAttestStatus before that point and onMintStatus after.
+//
+// Idempotent + resumable: re-running with the same burnTxHash re-polls and — when
+// the mint already landed — sees the attested pair + forwardTxHash on the FIRST read
+// (attestation and forward captured in the same extract call, onAttested still fires).
+// The A1 fund-safety gate on the forward-bearing message is UNCHANGED.
 export interface WaitForBridgedMintOpts {
   // The per-account EVM recipient the forwarded mint MUST land on (the A1 gate).
   expectedMintRecipient: string;
@@ -359,7 +384,10 @@ export interface WaitForBridgedMintOpts {
   onAttested?: () => void;
   // Live forwarded-mint-poll status strings (waitForForwardedMint).
   onMintStatus?: (s: string) => void;
-  // Deterministic-test knobs forwarded to both pollers (no real waiting in tests).
+  // Finality tier of the burn (config.cctp.fast). Selects the poll cadence for the
+  // merged attest→mint loop (Fast ~1.5s vs Standard 5s) when no explicit intervalMs.
+  fast?: boolean;
+  // Deterministic-test knobs forwarded to the poller (no real waiting in tests).
   intervalMs?: number;
   timeoutMs?: number;
   backoffBaseMs?: number;
@@ -382,26 +410,76 @@ export async function waitForBridgedMint(
   burnTxHash: string,
   opts: WaitForBridgedMintOpts,
 ): Promise<BridgedMintResult> {
-  const pollKnobs = {
-    sourceDomain: opts.sourceDomain,
-    intervalMs: opts.intervalMs,
-    timeoutMs: opts.timeoutMs,
-    backoffBaseMs: opts.backoffBaseMs,
-    backoffCapMs: opts.backoffCapMs,
-    sleep: opts.sleep,
-    random: opts.random,
+  const { starknetDomain } = config.cctp;
+  const sourceDomain = opts.sourceDomain ?? starknetDomain;
+  const destinationDomain =
+    opts.destinationDomain ?? getDefaultEvmCctpDestination().domain;
+
+  // The attested pair, captured the FIRST poll it appears on. The Forwarding-Service
+  // shape can later report forwardTxHash with an EMPTY message, so we must remember
+  // the real attestation from the earlier poll rather than re-read it off the last one.
+  let message: `0x${string}` | undefined;
+  let attestation: `0x${string}` | undefined;
+  // onAttested fires exactly once; afterwards status callbacks route to the mint step.
+  let attestedFired = false;
+  const fireAttested = (): void => {
+    if (attestedFired) return;
+    attestedFired = true;
+    opts.onAttested?.();
   };
-  const { message, attestation } = await waitForAttestation(burnTxHash, {
-    ...pollKnobs,
-    onStatus: opts.onAttestStatus,
-  });
-  opts.onAttested?.();
-  const { forwardTxHash } = await waitForForwardedMint(burnTxHash, {
-    ...pollKnobs,
-    expectedMintRecipient: opts.expectedMintRecipient,
-    expectedDestinationDomain: opts.destinationDomain,
-    onStatus: opts.onMintStatus,
-  });
+
+  const { forwardTxHash } = await pollIris<{ forwardTxHash: `0x${string}` }>(
+    burnTxHash,
+    sourceDomain,
+    (entry) => {
+      // Attestation milestone: capture the pair + flip to the mint step the first poll
+      // a complete attestation appears, even if forwardTxHash is not present yet.
+      if (!attestedFired && entry?.status === 'complete' && entry.message && entry.attestation) {
+        message = entry.message;
+        attestation = entry.attestation;
+        fireAttested();
+      }
+      if (entry?.forwardTxHash) {
+        // FUND-SAFETY GATE (Bundle A1) — UNCHANGED: validate the attested message on
+        // the forward-bearing entry (when present) against the burn we issued before
+        // trusting Circle's forward. An empty message (Forwarding-Service shape) has
+        // nothing of ours to gate — it is only a completion signal / display hash.
+        if (entry.message) {
+          assertCctpMessageMatches(entry.message, {
+            expectedSourceDomain: starknetDomain,
+            expectedDestinationDomain: destinationDomain,
+            expectedRecipient: opts.expectedMintRecipient,
+          });
+          // A forward-bearing entry that ALSO carries the attested pair (idempotent
+          // resume / same-poll completion) may be the only poll we see — capture it.
+          if (!message && entry.attestation) {
+            message = entry.message;
+            attestation = entry.attestation;
+          }
+        }
+        // Guarantee onAttested fires before completion even when attestation and
+        // forwardTxHash land on the SAME poll (resume: the mint already landed).
+        fireAttested();
+        return { forwardTxHash: entry.forwardTxHash };
+      }
+      return null;
+    },
+    {
+      fast: opts.fast,
+      intervalMs: opts.intervalMs,
+      timeoutMs: opts.timeoutMs,
+      backoffBaseMs: opts.backoffBaseMs,
+      backoffCapMs: opts.backoffCapMs,
+      sleep: opts.sleep,
+      random: opts.random,
+      // Route status to the attest step before the attestation completes, the mint
+      // step after — one loop reported as two phases (the flip driven by onAttested).
+      onStatus: (s) => (attestedFired ? opts.onMintStatus : opts.onAttestStatus)?.(s),
+    },
+    'Waiting for Circle attestation + forwarded mint',
+    'waitForForwardedMint',
+  );
+
   return { forwardTxHash, message, attestation };
 }
 

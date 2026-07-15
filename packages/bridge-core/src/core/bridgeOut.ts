@@ -595,6 +595,11 @@ export async function fundAccountFromPool(
   const emit = (step: FundStep, status: FundStepStatus, detail?: string): void =>
     onStep?.(step, status, detail);
   const pollKnobs = {
+    // Poll Iris on the tier's cadence (Fast ~1.5s vs Standard 5s): a Fast burn attests
+    // in ~10-15s, so the tighter cadence recovers latency on both the attest + the
+    // forwarded-mint milestones. config.cctp.fast is the deployment tier and matches
+    // the burn's declared finality (defaultFinalityThreshold resolves the same flag).
+    fast: config.cctp.fast,
     intervalMs: args.intervalMs,
     timeoutMs: args.timeoutMs,
     sleep: args.sleep,
@@ -1091,6 +1096,8 @@ export async function cashOut(args: CashOutArgs): Promise<CashOutResult> {
   // destChainId can't gate the mint-watch on the wrong domain (→ mismatch + stranding).
   let destDomain = resolveEvmCctpDestination(destChainId).domain;
   const pollKnobs = {
+    // Fast-tier cadence for the merged attest→mint Iris poll (see fundAccountFromPool).
+    fast: config.cctp.fast,
     intervalMs: args.intervalMs,
     timeoutMs: args.timeoutMs,
     sleep: args.sleep,
