@@ -55,11 +55,45 @@ describe('useBridgeFundingEstimate', () => {
     expect(result.current.projectedOrderHuman).toBe(1);
     // The hook always passes a fee-route opts object; with no sourceChainId
     // (apps/web's bid ticket) both route fields are undefined → default route (#198).
-    // extraReserveMicro defaults to 0n when the caller passes no extra reserve.
+    // extraReserveMicro defaults to 0n when the caller passes no extra reserve, and
+    // fast is undefined so fetchBridgeFundingPlan falls back to config.cctp.fast.
     expect(mockFetchBridgeFundingPlan).toHaveBeenCalledWith(1_000_000n, {
       sourceDomain: undefined,
       destDomain: undefined,
       extraReserveMicro: 0n,
+      fast: undefined,
+    });
+  });
+
+  it('forwards opts.fast to fetchBridgeFundingPlan and re-quotes when it flips', async () => {
+    const { rerender } = renderHook(
+      ({ fast }: { fast: boolean }) =>
+        useBridgeFundingEstimate(1_000_000n, 6, undefined, { fast }),
+      { initialProps: { fast: true } },
+    );
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // Fast tier threaded through verbatim.
+    expect(mockFetchBridgeFundingPlan).toHaveBeenLastCalledWith(1_000_000n, {
+      sourceDomain: undefined,
+      destDomain: undefined,
+      extraReserveMicro: 0n,
+      fast: true,
+    });
+
+    // Flipping the tier is a dependency change → the effect re-runs and re-quotes.
+    rerender({ fast: false });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(mockFetchBridgeFundingPlan).toHaveBeenLastCalledWith(1_000_000n, {
+      sourceDomain: undefined,
+      destDomain: undefined,
+      extraReserveMicro: 0n,
+      fast: false,
     });
   });
 });
