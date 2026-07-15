@@ -38,6 +38,21 @@ function foreignSignerProvider(): EthereumProvider & { request: ReturnType<typeo
   };
 }
 
+// A smart-account / ERC-1271 / EIP-7702 style signer: returns a signature that is
+// NOT a canonical 65-byte EOA (ECDSA) signature. Derivation must reject this (fail
+// closed) rather than re-key the user onto a different identity.
+function nonEoaSignerProvider(
+  sig: string,
+): EthereumProvider & { request: ReturnType<typeof vi.fn> } {
+  return {
+    request: vi.fn(async ({ method }: { method: string }) =>
+      method === 'personal_sign' ? sig : null,
+    ),
+    on: () => {},
+    removeListener: () => {},
+  };
+}
+
 // A correctly-behaving provider: signs with KEY_A, matching the connected addr.
 function matchingSignerProvider(): EthereumProvider & { request: ReturnType<typeof vi.fn> } {
   return {
@@ -75,5 +90,21 @@ describe('signMessage signer-binding (injected path)', () => {
     const provider = matchingSignerProvider();
     const sig = await signMessage(provider, ACCT_A.address, 'hello');
     expect(sig).toMatch(/^0x[0-9a-f]+$/i);
+  });
+});
+
+describe('signMessage EOA-format guard (rejects smart-account / non-ECDSA signatures)', () => {
+  it('throws a clear error for a non-65-byte (ERC-1271 / smart-account) signature', async () => {
+    const erc1271Sig = ('0x' + 'ab'.repeat(200)) as `0x${string}`; // 200 bytes, not 65
+    const provider = nonEoaSignerProvider(erc1271Sig);
+    await expect(signMessage(provider, ACCT_A.address, 'hello')).rejects.toThrow(
+      /non-EOA signature format/i,
+    );
+  });
+  it('rejects a too-short signature (fails closed BEFORE the ecrecover step)', async () => {
+    const provider = nonEoaSignerProvider('0xdeadbeef');
+    await expect(signMessage(provider, ACCT_A.address, 'hello')).rejects.toThrow(
+      /non-EOA signature format/i,
+    );
   });
 });

@@ -32,6 +32,20 @@ export async function signMessage(
     method: 'personal_sign',
     params: [hexMessage, address],
   })) as `0x${string}`;
+  // Require a canonical 65-byte EOA (ECDSA) signature: 0x + 130 hex chars. All
+  // downstream key derivation assumes this exact shape, and ecrecover (below) only
+  // works on it. A smart-account / ERC-1271 / EIP-7702 signer could return a
+  // different, non-ecrecoverable format — e.g. after an EOA is upgraded to a smart
+  // account. Reject it explicitly (fail closed with a clear message) rather than
+  // deriving a DIFFERENT identity that would strand the user's shielded funds. The
+  // recover check below is the airtight guard; this is a precise early error.
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+    throw new Error(
+      'Expected a 65-byte EOA (ECDSA) signature for key derivation, but the wallet ' +
+        'returned a non-EOA signature format (e.g. a smart-account / ERC-1271 signer). ' +
+        'Key derivation requires a standard EOA signature.',
+    );
+  }
   // Bind the signature to the connected account: recover the signer from the
   // exact bytes we sent and reject if the wallet signed with a DIFFERENT account
   // (e.g. the active account in the extension drifted from the one we connected).
