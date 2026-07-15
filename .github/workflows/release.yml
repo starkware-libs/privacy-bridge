@@ -1,0 +1,42 @@
+name: Release
+
+# Publishes @starkware-libs/starknet-privacy-bridge to GitHub Packages. Runs only
+# when a GitHub Release is published (tag = version) or on manual dispatch — never
+# on a plain push/PR, so nothing publishes until a release is deliberately cut.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9.15.0'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # prepublishOnly builds dist/ (tsc). --no-git-checks: skip pnpm's clean-tree
+      # guard in CI. apps/bridge is private, so --filter targets only the SDK.
+      - name: Publish SDK to GitHub Packages
+        run: pnpm --filter @starkware-libs/starknet-privacy-bridge publish --no-git-checks
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
