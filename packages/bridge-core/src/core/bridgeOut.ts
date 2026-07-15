@@ -601,12 +601,17 @@ export async function fundAccountFromPool(
   let destDomain = resolveEvmCctpDestination(destChainId).domain;
   const emit = (step: FundStep, status: FundStepStatus, detail?: string): void =>
     onStep?.(step, status, detail);
+  // The per-call finality tier (falls back to the deployment default). Drives BOTH
+  // the burn's declared finality (fresh path, below) AND the Iris poll cadence, so a
+  // Fast burn is always polled on the Fast cadence even when the deployment default is
+  // Standard. On resume it's reused best-effort — cadence only, never re-declares the
+  // burn's finality, which the original burn already committed to.
+  const fast = args.fast ?? config.cctp.fast;
   const pollKnobs = {
     // Poll Iris on the tier's cadence (Fast ~1.5s vs Standard 5s): a Fast burn attests
     // in ~10-15s, so the tighter cadence recovers latency on both the attest + the
-    // forwarded-mint milestones. config.cctp.fast is the deployment tier and matches
-    // the burn's declared finality (defaultFinalityThreshold resolves the same flag).
-    fast: config.cctp.fast,
+    // forwarded-mint milestones.
+    fast,
     intervalMs: args.intervalMs,
     timeoutMs: args.timeoutMs,
     sleep: args.sleep,
@@ -670,10 +675,9 @@ export async function fundAccountFromPool(
     const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
 
     try {
-      // Per-call tier for THIS fresh burn (Fast/Standard); falls back to the deployment
-      // default (config.cctp.fast) when the caller passes no `fast`. The same flag sizes
-      // the fee quote AND the burn's declared finality just below, so they never diverge.
-      const fast = args.fast ?? config.cctp.fast;
+      // `fast` (resolved at function scope above) sizes the fee quote AND the burn's
+      // declared finality just below, so they never diverge — and matches the Iris
+      // poll cadence in pollKnobs.
       // FORWARDING-FEE FLOOR (pre-flight): the Forwarding Service deducts its fee IN
       // USDC from the burn, so the amount must clear it — quote the live max_fee and
       // reject a sub-floor amount with a CLEAR error here, rather than let the
