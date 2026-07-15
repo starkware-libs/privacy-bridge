@@ -22,6 +22,7 @@ import {
   paymasterExecuteLeg,
   invalidateManagerNonce,
   type PaymasterBuildCtx,
+  type PaymasterFeeAction,
 } from './proven-submit';
 import {
   waitForProvingBlock,
@@ -278,6 +279,41 @@ async function approvePoolSpend(
   return waitForBlockNumber(provider, transaction_hash);
 }
 
+// The pool-deposit PrivateTransfers client (SDK proof builder + indexer discovery) —
+// shared by depositToPool and the prove-ahead path so both wire it identically (same
+// prover, chain, indexer, pool). Kept in one place so a wiring change can't drift between
+// the two entry points.
+function makeDepositTransfers(account: Account, viewingKey: bigint): PrivateTransfersInterface {
+  return createPrivateTransfers({
+    account,
+    viewingKeyProvider: { getViewingKey: async () => viewingKey },
+    provingProvider: {
+      url: config.proverUrl,
+      chainId: config.chainId as constants.StarknetChainId,
+    },
+    discoveryProvider: new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress),
+    poolContractAddress: config.poolAddress,
+  });
+}
+
+// Convert an AVNU paymaster `fee_action` into the deposit-token fee withdraw to bake into
+// the proof, or undefined for a zero/absent fee. Shared by the inline submit (attempt)
+// and the prove-ahead path. sponsored_private pays the fee in pool_fee_token (→ the
+// deposit token) so the deposit itself covers it; a fee quoted in any OTHER token (e.g.
+// sponsored → STRK) can't be paid from a USDC-only account, so fail loud.
+function feeWithdrawFromAction(
+  feeAction: PaymasterFeeAction | undefined,
+): { recipient: string; amount: bigint } | undefined {
+  if (!feeAction || BigInt(feeAction.amount || '0') === 0n) return undefined;
+  if (BigInt(feeAction.token) !== BigInt(config.depositToken.address)) {
+    throw new Error(
+      `AVNU pool fee is in ${feeAction.token}, not the deposit token ${config.depositToken.address}. ` +
+        'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
+    );
+  }
+  return { recipient: feeAction.recipient, amount: BigInt(feeAction.amount) };
+}
+
 // Build the deposit apply_actions and prove it at `provingBlockId` — the pure
 // proof-generation body shared by the normal submit path (proveAndSubmitDeposit's
 // attempt) and the prove-ahead path (buildDepositProofAhead). NO submit, so any throw is
@@ -371,34 +407,14 @@ export async function buildDepositProofAhead(args: {
   // BARE apply_action fee quote — no receive_message ⇒ no attestation dependency.
   onStatus?.('Requesting pool fee from paymaster…');
   const feeCtx = await paymasterBuildLeg(account, { type: 'apply_action' });
-  const fa = feeCtx.feeAction;
-  let feeWithdraw: { recipient: string; amount: bigint } | undefined;
-  if (fa && BigInt(fa.amount || '0') !== 0n) {
-    if (BigInt(fa.token) !== BigInt(config.depositToken.address)) {
-      throw new Error(
-        `AVNU pool fee is in ${fa.token}, not the deposit token ${config.depositToken.address}. ` +
-          'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
-      );
-    }
-    feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
-  }
+  const feeWithdraw = feeWithdrawFromAction(feeCtx.feeAction);
 
   const provingDepth = immediateProve ? IMMEDIATE_PROVING_BLOCK_DEPTH : PROVING_BLOCK_DEPTH;
   const anchor = immediateProve ? undefined : lastTxBlockNumber;
   onStatus?.('Selecting proving block…');
   const provingBlockId = await waitForProvingBlock(provider, anchor, onStatus, provingDepth);
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makeDepositTransfers(account, viewingKey);
 
   const { call, proofDetails } = await proveDepositAt(transfers, {
     depositorAddress: account.address,
@@ -464,17 +480,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     lastTxBlockNumber = await approvePoolSpend(account, approveCall);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makeDepositTransfers(account, viewingKey);
 
   await proveAndSubmitDeposit(
     transfers,
@@ -580,19 +586,7 @@ async function proveAndSubmitDeposit(
         type: 'invoke_and_apply_action',
         userCalls,
       });
-      const fa = paymasterCtx.feeAction;
-      if (fa && BigInt(fa.amount || '0') !== 0n) {
-        // sponsored_private pays the fee in pool_fee_token (→ USDC); the withdraw must
-        // be in the same token we're depositing so the deposit covers it. A mismatch
-        // (e.g. sponsored → STRK) can't be paid from a USDC-only account.
-        if (BigInt(fa.token) !== BigInt(config.depositToken.address)) {
-          throw new Error(
-            `AVNU pool fee is in ${fa.token}, not the deposit token ${config.depositToken.address}. ` +
-              'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
-          );
-        }
-        feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
-      }
+      feeWithdraw = feeWithdrawFromAction(paymasterCtx.feeAction);
     }
 
     // PROVE-AHEAD reuse: the caller may have generated this exact proof CONCURRENTLY with
