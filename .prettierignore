@@ -1,0 +1,6 @@
+**/dist
+**/node_modules
+**/.turbo
+**/target
+pnpm-lock.yaml
+Scarb.lock

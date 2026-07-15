@@ -1,0 +1,61 @@
+{
+  "name": "@polymarket-privacy/bridge-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./config": {
+      "types": "./dist/core/config.d.ts",
+      "import": "./dist/core/config.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.0",
+    "@noble/hashes": "^1.8.0",
+    "@starkware-libs/starknet-privacy-sdk": "0.14.3-rc.3",
+    "@walletconnect/ethereum-provider": "^2.21.0"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "starknet": "10.0.0-beta.6",
+    "viem": "^2.21.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "starknet": "10.0.0-beta.6",
+    "typescript": "^5.7.2",
+    "viem": "^2.21.0",
+    "vitest": "^2.1.8"
+  }
+}
