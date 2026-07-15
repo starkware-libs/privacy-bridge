@@ -1,5 +1,5 @@
 // useBridgeFundingEstimate — moved from apps/web/src/starknet/useBridgeFundingEstimate.test.ts
-// (Slice Y: apps/web's copy was a bare `export * from '@polymarket-privacy/bridge-core/react'`
+// (Slice Y: apps/web's copy was a bare `export * from '@starkware-libs/starknet-privacy-bridge/react'`
 // re-export shim with no logic of its own; testing it required deep-mocking bridge-core's
 // internal ../core/bridgeFunding module via the now-deleted `bridge-core/core/bridgeFunding`
 // export subpath. That mock only works via a relative path from INSIDE this package, so the

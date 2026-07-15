@@ -32,12 +32,12 @@ import {
   discoverPrivateBalanceForAddress,
   humanizeError,
   EVM_CCTP_SOURCES,
-} from '@polymarket-privacy/bridge-core';
-import type { EthereumProvider } from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge';
+import type { EthereumProvider } from '@starkware-libs/starknet-privacy-bridge/react';
 import {
   useWallet,
   useBridgeFundingEstimate,
-} from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge/react';
 import { useIdentity } from '../IdentityContext';
 import { useNetwork } from '../NetworkContext';
 import { useInFlight } from '../InFlightContext';

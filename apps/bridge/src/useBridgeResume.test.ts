@@ -20,7 +20,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 const getBridgeTransferStatus = vi.fn();
 const resumeBridgeTransfer = vi.fn();
 
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   getBridgeTransferStatus: (...a: unknown[]) => getBridgeTransferStatus(...a),
   // The hook now detects via the async chain-aware reader (#433). Delegate to the same
   // sync spy so every existing mockImplementation/mockReturnValue keeps driving detection.

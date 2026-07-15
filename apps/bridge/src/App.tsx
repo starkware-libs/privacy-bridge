@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useWallet, shortenAddress } from '@polymarket-privacy/bridge-core/react';
+import { useWallet, shortenAddress } from '@starkware-libs/starknet-privacy-bridge/react';
 import { NavBar } from './components/NavBar';
 import { LoginModal } from './components/LoginModal';
 import { MoveIntoPool } from './components/MoveIntoPool';

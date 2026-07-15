@@ -24,9 +24,9 @@ import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
-} from '@polymarket-privacy/bridge-core';
-import { config } from '@polymarket-privacy/bridge-core';
-import { useWallet } from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge';
+import { config } from '@starkware-libs/starknet-privacy-bridge';
+import { useWallet } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useNetwork } from './NetworkContext';
 import { useInFlight } from './InFlightContext';
 

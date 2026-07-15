@@ -33,7 +33,7 @@ const identityState = {
   getSignature: vi.fn(),
 };
 
-vi.mock('@polymarket-privacy/bridge-core/react', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
   WalletProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useWallet: () => walletState,
   useBridgeFundingEstimate: () => ({ status: 'idle' }),

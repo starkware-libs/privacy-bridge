@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { discoverPrivateBalanceForAddress } from '@polymarket-privacy/bridge-core';
+import { discoverPrivateBalanceForAddress } from '@starkware-libs/starknet-privacy-bridge';
 import { useIdentity } from './IdentityContext';
 import { useNetwork } from './NetworkContext';
 

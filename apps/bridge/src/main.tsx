@@ -3,7 +3,7 @@
 import './initBridge';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { WalletProvider } from '@polymarket-privacy/bridge-core/react';
+import { WalletProvider } from '@starkware-libs/starknet-privacy-bridge/react';
 import { InFlightProvider } from './InFlightContext';
 import { NetworkProvider } from './NetworkContext';
 import { IdentityProvider } from './IdentityContext';

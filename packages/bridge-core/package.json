@@ -1,8 +1,10 @@
 {
-  "name": "@polymarket-privacy/bridge-core",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@starkware-libs/starknet-privacy-bridge",
+  "version": "0.1.0",
   "type": "module",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "files": [
     "dist",
     "README.md"
@@ -27,7 +29,8 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@noble/curves": "^1.9.0",

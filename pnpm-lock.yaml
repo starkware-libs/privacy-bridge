@@ -41,7 +41,7 @@ importers:
 
   apps/bridge:
     dependencies:
-      '@polymarket-privacy/bridge-core':
+      '@starkware-libs/starknet-privacy-bridge':
         specifier: workspace:*
         version: link:../../packages/bridge-core
       '@walletconnect/ethereum-provider':

@@ -1,6 +1,6 @@
-import { useWallet, shortenAddress } from '@polymarket-privacy/bridge-core/react';
+import { useWallet, shortenAddress } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useNetwork } from '../NetworkContext';
-import type { Network } from '@polymarket-privacy/bridge-core';
+import type { Network } from '@starkware-libs/starknet-privacy-bridge';
 import { styles } from './styles';
 
 export function NavBar() {

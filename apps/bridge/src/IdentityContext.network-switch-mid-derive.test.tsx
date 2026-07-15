@@ -12,7 +12,7 @@ import { IdentityProvider, useIdentity } from './IdentityContext';
 
 const signMessage = vi.fn();
 
-vi.mock('@polymarket-privacy/bridge-core/react', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
   useWallet: () => ({
     address: '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     signMessage,
@@ -20,7 +20,7 @@ vi.mock('@polymarket-privacy/bridge-core/react', () => ({
   }),
 }));
 
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   BRIDGE_IDENTITY_SIGN_MESSAGE: 'sign-me',
   deriveStarknetPrivateKey: (sig: string) => `pk-${sig}`,
   deriveViewingKey: (_sig: string) => 1n,

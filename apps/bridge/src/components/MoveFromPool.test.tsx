@@ -51,7 +51,7 @@ const net = { epoch: 0 };
 const getBridgeTransferStatus = vi.fn().mockReturnValue(null);
 const resumeBridgeTransfer = vi.fn();
 
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   bridgeOutToWallet: (...args: unknown[]) => bridgeOutToWallet(...args),
   isAnonymizerConfigured: () => true,
   getBridgeTransferStatus: (...args: unknown[]) => getBridgeTransferStatus(...args),
@@ -70,7 +70,7 @@ vi.mock('@polymarket-privacy/bridge-core', () => ({
   },
 }));
 
-vi.mock('@polymarket-privacy/bridge-core/react', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
   useWallet: () => ({ address: '0xEvmAddress0000000000000000000000000000' }),
   useBridgeFundingEstimate: (
     bet: bigint | null,

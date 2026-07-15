@@ -3,7 +3,7 @@
  * component doesn't repeat colours. No external CSS-in-JS dep — plain objects.
  */
 import type { CSSProperties } from 'react';
-import type { Network } from '@polymarket-privacy/bridge-core';
+import type { Network } from '@starkware-libs/starknet-privacy-bridge';
 
 const CLR = {
   bg: '#0f1117',

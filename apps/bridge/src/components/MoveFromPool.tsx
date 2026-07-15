@@ -18,8 +18,8 @@ import {
   config,
   EVM_CCTP_DESTINATIONS,
   waitForForwardedMint,
-} from '@polymarket-privacy/bridge-core';
-import { useWallet, useBridgeFundingEstimate } from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge';
+import { useWallet, useBridgeFundingEstimate } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useIdentity } from '../IdentityContext';
 import { useNetwork } from '../NetworkContext';
 import { useInFlight } from '../InFlightContext';

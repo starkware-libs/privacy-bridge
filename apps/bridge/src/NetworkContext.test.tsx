@@ -24,7 +24,7 @@ const switchEnabled = { value: true };
 // to simulate that (e.g. ['mainnet'] = mainnet env missing).
 const throwForNetworks = { value: [] as string[] };
 
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   // Build-time default network — the switch flips AWAY from this.
   network: 'testnet',
   setActiveNetwork: (n: string) => {
@@ -38,7 +38,7 @@ vi.mock('@polymarket-privacy/bridge-core', () => ({
   isNetworkSwitchEnabled: () => switchEnabled.value,
 }));
 
-vi.mock('@polymarket-privacy/bridge-core/react', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
   useWallet: () => ({ disconnect }),
 }));
 
