@@ -5,8 +5,6 @@
 
 // Key derivation (formerly packages/shared)
 export {
-  IDENTITY_SIGN_MESSAGE,
-  BRIDGE_IDENTITY_SIGN_MESSAGE,
   STARKNET_KEY_LABEL,
   VIEWING_KEY_LABEL,
   POLYGON_EOA_LABEL,

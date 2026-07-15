@@ -112,7 +112,7 @@ const SN_DOMAIN = 25n;
 export const RETURN_FEE_BUFFER_WEI = 500_000n; // 0.5 USDC @ 6dp
 
 export interface BridgeOutArgs {
-  // EVM wallet signature of IDENTITY_SIGN_MESSAGE — the only secret input;
+  // EVM wallet signature of the app's identity sign-message — the only secret input;
   // re-derives the SN account, viewing key, and the per-account Polygon EOA.
   signature: string;
   // Non-secret per-account index (persisted in localStorage) selecting the EOA.
@@ -808,7 +808,7 @@ function humanAmount(amountWei: bigint): string {
 }
 
 export interface BridgeOutToWalletArgs {
-  // EVM wallet signature of IDENTITY_SIGN_MESSAGE — re-derives the SN account +
+  // EVM wallet signature of the app's identity sign-message — re-derives the SN account +
   // viewing key for the pool withdraw/proof. NO per-account EOA, NO account nonce: the
   // cash-out has no return claim.
   signature: string;

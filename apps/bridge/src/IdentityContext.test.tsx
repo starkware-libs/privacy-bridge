@@ -21,7 +21,6 @@ vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
 }));
 
 vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
-  BRIDGE_IDENTITY_SIGN_MESSAGE: 'sign-me',
   deriveStarknetPrivateKey: (sig: string) => `pk-${sig}`,
   deriveViewingKey: (_sig: string) => 1n,
   deriveStarknetAccount: (pk: string) => ({ address: `sn-${pk}`, publicKey: '0x0' }),

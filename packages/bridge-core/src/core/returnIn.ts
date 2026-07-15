@@ -663,7 +663,7 @@ export interface FreshReturnPlan {
 }
 
 export interface ReturnToPoolArgs {
-  // EVM wallet signature of IDENTITY_SIGN_MESSAGE — the only secret input;
+  // EVM wallet signature of the app's identity sign-message — the only secret input;
   // re-derives the viewing key → account nonce → bound commitment internally
   // (in-memory only, never logged/persisted).
   signature: string;
@@ -949,7 +949,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
 //     so a retry replays safely.
 // ---------------------------------------------------------------------------
 export interface RecoverBridgeInArgs {
-  // EVM wallet signature of IDENTITY_SIGN_MESSAGE (in-memory only, never logged).
+  // EVM wallet signature of the app's identity sign-message (in-memory only, never logged).
   signature: string;
   // Non-secret per-account index → the deterministic per-return nonce/commitment.
   accountIndex: number;

@@ -3,13 +3,7 @@
 // Design: ../../../../docs/key-derivation.md
 // (Absorbed from the former packages/shared — see docs/bridge-sdk-refactor.md Slice Z.)
 
-export {
-  IDENTITY_SIGN_MESSAGE,
-  BRIDGE_IDENTITY_SIGN_MESSAGE,
-  STARKNET_KEY_LABEL,
-  VIEWING_KEY_LABEL,
-  POLYGON_EOA_LABEL,
-} from './messages.js';
+export { STARKNET_KEY_LABEL, VIEWING_KEY_LABEL, POLYGON_EOA_LABEL } from './messages.js';
 export { deriveStarknetPrivateKey, deriveStarknetAccount } from './starknet-key.js';
 export type { StarknetAccount } from './starknet-key.js';
 export { MAX_VIEWING_KEY, deriveViewingKey } from './viewing-key.js';
