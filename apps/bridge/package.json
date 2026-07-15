@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@polymarket-privacy/bridge-core": "workspace:*",
+    "@starkware-libs/starknet-privacy-bridge": "workspace:*",
     "@walletconnect/ethereum-provider": "^2.21.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

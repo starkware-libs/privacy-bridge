@@ -36,8 +36,8 @@ import {
   type BridgeDirection,
   type BridgePhase,
   type BridgeTransferStatus,
-} from '@polymarket-privacy/bridge-core';
-import type { EthereumProvider } from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge';
+import type { EthereumProvider } from '@starkware-libs/starknet-privacy-bridge/react';
 
 const USDC_DECIMALS = 6;
 

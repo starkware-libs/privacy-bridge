@@ -1,4 +1,4 @@
-import { useWallet } from '@polymarket-privacy/bridge-core/react';
+import { useWallet } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useNetwork } from '../NetworkContext';
 import { styles } from './styles';
 

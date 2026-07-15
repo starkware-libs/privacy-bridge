@@ -29,7 +29,7 @@ const resumeBridgeTransfer = vi
 const NET_AMOUNT_MICRO = 1_000_000n; // 1.00 USDC — what the user types
 const GROSS_FUND_MICRO = 1_050_000n; // net + CCTP fee + reserve — must be the burn amount
 
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   moveIntoPool: (...args: unknown[]) => moveIntoPool(...args),
   hasInflightDeposit: (...args: unknown[]) => hasInflightDeposit(...args),
   discoverPrivateBalanceForAddress: (...args: unknown[]) =>
@@ -68,7 +68,7 @@ const bridgeFundingEstimate = vi.fn((..._args: unknown[]) => ({
 // Mutable so a test can bump it (a testnet↔mainnet swap) and re-render.
 let currentNetworkEpoch = 0;
 
-vi.mock('@polymarket-privacy/bridge-core/react', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge/react', () => ({
   useWallet: () => ({
     address: '0xEvmAddress0000000000000000000000000000',
     // A non-source wallet reply so the seed effect falls back to the default; the

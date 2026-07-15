@@ -35,9 +35,9 @@ import {
   setActiveNetwork,
   hasAnyInflightTransfer,
   isNetworkSwitchEnabled,
-} from '@polymarket-privacy/bridge-core';
-import type { Network } from '@polymarket-privacy/bridge-core';
-import { useWallet } from '@polymarket-privacy/bridge-core/react';
+} from '@starkware-libs/starknet-privacy-bridge';
+import type { Network } from '@starkware-libs/starknet-privacy-bridge';
+import { useWallet } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useInFlight } from './InFlightContext';
 
 // Human-readable chain names shown in the UI.

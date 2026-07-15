@@ -29,7 +29,7 @@ const discover = vi.fn(
       pending.push({ resolve, reject });
     }),
 );
-vi.mock('@polymarket-privacy/bridge-core', () => ({
+vi.mock('@starkware-libs/starknet-privacy-bridge', () => ({
   discoverPrivateBalanceForAddress: () => discover(),
 }));
 

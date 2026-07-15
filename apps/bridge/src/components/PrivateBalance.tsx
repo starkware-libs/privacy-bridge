@@ -6,7 +6,7 @@
  * value we keep showing it plus a muted "(updating…)" hint rather than a red box.
  */
 
-import { config, formatUsdcCents } from '@polymarket-privacy/bridge-core';
+import { config, formatUsdcCents } from '@starkware-libs/starknet-privacy-bridge';
 import { usePrivateBalance } from '../usePrivateBalance';
 import { styles } from './styles';
 
