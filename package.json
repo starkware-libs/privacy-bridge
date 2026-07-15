@@ -18,7 +18,8 @@
   },
   "pnpm": {
     "overrides": {
-      "axios": "1.18.0"
+      "axios": "1.18.0",
+      "vite": "^6.4.3"
     }
   },
   "devDependencies": {
