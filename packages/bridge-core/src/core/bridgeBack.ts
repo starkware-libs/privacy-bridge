@@ -75,7 +75,7 @@ import {
 import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
 
 export interface ClaimToPoolArgs {
-  // EVM wallet signature of IDENTITY_SIGN_MESSAGE — the only secret input;
+  // EVM wallet signature of the app's identity sign-message — the only secret input;
   // re-derives the SN account + viewing key (in-memory only, never logged).
   signature: string;
   // Non-secret per-account index (kept for signature symmetry with bridgeOut/returnIn).

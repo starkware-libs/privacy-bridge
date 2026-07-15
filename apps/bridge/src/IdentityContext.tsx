@@ -20,13 +20,13 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  BRIDGE_IDENTITY_SIGN_MESSAGE,
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
 } from '@starkware-libs/starknet-privacy-bridge';
 import { config } from '@starkware-libs/starknet-privacy-bridge';
 import { useWallet } from '@starkware-libs/starknet-privacy-bridge/react';
+import { BRIDGE_IDENTITY_SIGN_MESSAGE } from './identityMessage';
 import { useNetwork } from './NetworkContext';
 import { useInFlight } from './InFlightContext';
 

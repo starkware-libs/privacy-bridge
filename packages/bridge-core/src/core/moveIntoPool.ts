@@ -38,7 +38,7 @@ export type MoveStep = 'deploy' | 'register' | 'deposit';
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';
 
 export interface MoveIntoPoolArgs {
-  // Raw wallet signature of IDENTITY_SIGN_MESSAGE — the ONLY secret input; the SN
+  // Raw wallet signature of the app's identity sign-message — the ONLY secret input; the SN
   // account, viewing key and private key are re-derived internally, never logged
   // or persisted.
   signature: `0x${string}`;

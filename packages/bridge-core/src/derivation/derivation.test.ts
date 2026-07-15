@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ec, hash } from 'starknet';
-import {
-  IDENTITY_SIGN_MESSAGE,
-  BRIDGE_IDENTITY_SIGN_MESSAGE,
-  STARKNET_KEY_LABEL,
-  VIEWING_KEY_LABEL,
-} from './messages.js';
+import { STARKNET_KEY_LABEL, VIEWING_KEY_LABEL } from './messages.js';
 import { deriveStarknetAccount, deriveStarknetPrivateKey } from './starknet-key.js';
 import { MAX_VIEWING_KEY, deriveViewingKey } from './viewing-key.js';
 
@@ -29,27 +24,6 @@ const CLASS_HASH = '0x61dac032f228abef9c6626f995015233097ae253a7f72d68552db02f29
 const HEX_RE = /^0x[0-9a-f]+$/;
 
 describe('messages', () => {
-  it('binds the identity message to the app and pins a version', () => {
-    expect(IDENTITY_SIGN_MESSAGE).toMatch(/Version: 1/);
-    expect(IDENTITY_SIGN_MESSAGE.toLowerCase()).toContain('starknet');
-    // Reassures the user it is off-chain / gasless.
-    expect(IDENTITY_SIGN_MESSAGE.toLowerCase()).toContain('gas');
-  });
-
-  it('binds the bridge-app identity message to its own app and version', () => {
-    expect(BRIDGE_IDENTITY_SIGN_MESSAGE).toMatch(/Version: 2/);
-    expect(BRIDGE_IDENTITY_SIGN_MESSAGE.toLowerCase()).toContain('bridge');
-    expect(BRIDGE_IDENTITY_SIGN_MESSAGE.toLowerCase()).toContain('starknet');
-    expect(BRIDGE_IDENTITY_SIGN_MESSAGE.toLowerCase()).toContain('gas');
-  });
-
-  it('keeps the two app identity messages distinct (isolated identities)', () => {
-    // A different message => a different signature => a different derived
-    // identity. The trade and bridge apps derive DELIBERATELY-isolated
-    // identities, so these strings must never converge (see architecture.md).
-    expect(BRIDGE_IDENTITY_SIGN_MESSAGE).not.toBe(IDENTITY_SIGN_MESSAGE);
-  });
-
   it('uses distinct, versioned domain-separation labels', () => {
     expect(STARKNET_KEY_LABEL).toBe('starknet-account:v1');
     expect(VIEWING_KEY_LABEL).toBe('viewing-key:v1');
