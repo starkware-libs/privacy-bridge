@@ -62,17 +62,24 @@ export function useBridgeFundingEstimate(
   // `extraReserveMicro` is a GENERIC extra USDC reserve (micro) to hold in the wallet
   // on top of the CCTP fee/swap/cushion — e.g. apps/web's Polymarket taker fee.
   // `extraReserveLabel` names it in the funding hint. bridge-core stays app-agnostic.
+  // `fast` selects the CCTP finality tier the fee is quoted for: true = Fast (threshold
+  // 1000, ~seconds, ~0.14% protocol fee); false = Standard (threshold 2000, minutes,
+  // free). Undefined → fetchBridgeFundingPlan falls back to config.cctp.fast, so the
+  // displayed reserve matches the burn's default tier. Lets a Fast/Standard toggle
+  // re-quote the reserve live.
   opts?: {
     cap?: BridgeFundingCap;
     destChainId?: number;
     extraReserveMicro?: bigint;
     extraReserveLabel?: string;
+    fast?: boolean;
   },
 ): BridgeFundingEstimate {
   const [estimate, setEstimate] = useState<BridgeFundingEstimate>({ status: 'idle' });
   const cap = opts?.cap;
   const destChainId = opts?.destChainId;
   const extraReserveMicro = opts?.extraReserveMicro ?? 0n;
+  const fast = opts?.fast;
 
   useEffect(() => {
     if (betWei === null || betWei <= 0n) {
@@ -109,6 +116,7 @@ export function useBridgeFundingEstimate(
             sourceDomain,
             destDomain,
             extraReserveMicro,
+            fast,
           });
           if (cancelled) return;
           const exceedsCap = cap !== undefined && plan.fundMicro > cap.amountMicro;
@@ -148,6 +156,7 @@ export function useBridgeFundingEstimate(
     cap?.amountMicro,
     cap?.symbol,
     extraReserveMicro,
+    fast,
   ]);
 
   return estimate;

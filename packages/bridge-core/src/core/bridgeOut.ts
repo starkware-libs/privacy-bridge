@@ -460,6 +460,13 @@ export interface FundAccountFromPoolArgs {
   // config.cctp.defaultDestChainId. Threaded to bridgeOut (Buy calldata dest_domain)
   // and to the attest/mint leg (the forwarded mint's expected destination domain).
   destChainId?: number;
+  // Per-call CCTP finality tier for the FRESH burn: true = Fast (threshold 1000,
+  // ~seconds, ~0.14% protocol fee); false = Standard (threshold 2000, minutes, free).
+  // Defaults to config.cctp.fast when unset. Drives BOTH the pre-burn fee quote AND the
+  // burn's declared min_finality_threshold so the fee and the finality always agree. The
+  // RESUME path IGNORES this — a resumed burn already committed to its original tier
+  // (re-quoting/re-burning would double-spend), so the fast selection only applies fresh.
+  fast?: boolean;
   // Opaque, NON-SECRET app metadata stored in the cursor + echoed in the result.
   selection?: Record<string, unknown>;
   // Fires (step,'running') before each leg and (step,'done'|'error') after; the app
@@ -663,7 +670,10 @@ export async function fundAccountFromPool(
     const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
 
     try {
-      const fast = config.cctp.fast;
+      // Per-call tier for THIS fresh burn (Fast/Standard); falls back to the deployment
+      // default (config.cctp.fast) when the caller passes no `fast`. The same flag sizes
+      // the fee quote AND the burn's declared finality just below, so they never diverge.
+      const fast = args.fast ?? config.cctp.fast;
       // FORWARDING-FEE FLOOR (pre-flight): the Forwarding Service deducts its fee IN
       // USDC from the burn, so the amount must clear it — quote the live max_fee and
       // reject a sub-floor amount with a CLEAR error here, rather than let the

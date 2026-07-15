@@ -122,6 +122,16 @@ vi.mock('../derivation/index', () => ({
   deriveAccountNonce,
 }));
 
+// The privacy_invoke(BuyParams) calldata the REAL bridgeOut hands the SDK builder,
+// captured from the last .invoke() so a test can read the burn's declared
+// min_finality_threshold (calldata[6]) — mirrors bridgeOut.test.ts's invokeResult.
+let lastInvokeCalldata: unknown[] | undefined;
+
+// calldata entries are decimal/hex strings or bigints; normalize for comparison.
+function asBig(felt: unknown): bigint {
+  return typeof felt === 'bigint' ? felt : BigInt(felt as string);
+}
+
 // SDK fluent builder recorder (mirrors bridgeOut.test.ts).
 function makeBuilder() {
   const builder: Record<string, unknown> = {};
@@ -132,7 +142,10 @@ function makeBuilder() {
   builder.inputs = vi.fn(() => builder);
   builder.withdraw = vi.fn(() => builder);
   builder.surplusTo = vi.fn(() => builder);
-  builder.invoke = vi.fn(() => builder);
+  builder.invoke = vi.fn((cb: () => { contractAddress: string; calldata: unknown[] }) => {
+    lastInvokeCalldata = cb().calldata;
+    return builder;
+  });
   builder.done = vi.fn(() => builder);
   builder.createProofInvocation = vi.fn(async () => ({ invocation: true }));
   return builder;
@@ -231,6 +244,7 @@ vi.mock('./cctpFees', () => ({
 }));
 
 import { fundAccountFromPool, readInflightBurn } from './bridgeOut';
+import { config } from './config';
 import { invalidateManagerNonce } from './proven-submit';
 import { submitAndTrack } from './tx';
 
@@ -281,6 +295,7 @@ function fund(
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  lastInvokeCalldata = undefined;
   invalidateManagerNonce();
   transfers.build.mockImplementation(() => makeBuilder());
   execute.mockResolvedValue({ transaction_hash: BURN_TX });
@@ -291,7 +306,15 @@ beforeEach(() => {
   computeClaimH.mockReturnValue(COMMITMENT_H);
   resolveSignature.mockResolvedValue(SIGNATURE);
   resolveDepositWallet.mockResolvedValue(DEPOSIT_WALLET);
-  fetchForwardMaxFee.mockResolvedValue(FEE_QUOTE);
+  // Mirror the real fetchForwardMaxFee: the quote's finalityThreshold reflects the
+  // requested tier (Fast 1000 / Standard 2000), so bridgeOut's fee/finality
+  // burn-boundary guard sees a matching pair on both the fast and standard paths.
+  fetchForwardMaxFee.mockImplementation(
+    async (_amount: bigint, opts?: { fast?: boolean }) => ({
+      ...FEE_QUOTE,
+      finalityThreshold: opts?.fast ? 1000 : 2000,
+    }),
+  );
   assertAboveForwardFloor.mockReturnValue(undefined);
   waitForBridgedMint.mockResolvedValue({
     forwardTxHash: FORWARD_TX,
@@ -369,6 +392,44 @@ describe('fundAccountFromPool — happy path (fresh burn)', () => {
     await expect(fund()).rejects.toThrow(/forwarding-fee floor/i);
     expect(mSubmitAndTrack).not.toHaveBeenCalled();
     expect(localStorage.getItem(BID_INDEX_KEY)).toBeNull();
+  });
+});
+
+describe('fundAccountFromPool — per-call CCTP finality tier (fast)', () => {
+  // The burn declares min_finality_threshold as calldata[6] of privacy_invoke(BuyParams):
+  // [mr_lo, mr_hi, amt_lo, amt_hi, fee_lo, fee_hi, finality, dest_domain].
+  const FAST_FINALITY = 1000n;
+  const STANDARD_FINALITY = 2000n;
+
+  it('fast:true quotes Fast and burns Fast finality (1000)', async () => {
+    await fund({ fast: true });
+    // Pre-burn fee quote requested for the Fast tier.
+    expect(fetchForwardMaxFee).toHaveBeenCalledWith(
+      AMOUNT,
+      expect.objectContaining({ fast: true }),
+    );
+    // The burn's declared min_finality_threshold matches (fund-safety: quote + burn agree).
+    expect(lastInvokeCalldata).toBeDefined();
+    expect(asBig(lastInvokeCalldata![6])).toBe(FAST_FINALITY);
+  });
+
+  it('fast:false quotes Standard and burns Standard finality (2000)', async () => {
+    await fund({ fast: false });
+    expect(fetchForwardMaxFee).toHaveBeenCalledWith(
+      AMOUNT,
+      expect.objectContaining({ fast: false }),
+    );
+    expect(asBig(lastInvokeCalldata![6])).toBe(STANDARD_FINALITY);
+  });
+
+  it('omitted falls back to config.cctp.fast for both the quote and the burn', async () => {
+    await fund();
+    const expectedFast = config.cctp.fast;
+    expect(fetchForwardMaxFee).toHaveBeenCalledWith(
+      AMOUNT,
+      expect.objectContaining({ fast: expectedFast }),
+    );
+    expect(asBig(lastInvokeCalldata![6])).toBe(expectedFast ? FAST_FINALITY : STANDARD_FINALITY);
   });
 });
 
