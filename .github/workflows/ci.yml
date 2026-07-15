@@ -57,3 +57,58 @@ jobs:
       - name: scarb test
         if: steps.guard.outputs.run == 'true'
         run: scarb test
+
+  # Builds + typechecks + tests the TypeScript workspace (bridge-core + apps/bridge).
+  # Guarded like `cairo` so it stays a stable, always-reporting check even on a
+  # bootstrap `main` with no pnpm workspace yet. The pool SDK
+  # (@starkware-libs/starknet-privacy-sdk) installs from GitHub Packages; the
+  # automatic GITHUB_TOKEN (packages: read) authenticates to the public package.
+  # If a cross-repo package read is ever rejected, swap in a PAT secret here.
+  bridge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect JS workspace
+        id: guard
+        run: |
+          if [ -f package.json ] && [ -f pnpm-workspace.yaml ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No pnpm workspace at repo root yet — skipping JS build/test."
+          fi
+
+      - name: Set up pnpm
+        if: steps.guard.outputs.run == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9.15.0'
+
+      - name: Set up Node
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        if: steps.guard.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        if: steps.guard.outputs.run == 'true'
+        run: pnpm build
+
+      - name: Typecheck
+        if: steps.guard.outputs.run == 'true'
+        run: pnpm typecheck
+
+      - name: Test
+        if: steps.guard.outputs.run == 'true'
+        run: pnpm test
