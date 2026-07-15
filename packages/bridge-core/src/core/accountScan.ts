@@ -28,12 +28,26 @@ export const DEFAULT_GAP_LIMIT = 20;
 // account-store.ts's own bounds).
 export const MAX_SCAN_INDICES = 1024;
 
-// Walk account indices from 0, collecting every consumed one, stopping after
-// `gapLimit` consecutive empties (or `maxIndices`). Pure: all I/O is in `probe`,
-// so this is fully unit-testable without RPC.
+// Walk account indices from `startIndex` (default 0), collecting every consumed
+// one, stopping after `gapLimit` consecutive empties (or `maxIndices`). Pure:
+// all I/O is in `probe`, so this is fully unit-testable without RPC.
+//
+// `startIndex > 0` is a fast-path for callers whose LOCAL index counter is
+// authoritative (a normal same-device session): indices [0, startIndex) are
+// treated as already-consumed and NOT re-probed, so the forward walk begins at
+// `startIndex` with a fresh consecutive-empty counter. This skips the ~27s
+// from-0 re-confirmation on every first-buy-of-session.
+//
+// FUND-SAFETY (anti-reuse): starting from the cached counter is still safe
+// against reuse — even a reuse on ANOTHER device lands at an index >= the local
+// cache (indices are only ever handed out forward), so it sits at or beyond
+// `startIndex` and is still probed by the forward walk. We only skip
+// re-confirming indices the local counter already claims as used; we never skip
+// the forward scan. `startIndex` 0/undefined = the full from-0 recovery walk
+// (wiped-storage recovery, Sell-tab discoverPositions), byte-for-byte unchanged.
 export async function gapLimitScan(
   probe: AccountProbe,
-  opts: { gapLimit?: number; maxIndices?: number } = {},
+  opts: { gapLimit?: number; maxIndices?: number; startIndex?: number } = {},
 ): Promise<ScannedAccount[]> {
   const rawGapLimit = opts.gapLimit ?? DEFAULT_GAP_LIMIT;
   // gapLimit is meant to tolerate N consecutive empties before stopping. A
@@ -43,9 +57,12 @@ export async function gapLimitScan(
   // tolerance is 1 (stop immediately after the first empty).
   const gapLimit = rawGapLimit > 0 ? rawGapLimit : 1;
   const maxIndices = Math.min(opts.maxIndices ?? MAX_SCAN_INDICES, MAX_SCAN_INDICES);
+  // `maxIndices` stays an ABSOLUTE cap on the index, so a large cached
+  // startIndex can never push the walk past the hard bound.
+  const startIndex = Number.isInteger(opts.startIndex) && opts.startIndex! > 0 ? opts.startIndex! : 0;
   const found: ScannedAccount[] = [];
   let consecutiveEmpty = 0;
-  for (let accountIndex = 0; accountIndex < maxIndices && consecutiveEmpty < gapLimit; accountIndex++) {
+  for (let accountIndex = startIndex; accountIndex < maxIndices && consecutiveEmpty < gapLimit; accountIndex++) {
     const hit = await probe(accountIndex);
     if (hit) {
       found.push(hit);
@@ -91,6 +108,7 @@ export async function scanAccountEoas(
   opts: {
     gapLimit?: number;
     maxIndices?: number;
+    startIndex?: number;
     isDepositWalletDeployed?: DepositWalletDeployedProbe;
   } = {},
 ): Promise<ScannedAccount[]> {
@@ -123,17 +141,28 @@ export async function scanAccountEoas(
 // N derived wallets through one RPC, linking them at that endpoint — see
 // docs/threat-model.md.
 export async function scanDerivedAccounts(
-  args: { evmAddress: string; signature: string; resolveDepositWallet: DepositWalletResolver },
+  args: {
+    evmAddress: string;
+    signature: string;
+    resolveDepositWallet: DepositWalletResolver;
+    // The caller's authoritative local next-index (e.g. `peekNextBidIndex`).
+    // Skips re-probing indices [0, startIndex) the local counter already claims
+    // as used — the whole point of the fast-path (see `gapLimitScan`). Defaults
+    // to 0 (the full from-0 recovery walk) so the wiped-storage recovery path
+    // and Sell-tab discoverPositions callers are unaffected.
+    startIndex?: number;
+  },
   scan?: (
     signature: string,
     resolveDepositWallet: DepositWalletResolver,
-    opts?: { gapLimit?: number; maxIndices?: number },
+    opts?: { gapLimit?: number; maxIndices?: number; startIndex?: number },
   ) => Promise<ScannedAccount[]>,
 ): Promise<DerivedAccountRecord[]> {
   const { evmAddress, signature, resolveDepositWallet } = args;
+  const startIndex = Number.isInteger(args.startIndex) && args.startIndex! > 0 ? args.startIndex! : 0;
   const doScan = scan ?? scanAccountEoas;
   if (!evmAddress) return [];
-  const scanned = await doScan(signature, resolveDepositWallet);
+  const scanned = await doScan(signature, resolveDepositWallet, { startIndex });
   for (const account of scanned) {
     upsertDerivedAccount(evmAddress, {
       accountIndex: account.accountIndex,
@@ -150,8 +179,13 @@ export async function scanDerivedAccounts(
   // used index — the cross-browser reuse guard (code-style.md "bid-index
   // cross-browser reuse"). Mirrors apps/web/src/starknet/bidScan.ts
   // seedBidIndexFromChain.
-  if (scanned.length > 0) {
-    const highest = scanned.reduce((max, a) => Math.max(max, a.accountIndex), -1);
+  // Indices [0, startIndex) are treated as USED (the local counter is
+  // authoritative for them), so the highest-used index is at least
+  // `startIndex - 1`, raised by any forward hit. Seeding `highest + 1` keeps the
+  // counter monotonic and never regresses below the caller's cache.
+  const forwardHighest = scanned.reduce((max, a) => Math.max(max, a.accountIndex), -1);
+  const highest = Math.max(startIndex - 1, forwardHighest);
+  if (highest >= 0) {
     seedAccountIndex(evmAddress, highest + 1);
   }
   return readDerivedAccounts(evmAddress);
