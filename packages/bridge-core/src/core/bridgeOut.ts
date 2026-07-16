@@ -336,7 +336,7 @@ export interface InflightBurn {
   // The account CHANNEL this burn was funded from (see account-store). Persisted so
   // a RESUME and the legacy-cursor migration route the record to the right channel;
   // absent for default-channel burns (back-compat with older cursors).
-  counterId?: string;
+  channel?: string;
 }
 
 type InflightBurnMap = Record<string, InflightBurn>;
@@ -505,7 +505,7 @@ export interface FundAccountFromPoolArgs {
   // burn is still in flight resumes THAT burn instead of starting a fresh one. So
   // callers must serialize funding to one in-flight burn per address across channels
   // (the same single-slot invariant that predates channels), or namespace the cursor.
-  counterId?: string;
+  channel?: string;
   // Deterministic-test knobs forwarded to the mint pollers.
   intervalMs?: number;
   timeoutMs?: number;
@@ -532,7 +532,7 @@ export interface FundAccountFromPoolResult {
   // The account CHANNEL this fund used (fresh: the arg; resume: the cursor's). Absent
   // = the default channel. Lets the app record the (possibly resumed) account under
   // the correct channel's store.
-  counterId?: string;
+  channel?: string;
 }
 
 // Read-only {eoaAddress, amountHuman} view of the persisted in-flight burn for an
@@ -618,7 +618,7 @@ export async function fundAccountFromPool(
     selection,
     onStep,
     onBurned,
-    counterId,
+    channel,
   } = args;
   // Resolve the chosen destination chain up front (fail loud on an unsupported id,
   // before any sign/burn). Its domain drives the CCTP fee route + the forwarded-mint
@@ -659,7 +659,7 @@ export async function fundAccountFromPool(
   let resolvedIndex = accountIndex;
   let cursorSelection: Record<string, unknown> | undefined = selection;
   // The channel this fund belongs to (fresh: the arg; resume: the cursor's).
-  let resolvedCounterId: string | undefined = counterId;
+  let resolvedChannel: string | undefined = channel;
   // True when resuming a pre-migration cursor that burned WITHOUT the
   // Forwarding-Service hook: Circle never generated a forwardTxHash for those, so
   // waitForBridgedMint would loop for 30 min then time out — surface a terminal
@@ -676,7 +676,7 @@ export async function fundAccountFromPool(
     depositWallet = inflight.depositWallet ?? inflight.eoaAddress;
     resolvedIndex = inflight.bidIndex;
     cursorSelection = inflight.selection;
-    resolvedCounterId = inflight.counterId;
+    resolvedChannel = inflight.channel;
     // Resolve the mint-watch destination domain from the burn's PERSISTED chain
     // (authoritative — the burn already committed to it), NOT the resume-time arg.
     // Fall back to the arg's domain only for old cursors that predate evmChainId.
@@ -762,13 +762,13 @@ export async function fundAccountFromPool(
         evmChainId: resolveEvmCctpDestination(destChainId).chainId,
         amountHuman: humanAmount(amount),
         ...(cursorSelection ? { selection: cursorSelection } : {}),
-        ...(counterId !== undefined ? { counterId } : {}),
+        ...(channel !== undefined ? { channel } : {}),
       });
       // Consume the index only AFTER the resume cursor is durable, so a pre-burn
       // failure (fee quote, signature, proving) doesn't burn an index either.
-      // `counterId` selects which channel's counter is advanced (the default
+      // `channel` selects which channel's counter is advanced (the default
       // channel for existing callers).
-      consumeAccountIndex(evmAddress, accountIndex, counterId);
+      consumeAccountIndex(evmAddress, accountIndex, channel);
       onBurned?.({ burnTxHash, eoaAddress, depositWallet, accountIndex });
       emit(
         'bridge',
@@ -845,7 +845,7 @@ export async function fundAccountFromPool(
     commitmentH,
     forwardTxHash,
     ...(cursorSelection ? { selection: cursorSelection } : {}),
-    ...(resolvedCounterId !== undefined ? { counterId: resolvedCounterId } : {}),
+    ...(resolvedChannel !== undefined ? { channel: resolvedChannel } : {}),
   };
 }
 

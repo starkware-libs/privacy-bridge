@@ -74,8 +74,8 @@ const ACCOUNTS_KEY = 'pmp.bids';
 const INFLIGHT_BURN_KEY = 'pmp.inflightBurn';
 
 // An account CHANNEL groups a counter + its record store under one id. OMITTING
-// counterId (the default) keeps the legacy `pmp.bids` / `pmp.bidIndex` keys, so
-// existing data and every current caller behave identically. Passing a counterId
+// channel (the default) keeps the legacy `pmp.bids` / `pmp.bidIndex` keys, so
+// existing data and every current caller behave identically. Passing a channel
 // namespaces a SEPARATE counter + record store (`pmp.bids:<id>` / `pmp.bidIndex:<id>`),
 // letting one EVM identity hold several INDEPENDENT channels — e.g. a reused-wallet
 // "fast session" whose index allocation + records never advance or poison the
@@ -83,13 +83,13 @@ const INFLIGHT_BURN_KEY = 'pmp.inflightBurn';
 // is a valid, distinct channel id (no reserved word), matching this store's other
 // optional fields. A channel is pure STORAGE namespacing: addresses still derive
 // from (signature, accountIndex), unchanged — a channel's index band is the
-// caller's concern. counterId is CALLER-TRUSTED (a compile-time constant, not
+// caller's concern. channel is CALLER-TRUSTED (a compile-time constant, not
 // external input).
 
 // A channel's record-store key: the legacy key when no channel is given, a per-id
 // suffix otherwise. The default (undefined) MUST stay `pmp.bids` (back-compat).
-function accountsKeyFor(counterId?: string): string {
-  return counterId === undefined ? ACCOUNTS_KEY : `${ACCOUNTS_KEY}:${counterId}`;
+function accountsKeyFor(channel?: string): string {
+  return channel === undefined ? ACCOUNTS_KEY : `${ACCOUNTS_KEY}:${channel}`;
 }
 
 type AccountsMap = Record<string, DerivedAccountRecord[]>;
@@ -163,9 +163,9 @@ export function isValidAccountRecord(value: unknown): value is DerivedAccountRec
   return true;
 }
 
-function readAccountsMap(counterId?: string): AccountsMap {
+function readAccountsMap(channel?: string): AccountsMap {
   try {
-    const raw = localStorage.getItem(accountsKeyFor(counterId));
+    const raw = localStorage.getItem(accountsKeyFor(channel));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object') return parsed as AccountsMap;
@@ -175,9 +175,9 @@ function readAccountsMap(counterId?: string): AccountsMap {
   }
 }
 
-function writeAccountsMap(map: AccountsMap, counterId?: string): void {
+function writeAccountsMap(map: AccountsMap, channel?: string): void {
   try {
-    localStorage.setItem(accountsKeyFor(counterId), JSON.stringify(map));
+    localStorage.setItem(accountsKeyFor(channel), JSON.stringify(map));
   } catch {
     // Best-effort: the history list is a convenience; a storage failure must not
     // break the funding flow (the flow's own resume cursor is written separately).
@@ -188,10 +188,10 @@ function writeAccountsMap(map: AccountsMap, counterId?: string): void {
 // corrupt record.
 export function readDerivedAccounts(
   evmAddress: string,
-  counterId?: string,
+  channel?: string,
 ): DerivedAccountRecord[] {
   if (!evmAddress) return [];
-  const rawList = readAccountsMap(counterId)[evmAddress.toLowerCase()];
+  const rawList = readAccountsMap(channel)[evmAddress.toLowerCase()];
   const list: unknown[] = Array.isArray(rawList) ? rawList : [];
   return list
     .map(migrateAccountIndexKey)
@@ -219,11 +219,11 @@ const LIFECYCLE_RANK: Record<AccountLifecycle, number> = {
 export function upsertDerivedAccount(
   evmAddress: string,
   patch: Partial<DerivedAccountRecord> & { accountIndex: number },
-  counterId?: string,
+  channel?: string,
 ): void {
   if (!evmAddress) return;
   const key = evmAddress.toLowerCase();
-  const map = readAccountsMap(counterId);
+  const map = readAccountsMap(channel);
   const rawEntry = map[key];
   const list: DerivedAccountRecord[] = (
     Array.isArray(rawEntry) ? rawEntry.map(migrateAccountIndexKey) : []
@@ -250,7 +250,7 @@ export function upsertDerivedAccount(
   const next = list.filter((record) => record.accountIndex !== patch.accountIndex);
   next.push(merged);
   map[key] = next;
-  writeAccountsMap(map, counterId);
+  writeAccountsMap(map, channel);
 }
 
 // Keep the higher-ranked lifecycle so updates never regress a settled account.
@@ -291,7 +291,7 @@ export function migrateLegacyAccounts(evmAddress: string): void {
       // records it for non-default channels. Without this, a session-channel burn
       // would seed its reserved-band index into the DEFAULT `pmp.bids`, skewing the
       // default peekNextAccountIndex up into the band (Bugbot). Absent → default.
-      const counterId = typeof inflight.counterId === 'string' ? inflight.counterId : undefined;
+      const channel = typeof inflight.channel === 'string' ? inflight.channel : undefined;
       upsertDerivedAccount(
         evmAddress,
         {
@@ -310,7 +310,7 @@ export function migrateLegacyAccounts(evmAddress: string): void {
           lifecycle: 'attesting',
           timestamp: Date.now(),
         },
-        counterId,
+        channel,
       );
     }
   } catch {
@@ -356,8 +356,8 @@ const ACCOUNT_INDEX_KEY = 'pmp.bidIndex';
 
 // A channel's counter key: the legacy key when no channel is given, a per-id
 // suffix otherwise (mirrors accountsKeyFor). The default MUST stay `pmp.bidIndex`.
-function accountIndexKeyFor(counterId?: string): string {
-  return counterId === undefined ? ACCOUNT_INDEX_KEY : `${ACCOUNT_INDEX_KEY}:${counterId}`;
+function accountIndexKeyFor(channel?: string): string {
+  return channel === undefined ? ACCOUNT_INDEX_KEY : `${ACCOUNT_INDEX_KEY}:${channel}`;
 }
 
 type AccountIndexMap = Record<string, number>;
@@ -368,9 +368,9 @@ type AccountIndexMap = Record<string, number>;
 // derive the WRONG per-account EOA. Dropping bad entries falls back to the
 // default-0 first-account behavior for that address, which is safe
 // (nextAccountIndex still reconciles against existing accounts).
-function readAccountIndexMap(counterId?: string): AccountIndexMap {
+function readAccountIndexMap(channel?: string): AccountIndexMap {
   try {
-    const raw = localStorage.getItem(accountIndexKeyFor(counterId));
+    const raw = localStorage.getItem(accountIndexKeyFor(channel));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -403,13 +403,13 @@ export function nextAccountIndex(counter: number, accounts: DerivedAccountRecord
 // The next unused per-account index for an EVM address (0 on first account).
 export function peekNextAccountIndex(
   evmAddress: string,
-  counterId?: string,
+  channel?: string,
 ): number {
-  const map = readAccountIndexMap(counterId);
+  const map = readAccountIndexMap(channel);
   const counter = map[evmAddress.toLowerCase()] ?? 0;
   // Reconcile against THIS channel's records only, so a channel's records never
   // advance another channel's next index.
-  return nextAccountIndex(counter, readDerivedAccounts(evmAddress, counterId));
+  return nextAccountIndex(counter, readDerivedAccounts(evmAddress, channel));
 }
 
 // Persist `index` as consumed so the NEXT account uses `index + 1`.
@@ -418,12 +418,12 @@ export function peekNextAccountIndex(
 export function consumeAccountIndex(
   evmAddress: string,
   index: number,
-  counterId?: string,
+  channel?: string,
 ): void {
   try {
-    const map = readAccountIndexMap(counterId);
+    const map = readAccountIndexMap(channel);
     map[evmAddress.toLowerCase()] = index + 1;
-    localStorage.setItem(accountIndexKeyFor(counterId), JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(channel), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }
@@ -440,14 +440,14 @@ export function consumeAccountIndex(
 export function seedAccountIndex(
   evmAddress: string,
   minNextIndex: number,
-  counterId?: string,
+  channel?: string,
 ): void {
   if (!Number.isInteger(minNextIndex) || minNextIndex <= 0) return;
   try {
-    const map = readAccountIndexMap(counterId);
+    const map = readAccountIndexMap(channel);
     const key = evmAddress.toLowerCase();
     map[key] = Math.max(map[key] ?? 0, minNextIndex);
-    localStorage.setItem(accountIndexKeyFor(counterId), JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(channel), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }
