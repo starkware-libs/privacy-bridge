@@ -1146,9 +1146,9 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   };
 
   // supportsAtomicBatch was probed up front (before the native-gas preflight). `burnTx`
-  // stays undefined until a burn lands; the two-tx path below runs whenever it's still
-  // undefined — i.e. a non-atomic wallet, OR an atomic batch the wallet never acknowledged
-  // (5730 to the deadline) with the USDC provably still in place.
+  // stays undefined until a burn lands; the two-tx path below runs only when it's still
+  // undefined, which — since every atomic outcome either sets it or throws — happens
+  // exactly for a non-atomic wallet.
   let burnTx: `0x${string}` | undefined;
   if (supportsAtomicBatch) {
     onStatus?.('Approving + burning USDC in one confirmation…');
@@ -1174,21 +1174,6 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       timeoutMs: BATCH_CALLS_TIMEOUT_MS,
       pollIntervalMs: BATCH_POLL_INTERVAL_MS,
     });
-    if (batchStatus.kind === 'failure') {
-      throw new Error(
-        `CCTP approve+burn batch did not succeed on ${source.chainName} (status ${batchStatus.statusCode})`,
-      );
-    }
-    if (batchStatus.kind === 'in-flight') {
-      // The wallet ACKNOWLEDGED the bundle but it didn't confirm within the budget. It may
-      // still land, and we have no burn tx hash to resume from — so we must NOT re-burn.
-      // Surface a clear, non-retryable error; a reload resumes via the balance no-op check.
-      throw new Error(
-        `CCTP approve+burn batch on ${source.chainName} did not confirm within ` +
-          `${Math.round(BATCH_CALLS_TIMEOUT_MS / 1000)}s (bundle ${id}). It may still land — ` +
-          `do NOT retry the deposit; reload the page to let it resume.`,
-      );
-    }
     if (batchStatus.kind === 'success') {
       // Atomic execution yields ONE receipt (both calls in a single tx); a wallet that
       // batches as separate txs yields one per call. The burn is the LAST call either
@@ -1204,36 +1189,32 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         );
       }
       burnTx = batchBurnReceipt.transactionHash;
+    } else if (batchStatus.kind === 'failure') {
+      throw new Error(
+        `CCTP approve+burn batch did not succeed on ${source.chainName} (status ${batchStatus.statusCode})`,
+      );
     } else {
-      // 'never-acknowledged': the wallet reported 5730 for the whole budget, so by EIP-5792
-      // the bundle was never submitted. Before falling back to the two-tx path, PROVE on-chain
-      // that no burn slipped through: re-read the source USDC balance. If ≥ amountWei has left
-      // the account since the pre-batch read, the burn executed even though the wallet lost the
-      // id — we have no tx hash to attest/mint and must NOT re-burn, so fail loudly. If the
-      // funds are intact, nothing moved → safe to fall through to (re)approve+burn below.
-      onStatus?.('Wallet did not confirm the batch; checking on-chain before retrying…');
-      const balanceAfterBatch = (await publicClient.readContract({
-        address: source.usdc as `0x${string}`,
-        abi: ERC20_ABI,
-        functionName: 'balanceOf',
-        args: [account],
-      })) as bigint;
-      // balanceAfterBatch + amountWei <= evmBalance  ⟺  the balance dropped by ≥ amountWei
-      // (bigint-safe: avoids a subtraction that could underflow).
-      if (balanceAfterBatch + amountWei <= evmBalance) {
-        throw new Error(
-          `Your ${source.chainName} USDC moved but the wallet did not report the batch id ` +
-            `(bundle ${id}). The deposit may have started — do NOT retry; reload the page to ` +
-            `let it resume, or contact support.`,
-        );
-      }
-      onStatus?.('Falling back to a two-transaction deposit…');
+      // 'in-flight' or 'never-acknowledged': the wallet ACCEPTED wallet_sendCalls (we hold a
+      // bundle id) but never returned a terminal status within the budget. Crucially, we CANNOT
+      // fall back to a second approve+burn here: the batch may still be mining, and nothing can
+      // prove it won't land. A pending bundle is invisible in a balance snapshot (the burn debits
+      // only when it mines), and inbound USDC during the long poll can mask one that already did —
+      // so a balance check can't rule out a double CCTP burn. We also have no burn tx hash to
+      // attest/mint. So we must NOT re-burn: surface a clear, non-retryable error. (The two-tx
+      // path below is reached only when the wallet has NO atomic support — no sendCalls was ever
+      // issued, so there is no in-flight bundle a second burn could stack on.)
+      throw new Error(
+        `CCTP approve+burn batch on ${source.chainName} could not be confirmed within ` +
+          `${Math.round(BATCH_CALLS_TIMEOUT_MS / 1000)}s (bundle ${id}, ${batchStatus.kind}). It may ` +
+          `still land — do NOT retry; reload the page and check your balance before trying again.`,
+      );
     }
   }
 
   if (burnTx === undefined) {
-    // Two separate transactions (two confirmations). Reached for a wallet without atomic
-    // batching, or an atomic batch the wallet never acknowledged with the USDC provably intact.
+    // Two separate transactions (two confirmations). Reached ONLY for a wallet without atomic
+    // batching — we never called wallet_sendCalls, so there is no in-flight bundle a second
+    // burn could stack on. (Every atomic outcome above either set burnTx or threw.)
     // 1a. Approve the TokenMessenger to pull the USDC, then wait for it to mine.
     onStatus?.('Approving USDC for CCTP burn…');
     const approveTx = await guardGas(() =>

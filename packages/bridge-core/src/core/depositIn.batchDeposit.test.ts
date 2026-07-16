@@ -283,40 +283,23 @@ describe('fundFromMetaMask — batch-status (5730) resilience', () => {
     expect(net).toBe(999_000n);
   });
 
-  it('PERSISTENT unknown-bundle-id + funds intact: falls back to the two-tx path', async () => {
+  it('PERSISTENT unknown-bundle-id: errors without re-burning (never re-burns once sendCalls was issued)', async () => {
     getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
-    // The wallet never acknowledges the bundle (5730 for the whole budget). Balance is
-    // unchanged (default 1e9 for both the pre-batch and post-batch reads) → nothing burned.
+    // The wallet accepted wallet_sendCalls (it returned a bundle id) but reports 5730 for the
+    // whole budget. Since the batch may still be mining, a second approve+burn could double-burn
+    // — no balance snapshot can prove otherwise (a pending burn is invisible; inbound USDC can
+    // mask a real one). So we must NOT fall back to the two-tx path.
     getCallsStatus.mockRejectedValue(new UnknownBundleIdError());
-
-    vi.useFakeTimers();
-    const promise = fundFromMetaMask({ ...DEPOSIT });
-    await vi.runAllTimersAsync();
-    const net = await promise;
-
-    expect(sendCalls).toHaveBeenCalledTimes(1); // batch was attempted
-    const fns = writeContract.mock.calls.map((c) => (c[0] as WriteArg).functionName);
-    expect(fns).toEqual(['approve', 'depositForBurn']); // then fell back to two txs
-    expect(waitForAttestation).toHaveBeenCalledWith('0xburntx', expect.anything());
-    expect(net).toBe(999_000n);
-  });
-
-  it('PERSISTENT unknown-bundle-id + funds MOVED: refuses to re-burn (no double-spend)', async () => {
-    getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
-    getCallsStatus.mockRejectedValue(new UnknownBundleIdError());
-    // Pre-batch balance 1e9; post-batch balance dropped by amountWei (1e6) → the burn
-    // executed even though the wallet lost the id. We must NOT re-burn.
-    readContract.mockResolvedValue(999_000_000n);
-    readContract.mockResolvedValueOnce(1_000_000_000n);
 
     vi.useFakeTimers();
     const promise = fundFromMetaMask({ ...DEPOSIT }).catch((error: unknown) => error);
     await vi.runAllTimersAsync();
     const result = await promise;
 
+    expect(sendCalls).toHaveBeenCalledTimes(1); // batch was attempted
     expect(result).toBeInstanceOf(Error);
-    expect((result as Error).message).toMatch(/moved/i);
-    // No fallback burn — the funds already left the account.
+    expect((result as Error).message).toMatch(/could not be confirmed/i);
+    // No second burn — a batch we can't confirm must never be doubled up on.
     expect(writeContract).not.toHaveBeenCalled();
   });
 
@@ -330,7 +313,7 @@ describe('fundFromMetaMask — batch-status (5730) resilience', () => {
     const result = await promise;
 
     expect(result).toBeInstanceOf(Error);
-    expect((result as Error).message).toMatch(/did not confirm/i);
+    expect((result as Error).message).toMatch(/could not be confirmed/i);
     expect(writeContract).not.toHaveBeenCalled();
   });
 
