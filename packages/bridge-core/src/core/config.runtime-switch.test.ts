@@ -25,12 +25,10 @@ import { initTestConfig } from '../../vitest.setup';
 
 describe('configFor(network) — pure per-network factory', () => {
   it('testnet and mainnet differ on the network-scoped fields', () => {
-    // The test fixtures pin PRIVACY_POOL_ADDRESS / DEPOSIT_TOKEN_ADDRESS /
-    // POLYGON_CHAIN_ID as explicit overrides (an explicit env deliberately wins over
-    // the network default), so those can't be exercised as network-varying here.
-    // Assert on the fields whose network default is NOT pinned by the fixtures:
-    // the SN CCTP endpoints, irisUrl, the default source chain, and the EVM source
-    // registry keys.
+    // poolAddress / depositToken.address are now BAKED-ONLY (network-varying by
+    // default); POLYGON_CHAIN_ID is pinned by the fixtures. Assert here on a
+    // representative set of network-varying fields: the SN CCTP endpoints, irisUrl,
+    // the default source chain, and the EVM source registry keys.
     const t = configFor('testnet');
     const m = configFor('mainnet');
 
@@ -84,8 +82,7 @@ describe('live-config Proxy + runtime holder', () => {
   });
 
   it('setActiveNetwork(mainnet) → config Proxy returns mainnet values live', () => {
-    // Use a field whose network default is NOT pinned by the fixtures
-    // (CCTP_TOKEN_MESSENGER is blank → resolves to the network default).
+    // Use a network-varying field: the SN token messenger is baked per-network.
     const before = config.cctp.snTokenMessengerMinter;
     setActiveNetwork('mainnet');
     expect(config.network).toBe('mainnet');

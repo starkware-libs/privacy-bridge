@@ -9,8 +9,10 @@
 // `BridgeEnv` is a plain registry — `vars` are the app env vars with their app
 // prefix STRIPPED (e.g. `NETWORK`, `CHAIN_ID`, `ADMIN_ADDRESS`), plus `dev`/`prod`
 // build flags. `bridgeEnvFromRecord(source, prefix)` builds one from an app env
-// object. Every value stays individually overridable; the SDK owns the
-// network-scoped DEFAULTS below (baked, no env needed for them).
+// object. Most values stay individually overridable; the SDK owns the network-scoped
+// DEFAULTS below. The fixed PROTOCOL CONTRACT ADDRESSES (pool, in/outbound anonymizers,
+// SN + EVM CCTP contracts, STRK + native-USDC tokens) are BAKED-ONLY — the SDK is
+// their single source of truth and no app env can shadow them.
 //
 // RUNTIME NETWORK SWITCH (apps/bridge only): the config is not a single load-time
 // `const`. `configFor(n, env)` is a pure factory returning every per-network value;
@@ -390,14 +392,12 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   const IS_MAINNET = n === 'mainnet';
 
   // EVM CCTP V2 TokenMessengerV2 — one shared address across standard EVM chains,
-  // but a DIFFERENT one per network (docs/bridge-plan.md §3). Overridable for a
-  // private fork via the `CCTP_EVM_TOKEN_MESSENGER` env var. `||` (not `??`) so a
-  // blank env line (empty string) falls through to the network default.
-  const EVM_CCTP_TOKEN_MESSENGER =
-    e.vars.CCTP_EVM_TOKEN_MESSENGER ||
-    (IS_MAINNET
-      ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d' // mainnet shared TokenMessengerV2
-      : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'); // testnet shared TokenMessengerV2
+  // but a DIFFERENT one per network (docs/bridge-plan.md §3). BAKED-ONLY: a fixed
+  // protocol contract, so the SDK is its single source of truth — NOT env-overridable
+  // (a stale app override must never be able to retarget the CCTP burn).
+  const EVM_CCTP_TOKEN_MESSENGER = IS_MAINNET
+    ? '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d' // mainnet shared TokenMessengerV2
+    : '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'; // testnet shared TokenMessengerV2
 
   // The "fund from MetaMask" source-chain registry. Keyed by EIP-155 chain id so
   // the deposit-in leg picks whatever chain MetaMask is currently on. Add a row to
@@ -623,13 +623,12 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
     chainId:
       e.vars.CHAIN_ID ||
       (IS_MAINNET ? '0x534e5f4d41494e' : '0x534e5f5345504f4c4941'),
-    // starknet-privacy pool — public on-chain addresses, baked per-network
-    // (docs/mainnet-cutover-plan.md §0/§1). Override via `PRIVACY_POOL_ADDRESS` for a fork.
-    poolAddress:
-      e.vars.PRIVACY_POOL_ADDRESS ||
-      (IS_MAINNET
-        ? '0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a' // SN mainnet pool
-        : '0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91'), // SN Sepolia pool
+    // starknet-privacy pool — public on-chain addresses, BAKED-ONLY per-network
+    // (docs/mainnet-cutover-plan.md §0/§1). The SDK is the single source of truth for
+    // this protocol contract — NOT env-overridable.
+    poolAddress: IS_MAINNET
+      ? '0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a' // SN mainnet pool
+      : '0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91', // SN Sepolia pool
     // Blocks a ZK proof stays valid. Defaulted (20) so it needn't be set per env.
     proofValidityBlocks: envInt(e.vars.PROOF_VALIDITY_BLOCKS, 20, 'PROOF_VALIDITY_BLOCKS'),
     // OZ account class hash — the class must be DECLARED on the target network for the
@@ -647,10 +646,8 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       e.vars.OZ_ACCOUNT_CLASS_HASH,
     ),
     // STRK fee token — canonical, network-CONSTANT address (identical on SN mainnet and
-    // Sepolia), so it has a safe default (overridable via `STRK_TOKEN_ADDRESS`).
-    strkToken:
-      e.vars.STRK_TOKEN_ADDRESS ||
-      '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d',
+    // Sepolia). BAKED-ONLY protocol token; the SDK owns it (NOT env-overridable).
+    strkToken: '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d',
     // DEV-ONLY admin account that funds the in-browser EOA deploy. `undefined` in
     // a production build (see resolveAdmin). Callers that need it must guard.
     admin: resolveAdmin(e),
@@ -659,11 +656,11 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
     // Token deposited into the privacy pool. Defaults to native Circle USDC (6 dp)
     // so importing this module never throws when the deposit env vars are unset.
     depositToken: {
-      address:
-        e.vars.DEPOSIT_TOKEN_ADDRESS ||
-        (IS_MAINNET
-          ? '0x033068F6539f8e6e6b131e6B2B814e6c34A5224bC66947c47DaB9dFeE93b35fb' // native USDC (SN mainnet)
-          : '0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343'), // native USDC (SN Sepolia)
+      // BAKED-ONLY: native USDC is a fixed protocol token per network; the SDK owns
+      // the address (NOT env-overridable). symbol/decimals stay overridable below.
+      address: IS_MAINNET
+        ? '0x033068F6539f8e6e6b131e6B2B814e6c34A5224bC66947c47DaB9dFeE93b35fb' // native USDC (SN mainnet)
+        : '0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343', // native USDC (SN Sepolia)
       symbol: e.vars.DEPOSIT_TOKEN_SYMBOL || 'USDC',
       decimals: envInt(e.vars.DEPOSIT_TOKEN_DECIMALS, 6, 'DEPOSIT_TOKEN_DECIMALS'),
       // Mint entrypoint for testnet funding. EMPTY for native USDC (not mintable)
@@ -697,40 +694,36 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
     // (#166).
     maxAccountAmount: e.vars.MAX_ACCOUNT_AMOUNT || '100',
     // Our Anonymizer (pool withdraw recipient ↔ CCTP) — public on-chain addresses,
-    // baked per-network. Override via `ANONYMIZER_ADDRESS` for a fork.
-    anonymizerAddress:
-      e.vars.ANONYMIZER_ADDRESS ||
-      (IS_MAINNET
-        ? '0x009067f35d2cab3cb933f3d78793660402026f8fa31e041ca2cab4a8e9a49092' // SN mainnet OutboundAnonymizer — canonical, byte-identical to privacy-bridge (flat BuyParams, class 0x016c1637…; deployed 2026-07-15; retired 0x01c2f255…/class 0x137962… 9-felt)
-        : '0x05b85f2ae4d47c1e661533d5832fe3e4afd4c6a9b52e54b7f873a00c9b285f4e'), // SN Sepolia OutboundAnonymizer — canonical privacy-bridge (flat BuyParams, class 0x016c1637…; deployed 2026-07-15)
+    // BAKED-ONLY per-network. The SDK is the single source of truth: NOT env-
+    // overridable, so a stale app override can never retarget the withdraw/burn — the
+    // exact drift that shipped the retired 9-felt contract and broke cash-out.
+    anonymizerAddress: IS_MAINNET
+      ? '0x009067f35d2cab3cb933f3d78793660402026f8fa31e041ca2cab4a8e9a49092' // SN mainnet OutboundAnonymizer — canonical (flat BuyParams, class 0x016c1637…; deployed 2026-07-15; retired 0x01c2f255…/class 0x137962… 9-felt)
+      : '0x05b85f2ae4d47c1e661533d5832fe3e4afd4c6a9b52e54b7f873a00c9b285f4e', // SN Sepolia OutboundAnonymizer — canonical (flat BuyParams, class 0x016c1637…; deployed 2026-07-15)
     // Inbound Anonymizer (privacy-compute RETURN leg), CANONICAL bridge-anonymizers
     // build from the privacy-bridge repo: folded single-tx claim + on-chain
     // destination_caller assert + source_domain-bound commitment
     // (poseidon([poseidon([identity_key, dapp_name, source_domain]), nonce])). Both
     // networks run the SAME class 0x0533023c… — byte-identical to privacy-bridge's
     // canonical bridge_anonymizers build (scarb 2.19.1), verified class-hash match
-    // (deployed 2026-07-14). Override via INBOUND_ANONYMIZER_ADDRESS.
-    inboundAnonymizerAddress:
-      e.vars.INBOUND_ANONYMIZER_ADDRESS ||
-      (IS_MAINNET
-        ? '0x03a7e7f34e530f8ec00b1ff7eaca90a136311d9da7cb17a73203f813b56c86cb' // SN mainnet — canonical (class 0x0533023c…; deployed 2026-07-14)
-        : '0x00d2a07c657d8c70f6eeddb7c8125e39b0955a40a608f63ca8a88d3ebbf72117'), // SN Sepolia — canonical (class 0x0533023c…; deployed 2026-07-14)
+    // (deployed 2026-07-14). BAKED-ONLY protocol contract; NOT env-overridable.
+    inboundAnonymizerAddress: IS_MAINNET
+      ? '0x03a7e7f34e530f8ec00b1ff7eaca90a136311d9da7cb17a73203f813b56c86cb' // SN mainnet — canonical (class 0x0533023c…; deployed 2026-07-14)
+      : '0x00d2a07c657d8c70f6eeddb7c8125e39b0955a40a608f63ca8a88d3ebbf72117', // SN Sepolia — canonical (class 0x0533023c…; deployed 2026-07-14)
     // FROZEN dapp tag for privacy_compute (matches inbound-commitment.ts + the contract).
     returnDappName: e.vars.RETURN_DAPP_NAME || 'pmp-return',
     // CCTP wiring. Starknet-side messenger/transmitter + domains + Iris.
     cctp: {
-      // `||` (not `??`) on every env address/URL below so a blank `.env.local` line
-      // (empty string) falls through to the network default (the empty-string footgun).
-      snTokenMessengerMinter:
-        e.vars.CCTP_TOKEN_MESSENGER ||
-        (IS_MAINNET
-          ? '0x07d421B9cA8aA32DF259965cDA8ACb93F7599F69209A41872AE84638B2A20F2a' // SN mainnet
-          : '0x04bDdE1E09a4B09a2F95d893D94a967b7717eB85A3f6dEcA8c080Ee01fBc3370'), // SN Sepolia
-      snMessageTransmitter:
-        e.vars.CCTP_MESSAGE_TRANSMITTER ||
-        (IS_MAINNET
-          ? '0x02EBB5777B6dD8B26ea11D68Fdf1D2c85cD2099335328Be845a28c77A8AEf183' // SN mainnet
-          : '0x04db7926C64f1f32a840F3Fa95cB551f3801a3600Bae87aF87807A54DCE12Fe8'), // SN Sepolia
+      // The SN-side CCTP contracts (messenger/transmitter) are BAKED-ONLY protocol
+      // addresses — the SDK is their source of truth, NOT env-overridable. (irisUrl
+      // below stays env-overridable and uses `||` so a blank line falls through to
+      // the network default — the empty-string footgun.)
+      snTokenMessengerMinter: IS_MAINNET
+        ? '0x07d421B9cA8aA32DF259965cDA8ACb93F7599F69209A41872AE84638B2A20F2a' // SN mainnet
+        : '0x04bDdE1E09a4B09a2F95d893D94a967b7717eB85A3f6dEcA8c080Ee01fBc3370', // SN Sepolia
+      snMessageTransmitter: IS_MAINNET
+        ? '0x02EBB5777B6dD8B26ea11D68Fdf1D2c85cD2099335328Be845a28c77A8AEf183' // SN mainnet
+        : '0x04db7926C64f1f32a840F3Fa95cB551f3801a3600Bae87aF87807A54DCE12Fe8', // SN Sepolia
       starknetDomain: envInt(e.vars.CCTP_STARKNET_DOMAIN, 25, 'CCTP_STARKNET_DOMAIN'),
       // Iris attestation API. Testnet sandbox by default; mainnet is iris-api.circle.com.
       irisUrl:
@@ -976,8 +969,8 @@ export function isSupportedCctpSource(chainId: number): boolean {
   return chainId in requireActiveConfig().evmCctpSources;
 }
 
-// True iff the active config has a usable Anonymizer address (baked default or
-// `ANONYMIZER_ADDRESS` override). Capability check for apps that need to gate
+// True iff the active config has a usable Anonymizer address (the baked protocol
+// default). Capability check for apps that need to gate
 // a flow on the Anonymizer being configured, without reading/exposing the address
 // itself (Slice N — apps/bridge's MoveFromPool no longer reads `config.anonymizerAddress`
 // directly). Reads the ACTIVE config, so it follows a network swap.

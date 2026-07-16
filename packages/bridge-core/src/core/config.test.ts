@@ -272,16 +272,12 @@ describe('public network defaults (baked in config.ts)', () => {
     expect(config.chainId).toBe('0x534e5f4d41494e'); // SN_MAIN
   });
 
-  it('strkToken falls back to the canonical STRK address (network-constant) when unset', () => {
-    initTestConfig({ STRK_TOKEN_ADDRESS: '' });
+  it('strkToken is the canonical baked STRK address (network-constant), env IGNORED', () => {
+    // BAKED-ONLY: the SDK owns this protocol token; STRK_TOKEN_ADDRESS is not read.
+    initTestConfig({ STRK_TOKEN_ADDRESS: '0xdeadbeef' });
     expect(config.strkToken).toBe(
       '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d',
     );
-  });
-
-  it('an explicit STRK_TOKEN_ADDRESS still overrides the baked default', () => {
-    initTestConfig({ STRK_TOKEN_ADDRESS: '0xdeadbeef' });
-    expect(config.strkToken).toBe('0xdeadbeef');
   });
 
   it('proofValidityBlocks blank falls back to 20 (not NaN)', () => {
@@ -289,25 +285,30 @@ describe('public network defaults (baked in config.ts)', () => {
     expect(config.proofValidityBlocks).toBe(20);
   });
 
-  it('poolAddress: SN mainnet + SN Sepolia defaults are both baked', () => {
-    initTestConfig({ NETWORK: 'mainnet', PRIVACY_POOL_ADDRESS: '' });
+  it('poolAddress: SN mainnet + SN Sepolia are baked, env override IGNORED', () => {
+    initTestConfig({ NETWORK: 'mainnet', PRIVACY_POOL_ADDRESS: '0xbogus' });
     expect(config.poolAddress).toBe(
       '0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a',
     );
 
-    initTestConfig({ NETWORK: 'testnet', PRIVACY_POOL_ADDRESS: '' });
+    initTestConfig({ NETWORK: 'testnet', PRIVACY_POOL_ADDRESS: '0xbogus' });
     expect(config.poolAddress).toBe(
       '0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91',
     );
   });
 
-  it('anonymizerAddress: SN mainnet + SN Sepolia defaults are both baked', () => {
-    initTestConfig({ NETWORK: 'mainnet', ANONYMIZER_ADDRESS: '' });
+  it('anonymizerAddress: SN mainnet + SN Sepolia are baked, env override IGNORED', () => {
+    // FUNDS-SAFETY: a stale ANONYMIZER_ADDRESS override (the retired 9-felt contract)
+    // must NOT retarget the withdraw/burn — the baked value always wins.
+    initTestConfig({
+      NETWORK: 'mainnet',
+      ANONYMIZER_ADDRESS: '0x01c2f25586d1a45e489ebbf4f3d8b67d220c9a555d5e5cefa9fb27b3bc6681a6',
+    });
     expect(config.anonymizerAddress).toBe(
       '0x009067f35d2cab3cb933f3d78793660402026f8fa31e041ca2cab4a8e9a49092',
     );
 
-    initTestConfig({ NETWORK: 'testnet', ANONYMIZER_ADDRESS: '' });
+    initTestConfig({ NETWORK: 'testnet', ANONYMIZER_ADDRESS: '0xbogus' });
     expect(config.anonymizerAddress).toBe(
       '0x05b85f2ae4d47c1e661533d5832fe3e4afd4c6a9b52e54b7f873a00c9b285f4e',
     );
@@ -322,6 +323,49 @@ describe('public network defaults (baked in config.ts)', () => {
     // SAME active config, so it must observe the override.
     mod.config.anonymizerAddress = '';
     expect(mod.isAnonymizerConfigured()).toBe(false);
+  });
+});
+
+// FUNDS-SAFETY: the fixed protocol CONTRACT/TOKEN addresses are BAKED-ONLY — the SDK
+// is their single source of truth and no app env can shadow them. A stale override
+// (like the retired anonymizer that broke cash-out) must be inert. These pin that each
+// such field ignores its (now-legacy) env var and returns the baked mainnet value.
+describe('protocol addresses are baked-only (env override IGNORED)', () => {
+  const MAINNET = { NETWORK: 'mainnet' } as const;
+
+  it('inboundAnonymizerAddress ignores INBOUND_ANONYMIZER_ADDRESS', () => {
+    initTestConfig({ ...MAINNET, INBOUND_ANONYMIZER_ADDRESS: '0xbogus' });
+    expect(config.inboundAnonymizerAddress).toBe(
+      '0x03a7e7f34e530f8ec00b1ff7eaca90a136311d9da7cb17a73203f813b56c86cb',
+    );
+  });
+
+  it('cctp.snTokenMessengerMinter ignores CCTP_TOKEN_MESSENGER', () => {
+    initTestConfig({ ...MAINNET, CCTP_TOKEN_MESSENGER: '0xbogus' });
+    expect(config.cctp.snTokenMessengerMinter).toBe(
+      '0x07d421B9cA8aA32DF259965cDA8ACb93F7599F69209A41872AE84638B2A20F2a',
+    );
+  });
+
+  it('cctp.snMessageTransmitter ignores CCTP_MESSAGE_TRANSMITTER', () => {
+    initTestConfig({ ...MAINNET, CCTP_MESSAGE_TRANSMITTER: '0xbogus' });
+    expect(config.cctp.snMessageTransmitter).toBe(
+      '0x02EBB5777B6dD8B26ea11D68Fdf1D2c85cD2099335328Be845a28c77A8AEf183',
+    );
+  });
+
+  it('depositToken.address ignores DEPOSIT_TOKEN_ADDRESS', () => {
+    initTestConfig({ ...MAINNET, DEPOSIT_TOKEN_ADDRESS: '0xbogus' });
+    expect(config.depositToken.address).toBe(
+      '0x033068F6539f8e6e6b131e6B2B814e6c34A5224bC66947c47DaB9dFeE93b35fb',
+    );
+  });
+
+  it('the shared EVM CCTP TokenMessenger ignores CCTP_EVM_TOKEN_MESSENGER', () => {
+    initTestConfig({ ...MAINNET, CCTP_EVM_TOKEN_MESSENGER: '0xbogus' });
+    expect(getEvmCctpSource(137)?.tokenMessenger).toBe(
+      '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d',
+    );
   });
 });
 

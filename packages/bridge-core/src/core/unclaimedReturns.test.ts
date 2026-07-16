@@ -84,7 +84,9 @@ function seedRedeployCursor(evmKey: string, index: number, amountWei: bigint, ol
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  initTestConfig({ INBOUND_ANONYMIZER_ADDRESS: '0x49abc' });
+  // The inbound anonymizer is BAKED-ONLY (config.ts) — not env-injectable. Tests read
+  // the real baked testnet address; the commitment helpers above resolve it dynamically.
+  initTestConfig();
 });
 
 afterEach(() => {
@@ -99,7 +101,9 @@ describe('scanUnclaimedReturns (cursor-driven)', () => {
   });
 
   it('returns [] when the inbound anonymizer is the 0x0 placeholder', async () => {
-    initTestConfig({ INBOUND_ANONYMIZER_ADDRESS: '0x0' });
+    // Baked-only now, so simulate the pre-deploy placeholder via the live-config
+    // write-through Proxy (see core/config.ts) rather than an env override.
+    config.inboundAnonymizerAddress = '0x0';
     await expect(
       scanUnclaimedReturns({ signature: SIGNATURE, accountIndexCount: 3 }),
     ).resolves.toEqual({ unclaimedReturns: [], probedStart: 0, probedEnd: 0, truncated: false });

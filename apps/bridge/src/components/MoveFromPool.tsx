@@ -144,7 +144,7 @@ export function MoveFromPool() {
     if (!isAnonymizerConfigured()) {
       commit({
         phase: 'error',
-        message: 'Anonymizer contract address not configured (VITE_ANONYMIZER_ADDRESS).',
+        message: 'Anonymizer contract address not configured for this network.',
       });
       return;
     }
