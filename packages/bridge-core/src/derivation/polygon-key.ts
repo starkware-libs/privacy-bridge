@@ -1,7 +1,7 @@
 import { keccak_256 } from '@noble/hashes/sha3';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import { secp256k1 } from '@noble/curves/secp256k1';
-import { POLYGON_EOA_LABEL } from './messages.js';
+import { POLYGON_EOA_LABEL, assertValidChannel } from './messages.js';
 
 const N = secp256k1.CURVE.n; // secp256k1 group order
 
@@ -30,7 +30,11 @@ export interface PolygonEoa {
 // EOA, so the address recovers from the signature + the non-secret saved index.
 //
 // In-memory only — never log or persist the returned private key.
-export function derivePolygonEoa(evmSignature: string, accountIndex: number): PolygonEoa {
+export function derivePolygonEoa(
+  evmSignature: string,
+  accountIndex: number,
+  channel?: string,
+): PolygonEoa {
   // Guard: reject unsafe JS numbers before they reach the seed string. IEEE-754
   // rounding means any number > 2^53 may have already lost precision, so two
   // distinct intended indices could interpolate into the SAME seed and derive the
@@ -39,8 +43,17 @@ export function derivePolygonEoa(evmSignature: string, accountIndex: number): Po
     throw new Error('accountIndex exceeds safe integer range; pass a safe integer');
   if (accountIndex < 0) throw new Error('accountIndex must be non-negative');
 
-  // seed = keccak256(`${signature}:${label}:${index}`), reduced into [1, n).
-  const seed = keccak_256(utf8ToBytes(`${evmSignature}:${POLYGON_EOA_LABEL}:${accountIndex}`));
+  // seed = keccak256(`${signature}:${label}[:${channel}]:${index}`), reduced into [1, n).
+  // `channel` (undefined = the legacy/default account channel) scopes the seed to a
+  // separate keyspace, so `(channel, index)` pairs from different channels never
+  // collide even at the same small index. undefined reproduces the EXACT legacy
+  // preimage, so existing accounts derive byte-identically (derivation-channel.test.ts).
+  if (channel !== undefined) assertValidChannel(channel);
+  const preimage =
+    channel === undefined
+      ? `${evmSignature}:${POLYGON_EOA_LABEL}:${accountIndex}`
+      : `${evmSignature}:${POLYGON_EOA_LABEL}:${channel}:${accountIndex}`;
+  const seed = keccak_256(utf8ToBytes(preimage));
   const reduced = BigInt('0x' + bytesToHex(seed)) % N;
   // 0 is invalid as a secp256k1 scalar; bump to 1 for the vanishingly unlikely
   // case so the key always lands in [1, n).
