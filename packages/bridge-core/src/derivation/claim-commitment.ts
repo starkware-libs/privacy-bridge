@@ -8,6 +8,7 @@
 
 import { shortString } from 'starknet';
 import { assertCanonicalFelt, poseidon } from './felt.js';
+import { assertValidChannel } from './messages.js';
 
 // Domain-separation felt tags (Cairo short-string literals `<NAME>:V<version>`).
 // Decimal values are pinned in bridge-interface.md §2 and asserted by the tester.
@@ -28,7 +29,11 @@ export const ACCOUNT_NONCE_TAG = BigInt(shortString.encodeShortString('BIDNONCE:
 // so the whole return is recomputable from the single MetaMask signature + the
 // saved index — no persisted secret. Feeds deriveClaimSecret. In-memory only;
 // never log/persist the viewing key.
-export function deriveAccountNonce(viewingKey: bigint, tradeCounter: number | bigint): bigint {
+export function deriveAccountNonce(
+  viewingKey: bigint,
+  tradeCounter: number | bigint,
+  channel?: string,
+): bigint {
   // Guard: reject unsafe JS numbers before they reach BigInt(). IEEE-754
   // rounding means any number > 2^53 may have already lost precision, so two
   // distinct intended counters could silently map to the same double and then
@@ -42,7 +47,23 @@ export function deriveAccountNonce(viewingKey: bigint, tradeCounter: number | bi
   // (silent collision, mirrors #41's guard on computeClaimH).
   assertCanonicalFelt('tradeCounter', counter);
   assertCanonicalFelt('viewingKey', viewingKey);
-  return poseidon([ACCOUNT_NONCE_TAG, viewingKey, counter]);
+  // Legacy/default channel (undefined): the exact frozen 3-element hash, so existing
+  // accounts recompute byte-identically.
+  if (channel === undefined) {
+    return poseidon([ACCOUNT_NONCE_TAG, viewingKey, counter]);
+  }
+  // A named channel folds a domain felt (its short-string encoding) into the nonce,
+  // so the same counter in different channels yields distinct nonces → distinct
+  // claim secrets / commitments / EOAs. The 4-element hash cannot alias the
+  // 3-element default (distinct arity), barring a negligible Poseidon collision.
+  // account_nonce is an OPAQUE input to the on-chain H (the Cairo side never
+  // recomputes it), so this recovery-recipe change needs no contract change.
+  // Validate identically to derivePolygonEoa so a channel that derives an EOA also
+  // derives a recoverable commitment (no fund-but-can't-recover asymmetry).
+  assertValidChannel(channel);
+  const channelFelt = BigInt(shortString.encodeShortString(channel));
+  assertCanonicalFelt('channel', channelFelt);
+  return poseidon([ACCOUNT_NONCE_TAG, viewingKey, channelFelt, counter]);
 }
 
 // claim_secret = poseidon([CLAIM_TAG, viewing_key, account_nonce]).
