@@ -22,6 +22,7 @@ import {
   paymasterExecuteLeg,
   invalidateManagerNonce,
   type PaymasterBuildCtx,
+  type PaymasterFeeAction,
 } from './proven-submit';
 import {
   waitForProvingBlock,
@@ -208,6 +209,34 @@ export interface DepositArgs {
   // runs as the MANAGER, whose `approve` would approve the manager's USDC, not the
   // derived account's, so the manager path CANNOT fold (it stays 2-tx; plan edge-case #6).
   foldMint?: { message: `0x${string}`; attestation: `0x${string}` };
+  // PROVE-AHEAD (paymaster path): a deposit proof built CONCURRENTLY with the CCTP
+  // burn+attestation (moveIntoPool), via buildDepositProofAhead. The deposit proof is
+  // money-INDEPENDENT and the amount is a-priori, so it needs nothing from the bridge —
+  // it can be generated during the (minutes-long) attestation wait instead of after it.
+  // On the FIRST submit attempt, if AVNU's real invoke_and_apply_action fee equals the
+  // fee baked into this proof AND its autoRegister matches, the ready proof is submitted
+  // as-is (the speedup). Any mismatch, or any retry/rebuild, falls back to building fresh
+  // — so this is fail-closed: never wrong, at worst no speedup that once. Ignored on the
+  // manager path and whenever undefined.
+  prebuiltProof?: PrebuiltDepositProof;
+}
+
+// A deposit apply_actions proof produced by buildDepositProofAhead WITHOUT submitting —
+// carried into depositToPool via DepositArgs.prebuiltProof so the submit can reuse it
+// (see the prebuiltProof doc above).
+export interface PrebuiltDepositProof {
+  call: Call;
+  proofDetails:
+    | { proof: string; proofFacts: string[] }
+    | { proof?: undefined; proofFacts?: undefined };
+  // Pool-fee amount (deposit-token base units) baked into the proof's fee withdraw (0n
+  // when the paymaster quoted no fee). The submit compares AVNU's real
+  // invoke_and_apply_action fee against this; a mismatch discards the proof and rebuilds.
+  feeAmount: bigint;
+  // The autoRegister value the proof was built with — a fresh vs already-registered
+  // account bakes a DIFFERENT apply_actions (register folded in or not), so the submit
+  // reuses the proof only when its own autoRegister matches.
+  autoRegister: boolean;
 }
 
 // Approves the pool to spend `amountWei` of the deposit token from `account`.
@@ -250,6 +279,154 @@ async function approvePoolSpend(
   return waitForBlockNumber(provider, transaction_hash);
 }
 
+// The pool-deposit PrivateTransfers client (SDK proof builder + indexer discovery) —
+// shared by depositToPool and the prove-ahead path so both wire it identically (same
+// prover, chain, indexer, pool). Kept in one place so a wiring change can't drift between
+// the two entry points.
+function makeDepositTransfers(account: Account, viewingKey: bigint): PrivateTransfersInterface {
+  return createPrivateTransfers({
+    account,
+    viewingKeyProvider: { getViewingKey: async () => viewingKey },
+    provingProvider: {
+      url: config.proverUrl,
+      chainId: config.chainId as constants.StarknetChainId,
+    },
+    discoveryProvider: new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress),
+    poolContractAddress: config.poolAddress,
+  });
+}
+
+// Convert an AVNU paymaster `fee_action` into the deposit-token fee withdraw to bake into
+// the proof, or undefined for a zero/absent fee. Shared by the inline submit (attempt)
+// and the prove-ahead path. sponsored_private pays the fee in pool_fee_token (→ the
+// deposit token) so the deposit itself covers it; a fee quoted in any OTHER token (e.g.
+// sponsored → STRK) can't be paid from a USDC-only account, so fail loud.
+function feeWithdrawFromAction(
+  feeAction: PaymasterFeeAction | undefined,
+): { recipient: string; amount: bigint } | undefined {
+  if (!feeAction || BigInt(feeAction.amount || '0') === 0n) return undefined;
+  if (BigInt(feeAction.token) !== BigInt(config.depositToken.address)) {
+    throw new Error(
+      `AVNU pool fee is in ${feeAction.token}, not the deposit token ${config.depositToken.address}. ` +
+        'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
+    );
+  }
+  return { recipient: feeAction.recipient, amount: BigInt(feeAction.amount) };
+}
+
+// Build the deposit apply_actions and prove it at `provingBlockId` — the pure
+// proof-generation body shared by the normal submit path (proveAndSubmitDeposit's
+// attempt) and the prove-ahead path (buildDepositProofAhead). NO submit, so any throw is
+// pre-relay and safe to retry / fall back from. The builder mirrors the demo's deposit:
+// autoRegister + autoSetup register a fresh account inline; a fee withdraw (paymaster)
+// nets against the deposit (deposit to balance, no explicit recipient — an explicit
+// recipient consumes the whole deposit and leaves 0 for the fee).
+async function proveDepositAt(
+  transfers: PrivateTransfersInterface,
+  opts: {
+    depositorAddress: string;
+    amountWei: bigint;
+    useAutoRegister: boolean;
+    feeWithdraw: { recipient: string; amount: bigint } | undefined;
+    provingBlockId: number | string;
+    onStatus?: (s: string) => void;
+  },
+): Promise<{ call: Call; proofDetails: PrebuiltDepositProof['proofDetails'] }> {
+  const { depositorAddress, amountWei, useAutoRegister, feeWithdraw, provingBlockId, onStatus } = opts;
+  onStatus?.('Building deposit…');
+  const builder = transfers
+    .build({
+      autoRegister: useAutoRegister,
+      autoSetup: true,
+      autoDiscover: { notes: 'refresh', channels: 'refresh' },
+      autoSelectNotes: 'naive',
+    })
+    .surplusTo(depositorAddress)
+    .with(config.depositToken.address, (t) => {
+      if (feeWithdraw) {
+        t.deposit({ amount: amountWei });
+        t.withdraw({ recipient: feeWithdraw.recipient, amount: feeWithdraw.amount });
+      } else {
+        t.deposit({ amount: amountWei, recipient: depositorAddress });
+      }
+    });
+  const invocation = await builder.createProofInvocation({ provingBlockId });
+
+  onStatus?.('Generating proof (this can take a few seconds)…');
+  const { callAndProof } = await transfers.executeWithInvocation(invocation, provingBlockId);
+
+  const proofDetails: PrebuiltDepositProof['proofDetails'] = callAndProof.proof.proofFacts?.length
+    ? { proof: callAndProof.proof.data, proofFacts: callAndProof.proof.proofFacts }
+    : {};
+  return { call: callAndProof.call as unknown as Call, proofDetails };
+}
+
+// Build + prove a deposit apply_actions WITHOUT submitting, for moveIntoPool to run
+// CONCURRENTLY with the CCTP burn + attestation. The deposit proof is money-INDEPENDENT
+// (the pool reads the deposited amount on-chain at execution, not inside the proof) and
+// the amount is a-priori (net = gross − maxFee), so nothing here depends on the bridge —
+// it can run during the minutes-long attestation wait rather than after it.
+//
+// The pool fee is quoted from a BARE `apply_action` (NOT invoke_and_apply_action): the
+// gasless AVNU paymaster charges only the fixed pool fee (docs/open-questions.md #13 —
+// `sponsored_private` sponsors gas, the fee is a server-fixed pool_fee_amount oracle-
+// converted to the pool_fee_token), which does NOT depend on the folded `receive_message`.
+// So no attestation is needed to learn the fee. The submit (depositToPool) re-quotes the
+// REAL invoke_and_apply_action fee and only reuses this proof when they match — a drift
+// (e.g. an oracle price move between quotes) discards it and rebuilds. Paymaster path only.
+export async function buildDepositProofAhead(args: {
+  account: Account;
+  viewingKey: bigint;
+  amountWei: bigint;
+  // Freshest committed dependency the proof must age past (the deploy block on a fresh
+  // account — register + mint are folded INTO the deposit tx, so they are NOT prior deps).
+  // Ignored when immediateProve is set.
+  lastTxBlockNumber?: number;
+  // Prove NOW at the deeper IMMEDIATE depth (deploy + register already buried, amount
+  // a-priori) — mirrors depositToPool's PART A.
+  immediateProve?: boolean;
+  autoRegister?: boolean;
+  onStatus?: (s: string) => void;
+}): Promise<PrebuiltDepositProof> {
+  const {
+    account,
+    viewingKey,
+    amountWei,
+    lastTxBlockNumber,
+    immediateProve = false,
+    autoRegister = true,
+    onStatus,
+  } = args;
+  if (!config.paymaster) {
+    // The manager path has no AVNU fee and never folds a mint (it stays 2-tx), so there
+    // is no attestation-blocked proof to hoist — the prove-ahead optimization is paymaster-only.
+    throw new Error('buildDepositProofAhead is only valid on the AVNU paymaster path.');
+  }
+  const provider = getRpcProvider();
+
+  // BARE apply_action fee quote — no receive_message ⇒ no attestation dependency.
+  onStatus?.('Requesting pool fee from paymaster…');
+  const feeCtx = await paymasterBuildLeg(account, { type: 'apply_action' });
+  const feeWithdraw = feeWithdrawFromAction(feeCtx.feeAction);
+
+  const provingDepth = immediateProve ? IMMEDIATE_PROVING_BLOCK_DEPTH : PROVING_BLOCK_DEPTH;
+  const anchor = immediateProve ? undefined : lastTxBlockNumber;
+  onStatus?.('Selecting proving block…');
+  const provingBlockId = await waitForProvingBlock(provider, anchor, onStatus, provingDepth);
+
+  const transfers = makeDepositTransfers(account, viewingKey);
+
+  const { call, proofDetails } = await proveDepositAt(transfers, {
+    depositorAddress: account.address,
+    amountWei,
+    useAutoRegister: autoRegister,
+    feeWithdraw,
+    provingBlockId,
+    onStatus,
+  });
+  return { call, proofDetails, feeAmount: feeWithdraw?.amount ?? 0n, autoRegister };
+}
+
 // Deposits `amountWei` of the deposit token into the privacy pool.
 //
 // Wiring mirrors register.ts (same provingProvider {url, chainId} + indexer
@@ -268,6 +445,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     onTx,
     autoRegister = true,
     foldMint,
+    prebuiltProof,
   } = args;
   const provider = getRpcProvider();
   const depositorAddress = account.address;
@@ -302,17 +480,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     lastTxBlockNumber = await approvePoolSpend(account, approveCall);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makeDepositTransfers(account, viewingKey);
 
   await proveAndSubmitDeposit(
     transfers,
@@ -327,6 +495,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     onTx,
     provingDepth,
     foldMint,
+    prebuiltProof,
   );
 
   onStatus?.('Deposited into pool.');
@@ -354,6 +523,7 @@ async function proveAndSubmitDeposit(
   onTx?: (hash: string) => void,
   provingDepth: number = PROVING_BLOCK_DEPTH,
   foldMint?: { message: `0x${string}`; attestation: `0x${string}` },
+  prebuiltProof?: PrebuiltDepositProof,
 ): Promise<void> {
   // MUTABLE proving anchor + depth so the PART-C rebuild-on-expiry can re-pick a FRESH
   // anchor from the current head (undefined → waitForProvingBlock reads latest now) at the
@@ -386,7 +556,16 @@ async function proveAndSubmitDeposit(
   // the end. A submitAndTrack that throws never sets this; a REVERTED/REJECTED
   // manager retry re-runs attempt() and overwrites it with the live hash.
   let submittedTxHash = '';
+  // PROVE-AHEAD: the caller's prebuiltProof (built concurrently with the CCTP attestation)
+  // is reusable ONLY on the FIRST attempt. Any retry/rebuild (stale-nonce, expiry re-anchor,
+  // register-collision recovery, node-lag) may have invalidated the proof-nonce or aged the
+  // base, so a retry always builds fresh. Gating on `firstAttempt` (not on whether the
+  // prebuilt was consumed) also means an attempt-1 fee/autoRegister MISMATCH can't let a
+  // later retry resurrect the now-stale prebuilt.
+  let firstAttempt = true;
   const attempt = async (useAutoRegister: boolean): Promise<void> => {
+    const isFirstAttempt = firstAttempt;
+    firstAttempt = false;
     // PAYMASTER path: the pool fee must be baked into the proof as a withdraw to the
     // AVNU forwarder (AVNU 165 MISSING_FEE_TRANSFER_TO otherwise). So we buildTransaction
     // FIRST to learn the fee, inject the withdraw into the SAME USDC `.with()` block as
@@ -410,66 +589,47 @@ async function proveAndSubmitDeposit(
         type: 'invoke_and_apply_action',
         userCalls,
       });
-      const fa = paymasterCtx.feeAction;
-      if (fa && BigInt(fa.amount || '0') !== 0n) {
-        // sponsored_private pays the fee in pool_fee_token (→ USDC); the withdraw must
-        // be in the same token we're depositing so the deposit covers it. A mismatch
-        // (e.g. sponsored → STRK) can't be paid from a USDC-only account.
-        if (BigInt(fa.token) !== BigInt(config.depositToken.address)) {
-          throw new Error(
-            `AVNU pool fee is in ${fa.token}, not the deposit token ${config.depositToken.address}. ` +
-              'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
-          );
-        }
-        feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
-      }
+      feeWithdraw = feeWithdrawFromAction(paymasterCtx.feeAction);
     }
 
-    onStatus?.('Selecting proving block…');
-    const provingBlockId = await waitForProvingBlock(
-      provider,
-      currentAnchor,
-      onStatus,
-      currentDepth,
-    );
-
-    onStatus?.('Building deposit…');
-    const builder = transfers
-      .build({
-        autoRegister: useAutoRegister,
-        autoSetup: true,
-        autoDiscover: { notes: 'refresh', channels: 'refresh' },
-        autoSelectNotes: 'naive',
-      })
-      .surplusTo(depositorAddress)
-      .with(config.depositToken.address, (t) => {
-        if (feeWithdraw) {
-          // Paymaster path: deposit to BALANCE (NO explicit recipient) so the pool-fee
-          // withdraw nets against it — `deposit(+amount) − withdraw(fee) = surplus`, and
-          // the remainder (amount − fee) becomes the depositor's note via surplusTo.
-          // With an explicit recipient the deposit is fully consumed by that recipient
-          // note (createNote −amount), leaving 0 for the fee → SDK "Insufficient balance
-          // … available 0". (Mirrors AVNU's private-transactions deposit snippet.)
-          t.deposit({ amount: amountWei });
-          t.withdraw({ recipient: feeWithdraw.recipient, amount: feeWithdraw.amount });
-        } else {
-          // Manager path (no AVNU fee): unchanged, proven — deposit straight to the
-          // depositor's note.
-          t.deposit({ amount: amountWei, recipient: depositorAddress });
-        }
-      });
-    const invocation = await builder.createProofInvocation({ provingBlockId });
-
-    onStatus?.('Generating proof (this can take a few seconds)…');
-    const { callAndProof } = await transfers.executeWithInvocation(invocation, provingBlockId);
-
-    // The proof binds TransferFromInput.from_addr to the derived account, so the
-    // DEPOSIT token moves from it regardless of who submits. Bridge the SDK's Call
-    // through the app's Call type (separate starknet copies).
-    const proofDetails = callAndProof.proof.proofFacts?.length
-      ? { proof: callAndProof.proof.data, proofFacts: callAndProof.proof.proofFacts }
-      : {};
-    const call = callAndProof.call as unknown as Call;
+    // PROVE-AHEAD reuse: the caller may have generated this exact proof CONCURRENTLY with
+    // the CCTP attestation (moveIntoPool → buildDepositProofAhead). Reuse it — skipping the
+    // proving-block wait + build + prove — only on the FIRST attempt and only when it is a
+    // faithful substitute for what we'd build now: AVNU's real invoke_and_apply_action fee
+    // (just quoted above) equals the bare-quoted fee baked into the proof, AND its
+    // autoRegister matches (a fresh vs already-registered account bakes a DIFFERENT
+    // apply_actions). Any mismatch — or any retry, since only the FIRST attempt is eligible
+    // — builds fresh below (fail-closed: never a wrong proof, at worst no speedup that once).
+    // The proof binds TransferFromInput.from_addr to the derived account, so the DEPOSIT
+    // token moves from it regardless of who submits.
+    let call: Call;
+    let proofDetails: PrebuiltDepositProof['proofDetails'];
+    if (
+      prebuiltProof &&
+      isFirstAttempt &&
+      prebuiltProof.autoRegister === useAutoRegister &&
+      prebuiltProof.feeAmount === (feeWithdraw?.amount ?? 0n)
+    ) {
+      onStatus?.('Using pre-generated proof…');
+      call = prebuiltProof.call;
+      proofDetails = prebuiltProof.proofDetails;
+    } else {
+      onStatus?.('Selecting proving block…');
+      const provingBlockId = await waitForProvingBlock(
+        provider,
+        currentAnchor,
+        onStatus,
+        currentDepth,
+      );
+      ({ call, proofDetails } = await proveDepositAt(transfers, {
+        depositorAddress,
+        amountWei,
+        useAutoRegister,
+        feeWithdraw,
+        provingBlockId,
+        onStatus,
+      }));
+    }
 
     onStatus?.('Submitting deposit…');
     // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this

@@ -22,7 +22,13 @@ import { getRpcProvider, makeAccount } from './provider';
 import { getCurrentBlock } from './proving';
 import { ensureAccountDeployed, isDeployedOnL2 } from './deploy';
 import { isRegistered, registerWithPool } from './register';
-import { depositToPool, ensureDepositTokenFunded, readDepositTokenBalance } from './deposit';
+import {
+  buildDepositProofAhead,
+  depositToPool,
+  ensureDepositTokenFunded,
+  readDepositTokenBalance,
+  type PrebuiltDepositProof,
+} from './deposit';
 import { fundFromMetaMask, isNonceAlreadyUsedError } from './depositIn';
 import {
   clearPendingPoolDeposit,
@@ -510,6 +516,16 @@ export async function moveIntoPool(
     // multicall's approve would approve the MANAGER's USDC, not the account's).
     const aPrioriAmount = !deployFeeChargedToUser && liveBalance === undefined;
     const foldEligible = !!config.paymaster && funding === 'metamask' && aPrioriAmount;
+    // PART A immediate-prove gate — used by BOTH the prove-ahead (below) and the inline
+    // depositToPool anchor. The deposit proof is money-INDEPENDENT (the pool reads the
+    // deposited amount on-chain at execution, not inside the proof), so its only on-chain
+    // dependencies are the account's deploy + register. When BOTH were already BURIED before
+    // this run (deployedAtStart / registeredAtStart — recomputed live by the deploy/register
+    // steps, never a stale persisted flag) AND the amount is a-priori (liveBalance undefined
+    // ⇒ not sized from chain; deploy-fee-OFF ⇒ the funder's reported net IS the deposit),
+    // there is nothing fresh to age past → prove at the IMMEDIATE depth. Excludes a user-paid
+    // deploy fee and a pending-cursor resume (both size from chain, so keep aging).
+    const immediateProve = deployedAtStart && registeredAtStart && aPrioriAmount;
     // mintFold / mintAlreadyConsumed are declared in the OUTER scope (next to `funded`) so
     // they survive a transient retry of this step — see the note there. Do NOT re-declare
     // or reset them here: the funding branch below is the sole writer and only runs while
@@ -521,9 +537,40 @@ export async function moveIntoPool(
     // account under a user-paid deploy fee lands here — a FRESH deposit that MUST
     // re-fund (the Bugbot MEDIUM: an already-deployed account is not, by itself, a
     // resume). On a transient retry the `funded` flag survives, so we never re-fund.
+    // PROVE-AHEAD (fold path): a deposit proof generated CONCURRENTLY with the CCTP
+    // burn+attestation, reused by depositToPool below iff it is still a faithful
+    // substitute. Undefined on every other path / attempt → depositToPool proves inline.
+    let prebuiltProof: PrebuiltDepositProof | undefined;
     const haveFundsAvailable = funded || (liveBalance !== undefined && liveBalance > 0n);
     if (!haveFundsAvailable) {
       emit('deposit', 'running', 'Funding deposit token…');
+
+      // Fire the deposit proof NOW, in parallel with the burn+attestation fundDepositToken
+      // is about to run. The deposit proof is money-INDEPENDENT (the pool reads the amount
+      // on-chain at execution, not inside the proof) and the amount is a-priori, so it needs
+      // nothing from the bridge — proving it during the (minutes-long) attestation wait
+      // instead of after it removes the proof time from the critical path. The gasless AVNU
+      // paymaster charges only the fixed pool fee (independent of the folded receive_message
+      // — docs/open-questions.md #13), so buildDepositProofAhead quotes it from a bare
+      // apply_action with no attestation dependency; depositToPool re-quotes the real fee and
+      // reuses this proof only if it still matches (else rebuilds — fail-closed, never wrong,
+      // at worst no speedup that once). Only on the FOLD path (paymaster + metamask + fresh
+      // burn) — that is the only deposit with an attestation wait to hide behind. The anchor
+      // mirrors the immediateProve / depositAnchorBlock choices below: a fresh account's only
+      // prior Starknet dep is the deploy (register + mint fold INTO the deposit tx), so age
+      // past deployBlock; a fully-buried account proves immediately. onStatus is intentionally
+      // omitted so the bridge's attestation progress owns the status line (no interleaving).
+      const proofAheadPromise: Promise<PrebuiltDepositProof | undefined> = foldEligible
+        ? buildDepositProofAhead({
+            account,
+            viewingKey,
+            amountWei,
+            lastTxBlockNumber: immediateProve ? undefined : deployBlock,
+            immediateProve,
+            autoRegister: !alreadyRegistered,
+          }).catch(() => undefined)
+        : Promise.resolve(undefined);
+
       fundedNetWei = await fundDepositToken({
         funding,
         account,
@@ -547,6 +594,14 @@ export async function moveIntoPool(
         },
       });
       funded = true;
+
+      // Await the concurrent proof (running/done by now) so it can never dangle, and adopt
+      // it ONLY when a mint was actually folded (the proof was built for the fold's
+      // autoRegister) AND the net it proved (amountWei, a-priori) still equals what we
+      // deposit. A fold-resume that found the mint already consumed, or any future
+      // non-a-priori net, fails this guard → depositToPool proves fresh.
+      const proofAhead = await proofAheadPromise;
+      if (mintFold && fundedNetWei === amountWei) prebuiltProof = proofAhead;
       // Funding just committed — it's the fresher proving dependency than the deploy.
       // Recorded in the CROSS-ATTEMPT scope so a transient deposit retry (which skips
       // this branch, `funded` already true) still ages the proof past the funding.
@@ -612,18 +667,8 @@ export async function moveIntoPool(
       depositWei = settled;
     }
 
-    // PART A — immediate-prove gate. The deposit proof is money-INDEPENDENT (the pool
-    // reads the deposited amount on-chain at execution, not inside the proof), so its only
-    // real on-chain dependencies are the account's deploy + register. When BOTH were
-    // already BURIED before this run (deployedAtStart / registeredAtStart — recomputed live
-    // by the deploy/register steps, never a stale persisted flag) AND the amount is known
-    // a-priori (net = gross − maxFee, NOT read from a post-mint balance — `liveBalance`
-    // undefined means we did not size from chain, and deploy-fee-OFF means the funder's
-    // reported net IS the deposit), there is nothing fresh to age past → prove immediately.
-    // A-priori excludes: a user-paid deploy fee (amount = post-deploy balance) and a
-    // pending-cursor resume (amount = live balance) — both size from chain, so keep aging.
-    // `aPrioriAmount` was computed with the fold precondition above (same definition).
-    const immediateProve = deployedAtStart && registeredAtStart && aPrioriAmount;
+    // `immediateProve` (the PART A gate) was computed above, next to `foldEligible`, since
+    // the prove-ahead needs it too.
 
     // BUG 3 (#305 recurring on the AUTO-continue path) — recompute `alreadyRegistered`
     // LIVE right before the fold. The register step already re-reads isRegistered, but on
@@ -672,6 +717,10 @@ export async function moveIntoPool(
         foldMint: mintFold
           ? { message: mintFold.message, attestation: mintFold.attestation }
           : undefined,
+        // PROVE-AHEAD: the proof generated in parallel with the attestation above (fold
+        // path only). depositToPool reuses it on the first attempt iff AVNU's real fee and
+        // its autoRegister still match — otherwise (or on any retry) it proves fresh.
+        prebuiltProof,
         onTx: (hash) => {
           depositTxHash = hash;
         },

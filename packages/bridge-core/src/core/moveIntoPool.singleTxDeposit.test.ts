@@ -56,6 +56,7 @@ vi.mock('./register', () => ({
 
 vi.mock('./deposit', () => ({
   depositToPool: vi.fn(),
+  buildDepositProofAhead: vi.fn(async () => undefined),
   ensureDepositTokenFunded: vi.fn(),
   readDepositTokenBalance: vi.fn(),
 }));
@@ -79,7 +80,7 @@ import { moveIntoPool } from './moveIntoPool';
 import { getCurrentBlock } from './proving';
 import { isDeployedOnL2, ensureAccountDeployed } from './deploy';
 import { isRegistered, registerWithPool } from './register';
-import { depositToPool, readDepositTokenBalance } from './deposit';
+import { buildDepositProofAhead, depositToPool, readDepositTokenBalance } from './deposit';
 import { fundFromMetaMask } from './depositIn';
 import {
   readPendingPoolDeposit,
@@ -93,6 +94,7 @@ const mEnsureDeployed = vi.mocked(ensureAccountDeployed);
 const mIsRegistered = vi.mocked(isRegistered);
 const mRegister = vi.mocked(registerWithPool);
 const mDeposit = vi.mocked(depositToPool);
+const mBuildAhead = vi.mocked(buildDepositProofAhead);
 const mReadBalance = vi.mocked(readDepositTokenBalance);
 const mFundMM = vi.mocked(fundFromMetaMask);
 const mReadPending = vi.mocked(readPendingPoolDeposit);
@@ -123,6 +125,11 @@ beforeEach(() => {
   // (#433) reads this. Fold + convergence tests set an explicit balance where it matters.
   mReadBalance.mockResolvedValue(0n);
   clearMintCursorSpy = vi.fn();
+  // Prove-ahead default: resolve to undefined (no prebuilt) so tests that don't care see
+  // today's inline prove; the wiring tests below override this per-case. Set here (not just
+  // via the vi.mock factory) because clearAllMocks keeps implementations, so a prior test's
+  // mockResolvedValue would otherwise leak forward.
+  mBuildAhead.mockResolvedValue(undefined);
   // fundFromMetaMask double: when asked to DEFER, hand back the attested bytes via
   // onMintFold (as the real one does on the fold path); otherwise a plain net return.
   mFundMM.mockImplementation(async (args) => {
@@ -161,6 +168,71 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
 
     // The burn cursor is cleared only AFTER the deposit landed.
     expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fold path proves AHEAD (concurrent with the burn+attestation) and threads it as prebuiltProof', async () => {
+    configMock.paymaster = { feeMode: 'sponsored' };
+    const AHEAD = {
+      call: { contractAddress: '0xPOOL', entrypoint: 'apply_actions', calldata: [] },
+      proofDetails: { proof: '0xAHEAD', proofFacts: ['0xf'] },
+      feeAmount: 1_500n,
+      autoRegister: false,
+    };
+    mBuildAhead.mockResolvedValue(AHEAD as never);
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    // The proof was generated up-front for the a-priori net, at the IMMEDIATE depth
+    // (account already deployed + registered), with the already-registered account's
+    // autoRegister:false — so it can be built while the CCTP attestation is still pending.
+    expect(mBuildAhead).toHaveBeenCalledTimes(1);
+    const aheadArgs = mBuildAhead.mock.calls[0]![0];
+    expect(aheadArgs.amountWei).toBe(AMOUNT);
+    expect(aheadArgs.immediateProve).toBe(true);
+    expect(aheadArgs.autoRegister).toBe(false);
+
+    // depositToPool received that exact ready proof to reuse (alongside the folded mint).
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBe(AHEAD);
+    expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
+  });
+
+  it('a prove-ahead failure is swallowed — the deposit still proceeds (proves fresh inline)', async () => {
+    configMock.paymaster = { feeMode: 'sponsored' };
+    mBuildAhead.mockRejectedValue(new Error('prover hiccup'));
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    // Prove-ahead is a pure optimization: its rejection must NOT fail the deposit. The
+    // deposit ran with no prebuilt (depositToPool proves fresh) but still folded the mint.
+    expect(mBuildAhead).toHaveBeenCalledTimes(1);
+    expect(mDeposit).toHaveBeenCalledTimes(1);
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBeUndefined();
+    expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
+  });
+
+  it('non-fold paths never prove ahead (no attestation wait to hide behind)', async () => {
+    // Manager path (no paymaster): fold ineligible → no prove-ahead, no prebuilt.
+    configMock.paymaster = undefined;
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    expect(mBuildAhead).not.toHaveBeenCalled();
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBeUndefined();
   });
 
   it('treasury funding → no fold (proven 2-tx flow)', async () => {
