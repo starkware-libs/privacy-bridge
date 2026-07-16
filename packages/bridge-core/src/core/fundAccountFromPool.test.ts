@@ -360,14 +360,14 @@ describe('fundAccountFromPool — happy path (fresh burn)', () => {
     expect(localStorage.getItem(INFLIGHT_BURN_KEY)).toBe('{}');
   });
 
-  it('consumes on the channel named by counterId, leaving the default counter untouched', async () => {
+  it('consumes on the channel named by channel, leaving the default counter untouched', async () => {
     // Funding from a separate channel advances THAT channel's counter
     // (`pmp.bidIndex:<id>`) and never the default `pmp.bidIndex`, so a channel fund
     // can't poison normal bidding. The index band (2^48+) is the caller's choice.
     const reservedIndex = 2 ** 48 + 3;
-    const result = await fund({ counterId: 'fast-session', accountIndex: reservedIndex });
+    const result = await fund({ channel: 'fast-session', accountIndex: reservedIndex });
     // The result echoes the channel so the app records the account under it...
-    expect(result.counterId).toBe('fast-session');
+    expect(result.channel).toBe('fast-session');
     // The channel's counter now points PAST this fund's index...
     expect(
       JSON.parse(localStorage.getItem('pmp.bidIndex:fast-session')!)[EVM_ADDRESS.toLowerCase()],

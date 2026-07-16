@@ -170,7 +170,7 @@ describe('peekNextAccountIndex / consumeAccountIndex — pmp.bidIndex persistenc
   });
 });
 
-describe('counterId — channel isolation (separate counter + records)', () => {
+describe('channel — channel isolation (separate counter + records)', () => {
   const EVM = '0x00000000000000000000000000000000000abc42';
   const CHANNEL = 'fast-session';
   const CHANNEL_INDEX_KEY = 'pmp.bidIndex:fast-session';
@@ -186,9 +186,9 @@ describe('counterId — channel isolation (separate counter + records)', () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => localStorage.clear());
 
-  it('omitting counterId writes the LEGACY keys (default channel back-compat)', () => {
-    consumeAccountIndex(EVM, 0); // no counterId
-    upsertDerivedAccount(EVM, account(0)); // no counterId
+  it('omitting channel writes the LEGACY keys (default channel back-compat)', () => {
+    consumeAccountIndex(EVM, 0); // no channel
+    upsertDerivedAccount(EVM, account(0)); // no channel
     expect(JSON.parse(localStorage.getItem('pmp.bidIndex')!)[EVM.toLowerCase()]).toBe(1);
     expect(readDerivedAccounts(EVM).map((a) => a.accountIndex)).toEqual([0]);
     // No suffixed channel key is written for the default (absence) channel.
@@ -197,7 +197,7 @@ describe('counterId — channel isolation (separate counter + records)', () => {
   });
 
   it('migrateLegacyAccounts routes a channel burn cursor to its OWN channel, not default', () => {
-    // A fast-session burn cursor carries its counterId; migration must file the
+    // A fast-session burn cursor carries its channel; migration must file the
     // record in that channel so its reserved-band index never poisons default peek.
     localStorage.setItem(
       'pmp.inflightBurn',
@@ -207,7 +207,7 @@ describe('counterId — channel isolation (separate counter + records)', () => {
           eoaAddress: '0x000000000000000000000000000000000000dEaD',
           bidIndex: 2 ** 48 + 3,
           amountHuman: '1',
-          counterId: CHANNEL,
+          channel: CHANNEL,
         },
       }),
     );
@@ -236,7 +236,7 @@ describe('counterId — channel isolation (separate counter + records)', () => {
   });
 
   it('reconciles peek against ONLY its own channel records (closes the cross-channel poison)', () => {
-    upsertDerivedAccount(EVM, account(4)); // default record at 4 (no counterId)
+    upsertDerivedAccount(EVM, account(4)); // default record at 4 (no channel)
     upsertDerivedAccount(EVM, account(2 ** 48 + 9), CHANNEL); // channel record in its band
     // The default next index ignores the channel record (no poison from a session)...
     expect(peekNextAccountIndex(EVM)).toBe(5);
