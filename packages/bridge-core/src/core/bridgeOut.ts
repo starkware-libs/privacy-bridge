@@ -61,7 +61,7 @@ import {
   FAST_FINALITY_THRESHOLD,
   STANDARD_FINALITY_THRESHOLD,
 } from './cctpFees';
-import { consumeAccountIndex } from './account-store';
+import { consumeAccountIndex, DEFAULT_COUNTER_ID } from './account-store';
 
 // CCTP min_finality_threshold: 2000 = Standard (free, finalized); 1000 = Fast
 // (paid). docs/bridge-plan.md §3, Decision 4. The default follows config.cctp.fast
@@ -481,6 +481,25 @@ export interface FundAccountFromPoolArgs {
     depositWallet: string;
     accountIndex: number;
   }) => void;
+  // The account CHANNEL this fund's index belongs to (see account-store's
+  // DEFAULT_COUNTER_ID). Defaults to the default channel, so existing callers are
+  // unaffected: the index is consumed on the default `pmp.bidIndex` counter exactly
+  // as before. A caller funding from a SEPARATE channel (e.g. a reused-wallet "fast
+  // session" allocating from its own counter + record store) passes that channel's
+  // id, so this fund's consume advances ITS counter and never the default one — and
+  // because peek/records are namespaced by the same id, the channels' COUNTERS and
+  // RECORDS stay fully isolated. Purely a storage-namespacing choice: the derived
+  // EOA/wallet/commitment are unchanged (they depend on accountIndex, not on the
+  // channel).
+  //
+  // NOT namespaced: the in-flight burn/return RESUME cursors (`pmp.inflightBurn` /
+  // `pmp.inflightReturn`) are a single per-EVM-address slot, shared across channels.
+  // The cursor carries its own accountIndex, so a resume self-routes to the correct
+  // wallet (funds are never mis-sent), but a fund started while another channel's
+  // burn is still in flight resumes THAT burn instead of starting a fresh one. So
+  // callers must serialize funding to one in-flight burn per address across channels
+  // (the same single-slot invariant that predates channels), or namespace the cursor.
+  counterId?: string;
   // Deterministic-test knobs forwarded to the mint pollers.
   intervalMs?: number;
   timeoutMs?: number;
@@ -589,6 +608,7 @@ export async function fundAccountFromPool(
     selection,
     onStep,
     onBurned,
+    counterId = DEFAULT_COUNTER_ID,
   } = args;
   // Resolve the chosen destination chain up front (fail loud on an unsupported id,
   // before any sign/burn). Its domain drives the CCTP fee route + the forwarded-mint
@@ -732,7 +752,9 @@ export async function fundAccountFromPool(
       });
       // Consume the index only AFTER the resume cursor is durable, so a pre-burn
       // failure (fee quote, signature, proving) doesn't burn an index either.
-      consumeAccountIndex(evmAddress, accountIndex);
+      // `counterId` selects which channel's counter is advanced (the default
+      // channel for existing callers).
+      consumeAccountIndex(evmAddress, accountIndex, counterId);
       onBurned?.({ burnTxHash, eoaAddress, depositWallet, accountIndex });
       emit(
         'bridge',

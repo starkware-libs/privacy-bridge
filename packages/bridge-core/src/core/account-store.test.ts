@@ -169,6 +169,65 @@ describe('peekNextAccountIndex / consumeAccountIndex — pmp.bidIndex persistenc
   });
 });
 
+describe('counterId — channel isolation (separate counter + records)', () => {
+  const EVM = '0x00000000000000000000000000000000000abc42';
+  const CHANNEL = 'fast-session';
+  const CHANNEL_INDEX_KEY = 'pmp.bidIndex:fast-session';
+  const CHANNEL_ACCOUNTS_KEY = 'pmp.bids:fast-session';
+  const account = (accountIndex: number): DerivedAccountRecord => ({
+    accountIndex,
+    amountHuman: '1',
+    eoaAddress: '0x000000000000000000000000000000000000dEaD',
+    lifecycle: 'minted',
+    timestamp: 1,
+  });
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  it('the default channel maps to the LEGACY keys, not a :default suffix', () => {
+    consumeAccountIndex(EVM, 0); // default (no counterId)
+    upsertDerivedAccount(EVM, account(0)); // default record (no counterId)
+    expect(localStorage.getItem('pmp.bidIndex')).not.toBeNull();
+    expect(localStorage.getItem('pmp.bids')).not.toBeNull();
+    expect(localStorage.getItem('pmp.bidIndex:default')).toBeNull();
+    expect(localStorage.getItem('pmp.bids:default')).toBeNull();
+  });
+
+  it('consumes a channel under a suffixed counter key, never touching the default counter', () => {
+    consumeAccountIndex(EVM, 5, CHANNEL);
+    expect(JSON.parse(localStorage.getItem(CHANNEL_INDEX_KEY)!)[EVM.toLowerCase()]).toBe(6);
+    expect(localStorage.getItem('pmp.bidIndex')).toBeNull();
+    expect(peekNextAccountIndex(EVM, CHANNEL)).toBe(6);
+    expect(peekNextAccountIndex(EVM)).toBe(0); // default channel untouched
+  });
+
+  it('stores channel records under a suffixed key, invisible to the default channel', () => {
+    upsertDerivedAccount(EVM, account(7), CHANNEL);
+    expect(localStorage.getItem(CHANNEL_ACCOUNTS_KEY)).not.toBeNull();
+    expect(localStorage.getItem('pmp.bids')).toBeNull();
+    expect(readDerivedAccounts(EVM, CHANNEL).map((a) => a.accountIndex)).toEqual([7]);
+    expect(readDerivedAccounts(EVM)).toEqual([]); // default channel sees nothing
+  });
+
+  it('reconciles peek against ONLY its own channel records (closes the cross-channel poison)', () => {
+    upsertDerivedAccount(EVM, account(4)); // default record at 4 (no counterId)
+    upsertDerivedAccount(EVM, account(2 ** 48 + 9), CHANNEL); // channel record in its band
+    // The default next index ignores the channel record (no poison from a session)...
+    expect(peekNextAccountIndex(EVM)).toBe(5);
+    // ...and the channel next index ignores the default record.
+    expect(peekNextAccountIndex(EVM, CHANNEL)).toBe(2 ** 48 + 10);
+  });
+
+  it('keeps two non-default channels fully independent', () => {
+    consumeAccountIndex(EVM, 0, 'a');
+    seedAccountIndex(EVM, 4, 'b');
+    expect(peekNextAccountIndex(EVM, 'a')).toBe(1);
+    expect(peekNextAccountIndex(EVM, 'b')).toBe(4);
+    expect(peekNextAccountIndex(EVM)).toBe(0);
+  });
+});
+
 describe('seedAccountIndex — chain-seeded reuse guard (cross-device)', () => {
   const INDEX_KEY = 'pmp.bidIndex';
   const EVM = '0x00000000000000000000000000000000000abc42';

@@ -73,6 +73,26 @@ const ACCOUNTS_KEY = 'pmp.bids';
 // dependency-free; the legacy in-flight burn cursor seeds a record on first migration.
 const INFLIGHT_BURN_KEY = 'pmp.inflightBurn';
 
+// An account CHANNEL groups a counter + its record store under one id. The
+// DEFAULT channel keeps the legacy `pmp.bids` / `pmp.bidIndex` keys, so existing
+// data and every caller that passes no counterId behave identically. A non-default
+// counterId namespaces a SEPARATE counter + record store (`pmp.bids:<id>` /
+// `pmp.bidIndex:<id>`), letting one EVM identity hold several INDEPENDENT channels
+// — e.g. a reused-wallet "fast session" whose index allocation must never advance
+// the default counter (nor its records the default reconciliation). A channel is
+// pure STORAGE namespacing: addresses still derive from (signature, accountIndex),
+// unchanged, so a channel's index band is the caller's concern, not this store's.
+// `counterId` is CALLER-TRUSTED (a compile-time constant, not external input);
+// `'default'` and `''` are reserved — `'default'` aliases the legacy keys and `''`
+// yields a trailing-colon key, so neither is usable as a distinct channel id.
+export const DEFAULT_COUNTER_ID = 'default';
+
+// A channel's record-store key: the legacy key for the default channel, a
+// per-id suffix otherwise. The default MUST stay `pmp.bids` (back-compat).
+function accountsKeyFor(counterId: string): string {
+  return counterId === DEFAULT_COUNTER_ID ? ACCOUNTS_KEY : `${ACCOUNTS_KEY}:${counterId}`;
+}
+
 type AccountsMap = Record<string, DerivedAccountRecord[]>;
 
 // EVM address (40 hex) shape used to validate the persisted EOA recipient before
@@ -144,9 +164,9 @@ export function isValidAccountRecord(value: unknown): value is DerivedAccountRec
   return true;
 }
 
-function readAccountsMap(): AccountsMap {
+function readAccountsMap(counterId: string): AccountsMap {
   try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY);
+    const raw = localStorage.getItem(accountsKeyFor(counterId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object') return parsed as AccountsMap;
@@ -156,9 +176,9 @@ function readAccountsMap(): AccountsMap {
   }
 }
 
-function writeAccountsMap(map: AccountsMap): void {
+function writeAccountsMap(map: AccountsMap, counterId: string): void {
   try {
-    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(map));
+    localStorage.setItem(accountsKeyFor(counterId), JSON.stringify(map));
   } catch {
     // Best-effort: the history list is a convenience; a storage failure must not
     // break the funding flow (the flow's own resume cursor is written separately).
@@ -167,9 +187,12 @@ function writeAccountsMap(map: AccountsMap): void {
 
 // Read the account history for an EVM address, newest first, dropping any
 // corrupt record.
-export function readDerivedAccounts(evmAddress: string): DerivedAccountRecord[] {
+export function readDerivedAccounts(
+  evmAddress: string,
+  counterId: string = DEFAULT_COUNTER_ID,
+): DerivedAccountRecord[] {
   if (!evmAddress) return [];
-  const rawList = readAccountsMap()[evmAddress.toLowerCase()];
+  const rawList = readAccountsMap(counterId)[evmAddress.toLowerCase()];
   const list: unknown[] = Array.isArray(rawList) ? rawList : [];
   return list
     .map(migrateAccountIndexKey)
@@ -197,10 +220,11 @@ const LIFECYCLE_RANK: Record<AccountLifecycle, number> = {
 export function upsertDerivedAccount(
   evmAddress: string,
   patch: Partial<DerivedAccountRecord> & { accountIndex: number },
+  counterId: string = DEFAULT_COUNTER_ID,
 ): void {
   if (!evmAddress) return;
   const key = evmAddress.toLowerCase();
-  const map = readAccountsMap();
+  const map = readAccountsMap(counterId);
   const rawEntry = map[key];
   const list: DerivedAccountRecord[] = (
     Array.isArray(rawEntry) ? rawEntry.map(migrateAccountIndexKey) : []
@@ -227,7 +251,7 @@ export function upsertDerivedAccount(
   const next = list.filter((record) => record.accountIndex !== patch.accountIndex);
   next.push(merged);
   map[key] = next;
-  writeAccountsMap(map);
+  writeAccountsMap(map, counterId);
 }
 
 // Keep the higher-ranked lifecycle so updates never regress a settled account.
@@ -322,6 +346,12 @@ function isValidInflightBurnRecord(value: unknown): boolean {
 // orphan an in-flight counter, the same fund-safety class as ACCOUNTS_KEY.
 const ACCOUNT_INDEX_KEY = 'pmp.bidIndex';
 
+// A channel's counter key: the legacy key for the default channel, a per-id
+// suffix otherwise (mirrors accountsKeyFor). The default MUST stay `pmp.bidIndex`.
+function accountIndexKeyFor(counterId: string): string {
+  return counterId === DEFAULT_COUNTER_ID ? ACCOUNT_INDEX_KEY : `${ACCOUNT_INDEX_KEY}:${counterId}`;
+}
+
 type AccountIndexMap = Record<string, number>;
 
 // Validate + drop any entry that isn't a non-negative integer (#137): a corrupt
@@ -330,9 +360,9 @@ type AccountIndexMap = Record<string, number>;
 // derive the WRONG per-account EOA. Dropping bad entries falls back to the
 // default-0 first-account behavior for that address, which is safe
 // (nextAccountIndex still reconciles against existing accounts).
-function readAccountIndexMap(): AccountIndexMap {
+function readAccountIndexMap(counterId: string): AccountIndexMap {
   try {
-    const raw = localStorage.getItem(ACCOUNT_INDEX_KEY);
+    const raw = localStorage.getItem(accountIndexKeyFor(counterId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -363,20 +393,29 @@ export function nextAccountIndex(counter: number, accounts: DerivedAccountRecord
 }
 
 // The next unused per-account index for an EVM address (0 on first account).
-export function peekNextAccountIndex(evmAddress: string): number {
-  const map = readAccountIndexMap();
+export function peekNextAccountIndex(
+  evmAddress: string,
+  counterId: string = DEFAULT_COUNTER_ID,
+): number {
+  const map = readAccountIndexMap(counterId);
   const counter = map[evmAddress.toLowerCase()] ?? 0;
-  return nextAccountIndex(counter, readDerivedAccounts(evmAddress));
+  // Reconcile against THIS channel's records only, so a channel's records never
+  // advance another channel's next index.
+  return nextAccountIndex(counter, readDerivedAccounts(evmAddress, counterId));
 }
 
 // Persist `index` as consumed so the NEXT account uses `index + 1`.
 // Best-effort — a storage failure must not break the funding flow (the EOA
 // still recovers from the signature + the index actually used this run).
-export function consumeAccountIndex(evmAddress: string, index: number): void {
+export function consumeAccountIndex(
+  evmAddress: string,
+  index: number,
+  counterId: string = DEFAULT_COUNTER_ID,
+): void {
   try {
-    const map = readAccountIndexMap();
+    const map = readAccountIndexMap(counterId);
     map[evmAddress.toLowerCase()] = index + 1;
-    localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(counterId), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }
@@ -390,13 +429,17 @@ export function consumeAccountIndex(evmAddress: string, index: number): void {
 // `highestChainUsedIndex + 1`. Belt-and-suspenders alongside the `pmp.bids`
 // reconciliation: it survives a later `pmp.bids` prune. Best-effort, same as
 // consumeAccountIndex — a storage failure must not break bidding.
-export function seedAccountIndex(evmAddress: string, minNextIndex: number): void {
+export function seedAccountIndex(
+  evmAddress: string,
+  minNextIndex: number,
+  counterId: string = DEFAULT_COUNTER_ID,
+): void {
   if (!Number.isInteger(minNextIndex) || minNextIndex <= 0) return;
   try {
-    const map = readAccountIndexMap();
+    const map = readAccountIndexMap(counterId);
     const key = evmAddress.toLowerCase();
     map[key] = Math.max(map[key] ?? 0, minNextIndex);
-    localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(counterId), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }
