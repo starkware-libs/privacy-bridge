@@ -178,6 +178,12 @@ vi.mock('./proving', () => ({
   // proveAndSubmitBridgeOut imports these to pick the proving depth (FIX 2).
   PROVING_BLOCK_DEPTH: 8,
   IMMEDIATE_PROVING_BLOCK_DEPTH: 12,
+  // The proven-submit node-lag retry (nodeLagRetry.ts) classifies every submit failure via
+  // isNodeLagError; real regex here so this suite's non-lag failure paths rethrow as before.
+  isNodeLagError: (err: unknown) =>
+    /block hash mismatch[\s\S]*?stored block hash:\s*(?:0x)?0+\b/i.test(
+      err instanceof Error ? err.message : String(err),
+    ),
 }));
 
 vi.mock('./tx', () => ({

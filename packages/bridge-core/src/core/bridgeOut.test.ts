@@ -37,6 +37,14 @@ const ACCOUNT_INDEX = 3;
 const ACCOUNT_NONCE = 42n;
 const AMOUNT = 1_000_000n; // fixed denomination D: 1 USDC @ 6dp
 
+// A full-node-lag ValidationFailure: "block hash mismatch" + a ZERO "stored block hash"
+// (matches proving.ts NODE_LAG_RE — the retryable, pre-broadcast code-156). Distinct from
+// the NON-retryable code-156 (NON_ZERO_VALUE / burn-limit) that stays fail-closed above.
+const NODE_LAG_MSG =
+  'AVNU paymaster paymaster_executeTransaction error (code 156): ValidationFailure: ' +
+  '"Invalid proof facts: Block hash mismatch for block 11830268. Proof block hash: 2599, ' +
+  'stored block hash: 0."';
+
 const VIEWING_KEY = 123456789n;
 const CLAIM_SECRET = 2069452701457285857209401669498930313539255917194012082327558716626330726443n;
 // Frozen §3 commitment H (note_binding bound to claim_secret). Used as the
@@ -228,6 +236,14 @@ vi.mock('./proving', () => ({
   // the test asserts is meaningful and immediateBase = getCurrentBlock(7) − 12 → max(…,0) = 0.
   PROVING_BLOCK_DEPTH: 8,
   IMMEDIATE_PROVING_BLOCK_DEPTH: 12,
+  // Real regex (proving.ts NODE_LAG_RE): a full-node-lag ValidationFailure with a ZERO
+  // stored base-block hash. The proven-submit node-lag retry (nodeLagRetry.ts) gates on it.
+  isNodeLagError: (err: unknown) =>
+    /block hash mismatch[\s\S]*?stored block hash:\s*(?:0x)?0+\b/i.test(
+      err instanceof Error ? err.message : String(err),
+    ),
+  // Instant sleep so the bounded node-lag retry loop runs without wall-clock delay.
+  sleep: () => Promise.resolve(),
 }));
 
 // Discovery-at-block helper (the prove-early quiescence gate). Hoisted spy so each
@@ -1380,6 +1396,37 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
     expect(
       isTransientError(new Error('AVNU paymaster_executeTransaction error (code 156): NON_ZERO_VALUE')),
     ).toBe(false);
+  });
+
+  // (F-nodelag) the retryable sibling of (F): a full-node-lag code-156 ("stored block hash:
+  // 0", NO hash, PRE-broadcast) means AVNU's node is briefly behind the proof's base block.
+  // A lag that never clears rejects (bounded) and NEVER rebuilds — the exhausted node-lag
+  // propagates BEFORE the fail-closed/rebuild path (a re-prove against the still-lagging
+  // anchor would just node-lag again), reusing the SAME proof throughout. Reuses the shared
+  // node-lag retry (nodeLagRetry.ts) — the same primitive as the claim leg (bridgeBack.ts).
+  it('(F-nodelag) a paymaster node-lag that never clears rejects (bounded), reusing the same proof', async () => {
+    (config as { paymaster: typeof config.paymaster }).paymaster = {
+      endpoint: 'https://pm.test',
+      apiKey: 'KEY',
+      feeMode: 'sponsored_private',
+      poolFeeToken: '',
+    };
+    avnuBuild.mockResolvedValue({
+      type: 'apply_action',
+      fee_action: { type: 'withdraw', recipient: '0xFEEFWD', token: config.depositToken.address, amount: '0x0' },
+    });
+    avnuExecute.mockReset();
+    avnuExecute.mockRejectedValue(new Error(NODE_LAG_MSG)); // node never catches up
+
+    await expect(
+      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+    ).rejects.toThrow(/block hash mismatch/i);
+
+    // 1 initial + 6 (MAX_NODE_LAG_RETRIES) = 7 attempts, all the SAME proof.
+    expect(avnuExecute).toHaveBeenCalledTimes(7);
+    // Proof built once; exhaustion never re-proves.
+    expect(execMock()).toHaveBeenCalledTimes(1);
+    expect(transfers.invalidateProofNonceCache).not.toHaveBeenCalled();
   });
 
   // (G) REGRESSION — EDGE CASE 1: "funds/notes arrived within the last 12 blocks."
