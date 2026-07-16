@@ -203,4 +203,32 @@ describe('depositToPool — prove-ahead reuse vs rebuild', () => {
     // apply_actions) → discard the prebuilt and prove fresh.
     expect(transfers.deposits).toEqual([{ amount: AMOUNT_WEI, recipient: undefined }]);
   });
+
+  it('a retryable submit failure never re-submits the prebuilt — the RETRY proves fresh (first-attempt-only)', async () => {
+    // Attempt #1 reuses the prebuilt, but its submit throws PRE-relay (the SNIP-9 signMessage
+    // rejects once, before the AVNU relay starts → nothing broadcast). The generic retry then
+    // re-runs attempt(), which MUST NOT resurrect the now-consumed prebuilt (its base may have
+    // aged / its proof-nonce may be invalidated by the failed submit) — it must prove FRESH.
+    // This is the safety-critical `firstAttempt` gate: only the first attempt may reuse.
+    const signMessage = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('user rejected signature'))
+      .mockResolvedValue(['0xaa', '0xbb']);
+    const account = { address: '0xACCT', signMessage } as never;
+
+    await depositToPool({
+      account,
+      viewingKey: 7n,
+      amountWei: AMOUNT_WEI,
+      immediateProve: true,
+      prebuiltProof: prebuilt(),
+    });
+
+    // Attempt #1 reused the prebuilt (no fresh build) and aborted PRE-relay at signMessage
+    // (executeTransaction never reached). The retry proved FRESH — exactly ONE recorded
+    // deposit — and relayed that fresh proof exactly once. The prebuilt was never broadcast,
+    // and never re-submitted as itself on the retry.
+    expect(transfers.deposits).toEqual([{ amount: AMOUNT_WEI, recipient: undefined }]);
+    expect(h.executeTransaction).toHaveBeenCalledOnce();
+  });
 });

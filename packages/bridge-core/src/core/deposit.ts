@@ -556,13 +556,16 @@ async function proveAndSubmitDeposit(
   // the end. A submitAndTrack that throws never sets this; a REVERTED/REJECTED
   // manager retry re-runs attempt() and overwrites it with the live hash.
   let submittedTxHash = '';
-  // PROVE-AHEAD: the caller's prebuiltProof (built concurrently with the CCTP
-  // attestation) is reusable at most ONCE — on the FIRST attempt, when AVNU's real fee
-  // and the attempt's autoRegister match it. Any retry/rebuild builds fresh (a failed
-  // submit may have invalidated the proof-nonce / aged the base), so flip this the
-  // instant it is consumed so no retry re-submits the same proof.
-  let prebuiltConsumed = false;
+  // PROVE-AHEAD: the caller's prebuiltProof (built concurrently with the CCTP attestation)
+  // is reusable ONLY on the FIRST attempt. Any retry/rebuild (stale-nonce, expiry re-anchor,
+  // register-collision recovery, node-lag) may have invalidated the proof-nonce or aged the
+  // base, so a retry always builds fresh. Gating on `firstAttempt` (not on whether the
+  // prebuilt was consumed) also means an attempt-1 fee/autoRegister MISMATCH can't let a
+  // later retry resurrect the now-stale prebuilt.
+  let firstAttempt = true;
   const attempt = async (useAutoRegister: boolean): Promise<void> => {
+    const isFirstAttempt = firstAttempt;
+    firstAttempt = false;
     // PAYMASTER path: the pool fee must be baked into the proof as a withdraw to the
     // AVNU forwarder (AVNU 165 MISSING_FEE_TRANSFER_TO otherwise). So we buildTransaction
     // FIRST to learn the fee, inject the withdraw into the SAME USDC `.with()` block as
@@ -595,19 +598,18 @@ async function proveAndSubmitDeposit(
     // faithful substitute for what we'd build now: AVNU's real invoke_and_apply_action fee
     // (just quoted above) equals the bare-quoted fee baked into the proof, AND its
     // autoRegister matches (a fresh vs already-registered account bakes a DIFFERENT
-    // apply_actions). Any mismatch — or any retry, since prebuiltConsumed latches — builds
-    // fresh below (fail-closed: never a wrong proof, at worst no speedup that once). The
-    // proof binds TransferFromInput.from_addr to the derived account, so the DEPOSIT token
-    // moves from it regardless of who submits.
+    // apply_actions). Any mismatch — or any retry, since only the FIRST attempt is eligible
+    // — builds fresh below (fail-closed: never a wrong proof, at worst no speedup that once).
+    // The proof binds TransferFromInput.from_addr to the derived account, so the DEPOSIT
+    // token moves from it regardless of who submits.
     let call: Call;
     let proofDetails: PrebuiltDepositProof['proofDetails'];
     if (
       prebuiltProof &&
-      !prebuiltConsumed &&
+      isFirstAttempt &&
       prebuiltProof.autoRegister === useAutoRegister &&
       prebuiltProof.feeAmount === (feeWithdraw?.amount ?? 0n)
     ) {
-      prebuiltConsumed = true;
       onStatus?.('Using pre-generated proof…');
       call = prebuiltProof.call;
       proofDetails = prebuiltProof.proofDetails;
