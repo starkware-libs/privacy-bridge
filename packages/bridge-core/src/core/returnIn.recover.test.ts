@@ -127,6 +127,41 @@ function seedRedeployCursor(index: number, oldInbound: string): void {
   );
 }
 
+// The account nonce a given index resolves to under a channel — the value the claim must
+// use to reproduce the cursor's commitment. undefined = the default keyspace.
+function nonceFor(index: number, channel?: string): bigint {
+  return deriveAccountNonce(deriveViewingKey(SIGNATURE), index, channel);
+}
+
+// A cursor for a return burned from a non-default account CHANNEL: commitment derived with
+// the channel folded into the nonce, and the channel persisted on the cursor.
+function seedChannelCursor(index: number, channel: string): void {
+  const viewingKey = deriveViewingKey(SIGNATURE);
+  const snPrivateKey = deriveStarknetPrivateKey(SIGNATURE);
+  const { address } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
+  const commitment = deriveInboundCommitment({
+    userAddr: BigInt(address),
+    userPrivateKey: viewingKey,
+    inboundAddr: BigInt(config.inboundAnonymizerAddress),
+    sourceDomain: config.polygon.domain,
+    nonce: deriveAccountNonce(viewingKey, index, channel),
+  }).toString();
+  localStorage.setItem(
+    INFLIGHT_RETURN_KEY,
+    JSON.stringify({
+      [EVM_ADDRESS.toLowerCase()]: {
+        accountIndex: index,
+        burnTx: BURN_TX,
+        sourceDomain: config.polygon.domain,
+        amount: AMOUNT.toString(),
+        commitment,
+        evmChainId: config.polygon.chainId,
+        channel,
+      },
+    }),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
@@ -202,6 +237,23 @@ describe('recoverBridgeIn', () => {
     expect(claimToPool).toHaveBeenCalledTimes(1);
     const claimArgs = claimToPool.mock.calls[0][0] as { inbound?: string };
     expect(claimArgs.inbound).toBe(OLD_INBOUND);
+    expect(res).toEqual({ stuck: AMOUNT, claimTxHash: '0xc1a1m' });
+    expect(localStorage.getItem(INFLIGHT_RETURN_KEY)).toBe('{}');
+  });
+
+  it('[channel] self-routes: recovers a channel cursor via a channel-BLIND call, claiming with the channel nonce (Finding 1)', async () => {
+    // resumeBridgeTransfer calls recoverBridgeIn with only { signature, accountIndex } — it
+    // has no channel to pass. Recovery must read the channel off the cursor and re-derive the
+    // commitment + claim nonce in that keyspace, else the burned USDC is stranded.
+    seedChannelCursor(ACCOUNT_INDEX, 'fast-session');
+    const res = await recoverBridgeIn({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX });
+
+    expect(claimToPool).toHaveBeenCalledTimes(1);
+    const claimArgs = claimToPool.mock.calls[0][0] as { accountNonce: bigint };
+    // The claim's nonce is the CHANNEL nonce (what the cursor's commitment was bound with),
+    // NOT the default-keyspace nonce for the same index — proving self-routing on channel.
+    expect(claimArgs.accountNonce).toBe(nonceFor(ACCOUNT_INDEX, 'fast-session'));
+    expect(claimArgs.accountNonce).not.toBe(nonceFor(ACCOUNT_INDEX));
     expect(res).toEqual({ stuck: AMOUNT, claimTxHash: '0xc1a1m' });
     expect(localStorage.getItem(INFLIGHT_RETURN_KEY)).toBe('{}');
   });

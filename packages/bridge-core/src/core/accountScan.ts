@@ -74,11 +74,19 @@ export async function gapLimitScan(
   return found;
 }
 
-// Injectable resolver: given a signature + accountIndex, returns the deposit
+// Injectable resolver: given a signature + accountIndex + channel, returns the deposit
 // wallet address. Trading code provides:
-// `(sig, idx) => deriveDepositWallet(getEoaWalletClient(sig, idx))`
+// `(sig, idx, channel) => deriveDepositWallet(getEoaWalletClient(sig, idx, channel))`
+// The `channel` MUST feed the EOA derivation so the resolved deposit wallet matches the
+// channel EOA derived alongside it (below) — a channel-blind resolver would return the
+// DEFAULT wallet and the scan would read the wrong wallet's balance. undefined = default
+// channel; a pre-channel 2-arg resolver still satisfies this (extra arg ignored).
 // Tests provide a deterministic stub.
-export type DepositWalletResolver = (signature: string, accountIndex: number) => Promise<string>;
+export type DepositWalletResolver = (
+  signature: string,
+  accountIndex: number,
+  channel?: string,
+) => Promise<string>;
 
 // Injectable "has this CREATE2 deposit wallet ever been deployed?" probe. A
 // CREATE2 deposit wallet is counterfactual until it first acts (trade / approve
@@ -110,13 +118,17 @@ export async function scanAccountEoas(
     maxIndices?: number;
     startIndex?: number;
     isDepositWalletDeployed?: DepositWalletDeployedProbe;
+    // The account CHANNEL to scan (see account-store) — derives EOAs in THIS channel's
+    // keyspace and is passed to `resolveDepositWallet` so its CREATE2 wallet matches the
+    // EOA derived here. undefined = default channel.
+    channel?: string;
   } = {},
 ): Promise<ScannedAccount[]> {
   const client = getPolygonPublicClient();
   const isDeployedProbe = opts.isDepositWalletDeployed;
   const probe: AccountProbe = async (accountIndex) => {
-    const { address } = derivePolygonEoa(signature, accountIndex);
-    const depositWallet = await resolveDepositWallet(signature, accountIndex);
+    const { address } = derivePolygonEoa(signature, accountIndex, opts.channel);
+    const depositWallet = await resolveDepositWallet(signature, accountIndex, opts.channel);
     const walletBal = await readUsdcBalance(client, depositWallet as `0x${string}`);
     if (walletBal > 0n) {
       return { accountIndex, eoaAddress: address, depositWallet, usdcBalanceWei: walletBal };
