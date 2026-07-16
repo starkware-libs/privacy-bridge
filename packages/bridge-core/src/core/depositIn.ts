@@ -25,16 +25,18 @@
 // attestation source domain, receive_message calldata) against mocked viem/Iris.
 
 import {
+  BaseError,
   createPublicClient,
   createWalletClient,
   custom,
   defineChain,
   encodeFunctionData,
   http,
+  UnknownBundleIdError,
   type Abi,
   type EIP1193Provider,
 } from 'viem';
-import { getCapabilities, sendCalls, waitForCallsStatus } from 'viem/actions';
+import { getCallsStatus, getCapabilities, sendCalls } from 'viem/actions';
 
 import type { Account } from 'starknet';
 
@@ -83,8 +85,19 @@ const GAS_PRICE_SAFETY_DEN = 1n;
 // How long to wait for an EIP-5792 batch to reach a terminal status. Matches the
 // two-tx path's waitForTransactionReceipt default so the batch is never more
 // timeout-prone than the sequential flow (see the wait site for the double-spend
-// rationale). viem's waitForCallsStatus default is only 60s.
+// rationale).
+//
+// We poll wallet_getCallsStatus ourselves (waitForBatchStatus) rather than use viem's
+// waitForCallsStatus: a wallet can transiently answer with UnknownBundleIdError (5730,
+// "bundle id unknown / not submitted") for the first few seconds after wallet_sendCalls
+// returns, while its background worker/bundler is still cold. viem treats a THROWN 5730
+// as fatal after only ~3s of internal retries — its timeout budget covers a `pending`
+// STATUS, not a thrown error — so it aborts the deposit far inside this budget. Observed:
+// a deposit failed with 5730, then succeeded verbatim after a page reload warmed the
+// wallet. Our loop absorbs an early 5730 as not-ready-yet, up to the full budget.
 const BATCH_CALLS_TIMEOUT_MS = 180_000;
+// Cadence for polling wallet_getCallsStatus while waiting for a batch to settle.
+const BATCH_POLL_INTERVAL_MS = 2_000;
 
 // EVM priority-fee (tip) margin. The deposit-in approve/burn are submitted with an
 // EXPLICIT EIP-1559 fee read live from the source-chain RPC — never left to the
@@ -618,6 +631,59 @@ export interface FundFromMetaMaskArgs {
   onMintAlreadyConsumed?: () => void;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Outcome of polling an EIP-5792 call bundle to a terminal status or the budget deadline.
+type BatchStatusResult =
+  | { kind: 'success'; receipts: Awaited<ReturnType<typeof getCallsStatus>>['receipts'] }
+  | { kind: 'failure'; statusCode: string }
+  // Deadline reached while the bundle was ACKNOWLEDGED (a real status was seen) but never
+  // settled. The batch may be in-flight, so the caller must NOT re-burn.
+  | { kind: 'in-flight' }
+  // Deadline reached with the wallet reporting UnknownBundleIdError (5730) the whole time.
+  // By EIP-5792 the bundle was never submitted; the caller may fall back — after an on-chain
+  // balance check rules out the pathological "executed then forgot the id" case.
+  | { kind: 'never-acknowledged' };
+
+// True iff `error` is (or wraps) viem's EIP-5792 UnknownBundleIdError — RPC code 5730,
+// "this bundle id is unknown / has not been submitted".
+function isUnknownBundleIdError(error: unknown): boolean {
+  if (error instanceof UnknownBundleIdError) return true;
+  // viem sometimes wraps the RPC error; walk the BaseError cause chain for code 5730.
+  if (error instanceof BaseError) {
+    return Boolean(error.walk((e) => (e as { code?: number }).code === UnknownBundleIdError.code));
+  }
+  return false;
+}
+
+// Poll wallet_getCallsStatus until the bundle settles (success/failure) or `timeoutMs`
+// elapses, absorbing a transient UnknownBundleIdError as not-ready-yet (see
+// BATCH_CALLS_TIMEOUT_MS for why viem's waitForCallsStatus can't be used here). A non-5730
+// error propagates immediately.
+async function waitForBatchStatus(
+  walletClient: Parameters<typeof getCallsStatus>[0],
+  { id, timeoutMs, pollIntervalMs }: { id: string; timeoutMs: number; pollIntervalMs: number },
+): Promise<BatchStatusResult> {
+  const deadline = Date.now() + timeoutMs;
+  let acknowledged = false;
+  for (;;) {
+    try {
+      const result = await getCallsStatus(walletClient, { id });
+      acknowledged = true;
+      if (result.status === 'success') return { kind: 'success', receipts: result.receipts };
+      if (result.status === 'failure') return { kind: 'failure', statusCode: String(result.statusCode) };
+      // 'pending' (or an unrecognized status) → keep polling until the deadline.
+    } catch (error) {
+      if (!isUnknownBundleIdError(error)) throw error;
+      // 5730: the wallet doesn't (yet) know this bundle id — not fatal; keep polling.
+    }
+    if (Date.now() >= deadline) {
+      return acknowledged ? { kind: 'in-flight' } : { kind: 'never-acknowledged' };
+    }
+    await sleep(pollIntervalMs);
+  }
+}
+
 // Bridges `amountWei` of USDC from the user's MetaMask into the derived Starknet
 // account via CCTP. Idempotent + resumable (Fix 1 / Bundle A2):
 //   1. if the SN account already holds the NET (a prior fund-in's mint landed)
@@ -1079,8 +1145,11 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     }),
   };
 
-  // supportsAtomicBatch was probed up front (before the native-gas preflight).
-  let burnTx: `0x${string}`;
+  // supportsAtomicBatch was probed up front (before the native-gas preflight). `burnTx`
+  // stays undefined until a burn lands; the two-tx path below runs whenever it's still
+  // undefined — i.e. a non-atomic wallet, OR an atomic batch the wallet never acknowledged
+  // (5730 to the deadline) with the USDC provably still in place.
+  let burnTx: `0x${string}` | undefined;
   if (supportsAtomicBatch) {
     onStatus?.('Approving + burning USDC in one confirmation…');
     const { id } = await guardGas(() =>
@@ -1094,36 +1163,77 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         calls: [approveCall, burnCall],
       }),
     );
-    // Match the two-tx path's receipt-wait budget (waitForTransactionReceipt defaults to
-    // 180s): waitForCallsStatus otherwise defaults to 60s and REJECTS on timeout, and we
-    // can't persist the resume cursor until this returns the burn tx hash — a shorter
-    // window would make a slow-chain batch strictly more likely than the two-tx path to
-    // burn-then-throw before the cursor is written (reload double-spend risk).
-    const { status, receipts } = await waitForCallsStatus(walletClient, {
+    // Poll wallet_getCallsStatus ourselves so a transient "unknown bundle id" (5730) right
+    // after sendCalls doesn't abort the deposit — the exact failure a user hit, which a page
+    // reload then fixed (see BATCH_CALLS_TIMEOUT_MS). We wait up to the same budget as the
+    // two-tx path's receipt wait; we can't persist the resume cursor until this yields the
+    // burn tx hash, so a shorter window would make a slow batch more prone than the two-tx
+    // path to burn-then-throw before the cursor is written (reload double-spend risk).
+    const batchStatus = await waitForBatchStatus(walletClient, {
       id,
-      timeout: BATCH_CALLS_TIMEOUT_MS,
+      timeoutMs: BATCH_CALLS_TIMEOUT_MS,
+      pollIntervalMs: BATCH_POLL_INTERVAL_MS,
     });
-    if (status !== 'success') {
+    if (batchStatus.kind === 'failure') {
       throw new Error(
-        `CCTP approve+burn batch did not succeed on ${source.chainName} (status ${status ?? 'unknown'})`,
+        `CCTP approve+burn batch did not succeed on ${source.chainName} (status ${batchStatus.statusCode})`,
       );
     }
-    // Atomic execution yields ONE receipt (both calls in a single tx); a wallet that
-    // batches as separate txs yields one per call. The burn is the LAST call either
-    // way, so the last receipt's tx carries the CCTP MessageSent log that attest/mint
-    // below looks up by burnTx.
-    const batchBurnReceipt = receipts?.at(-1);
-    if (!batchBurnReceipt?.transactionHash) {
-      throw new Error(`Batched deposit returned no transaction hash on ${source.chainName}`);
-    }
-    if (batchBurnReceipt.status !== 'success') {
+    if (batchStatus.kind === 'in-flight') {
+      // The wallet ACKNOWLEDGED the bundle but it didn't confirm within the budget. It may
+      // still land, and we have no burn tx hash to resume from — so we must NOT re-burn.
+      // Surface a clear, non-retryable error; a reload resumes via the balance no-op check.
       throw new Error(
-        `CCTP depositForBurn reverted on ${source.chainName} (batch tx ${batchBurnReceipt.transactionHash})`,
+        `CCTP approve+burn batch on ${source.chainName} did not confirm within ` +
+          `${Math.round(BATCH_CALLS_TIMEOUT_MS / 1000)}s (bundle ${id}). It may still land — ` +
+          `do NOT retry the deposit; reload the page to let it resume.`,
       );
     }
-    burnTx = batchBurnReceipt.transactionHash;
-  } else {
-    // Fallback: two separate transactions (two confirmations) — unchanged behavior.
+    if (batchStatus.kind === 'success') {
+      // Atomic execution yields ONE receipt (both calls in a single tx); a wallet that
+      // batches as separate txs yields one per call. The burn is the LAST call either
+      // way, so the last receipt's tx carries the CCTP MessageSent log that attest/mint
+      // below looks up by burnTx.
+      const batchBurnReceipt = batchStatus.receipts?.at(-1);
+      if (!batchBurnReceipt?.transactionHash) {
+        throw new Error(`Batched deposit returned no transaction hash on ${source.chainName}`);
+      }
+      if (batchBurnReceipt.status !== 'success') {
+        throw new Error(
+          `CCTP depositForBurn reverted on ${source.chainName} (batch tx ${batchBurnReceipt.transactionHash})`,
+        );
+      }
+      burnTx = batchBurnReceipt.transactionHash;
+    } else {
+      // 'never-acknowledged': the wallet reported 5730 for the whole budget, so by EIP-5792
+      // the bundle was never submitted. Before falling back to the two-tx path, PROVE on-chain
+      // that no burn slipped through: re-read the source USDC balance. If ≥ amountWei has left
+      // the account since the pre-batch read, the burn executed even though the wallet lost the
+      // id — we have no tx hash to attest/mint and must NOT re-burn, so fail loudly. If the
+      // funds are intact, nothing moved → safe to fall through to (re)approve+burn below.
+      onStatus?.('Wallet did not confirm the batch; checking on-chain before retrying…');
+      const balanceAfterBatch = (await publicClient.readContract({
+        address: source.usdc as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [account],
+      })) as bigint;
+      // balanceAfterBatch + amountWei <= evmBalance  ⟺  the balance dropped by ≥ amountWei
+      // (bigint-safe: avoids a subtraction that could underflow).
+      if (balanceAfterBatch + amountWei <= evmBalance) {
+        throw new Error(
+          `Your ${source.chainName} USDC moved but the wallet did not report the batch id ` +
+            `(bundle ${id}). The deposit may have started — do NOT retry; reload the page to ` +
+            `let it resume, or contact support.`,
+        );
+      }
+      onStatus?.('Falling back to a two-transaction deposit…');
+    }
+  }
+
+  if (burnTx === undefined) {
+    // Two separate transactions (two confirmations). Reached for a wallet without atomic
+    // batching, or an atomic batch the wallet never acknowledged with the USDC provably intact.
     // 1a. Approve the TokenMessenger to pull the USDC, then wait for it to mine.
     onStatus?.('Approving USDC for CCTP burn…');
     const approveTx = await guardGas(() =>

@@ -84,7 +84,7 @@ vi.mock('viem', () => ({
 vi.mock('viem/actions', () => ({
   getCapabilities: vi.fn(async () => ({ atomic: { status: 'unsupported' as const } })),
   sendCalls: vi.fn(async () => ({ id: '0x0' })),
-  waitForCallsStatus: vi.fn(async () => ({ status: 'success' as const, statusCode: 200, receipts: [] })),
+  getCallsStatus: vi.fn(async () => ({ status: 'success' as const, statusCode: 200, receipts: [] })),
 }));
 
 // Build a well-formed CCTP-v2 message (header + BurnMessageV2 body) that decodes
