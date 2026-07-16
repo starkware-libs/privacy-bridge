@@ -333,6 +333,10 @@ export interface InflightBurn {
   // inspects it (keeps the SDK Polymarket-free); the app stores its market
   // selection here.
   selection?: Record<string, unknown>;
+  // The account CHANNEL this burn was funded from (see account-store). Persisted so
+  // a RESUME and the legacy-cursor migration route the record to the right channel;
+  // absent for default-channel burns (back-compat with older cursors).
+  counterId?: string;
 }
 
 type InflightBurnMap = Record<string, InflightBurn>;
@@ -483,6 +487,25 @@ export interface FundAccountFromPoolArgs {
     depositWallet: string;
     accountIndex: number;
   }) => void;
+  // The account CHANNEL this fund's index belongs to (see account-store's channel
+  // model). OMIT for the default channel, so existing callers are unaffected: the
+  // index is consumed on the default `pmp.bidIndex` counter exactly as before. A
+  // caller funding from a SEPARATE channel (e.g. a reused-wallet "fast
+  // session" allocating from its own counter + record store) passes that channel's
+  // id, so this fund's consume advances ITS counter and never the default one — and
+  // because peek/records are namespaced by the same id, the channels' COUNTERS and
+  // RECORDS stay fully isolated. Purely a storage-namespacing choice: the derived
+  // EOA/wallet/commitment are unchanged (they depend on accountIndex, not on the
+  // channel).
+  //
+  // NOT namespaced: the in-flight burn/return RESUME cursors (`pmp.inflightBurn` /
+  // `pmp.inflightReturn`) are a single per-EVM-address slot, shared across channels.
+  // The cursor carries its own accountIndex, so a resume self-routes to the correct
+  // wallet (funds are never mis-sent), but a fund started while another channel's
+  // burn is still in flight resumes THAT burn instead of starting a fresh one. So
+  // callers must serialize funding to one in-flight burn per address across channels
+  // (the same single-slot invariant that predates channels), or namespace the cursor.
+  counterId?: string;
   // Deterministic-test knobs forwarded to the mint pollers.
   intervalMs?: number;
   timeoutMs?: number;
@@ -506,6 +529,10 @@ export interface FundAccountFromPoolResult {
   // The opaque app metadata carried through the cursor (fresh: the arg; resume: the
   // stored value).
   selection?: Record<string, unknown>;
+  // The account CHANNEL this fund used (fresh: the arg; resume: the cursor's). Absent
+  // = the default channel. Lets the app record the (possibly resumed) account under
+  // the correct channel's store.
+  counterId?: string;
 }
 
 // Read-only {eoaAddress, amountHuman} view of the persisted in-flight burn for an
@@ -591,6 +618,7 @@ export async function fundAccountFromPool(
     selection,
     onStep,
     onBurned,
+    counterId,
   } = args;
   // Resolve the chosen destination chain up front (fail loud on an unsupported id,
   // before any sign/burn). Its domain drives the CCTP fee route + the forwarded-mint
@@ -630,6 +658,8 @@ export async function fundAccountFromPool(
   // app can key its account-history record on either path.
   let resolvedIndex = accountIndex;
   let cursorSelection: Record<string, unknown> | undefined = selection;
+  // The channel this fund belongs to (fresh: the arg; resume: the cursor's).
+  let resolvedCounterId: string | undefined = counterId;
   // True when resuming a pre-migration cursor that burned WITHOUT the
   // Forwarding-Service hook: Circle never generated a forwardTxHash for those, so
   // waitForBridgedMint would loop for 30 min then time out — surface a terminal
@@ -646,6 +676,7 @@ export async function fundAccountFromPool(
     depositWallet = inflight.depositWallet ?? inflight.eoaAddress;
     resolvedIndex = inflight.bidIndex;
     cursorSelection = inflight.selection;
+    resolvedCounterId = inflight.counterId;
     // Resolve the mint-watch destination domain from the burn's PERSISTED chain
     // (authoritative — the burn already committed to it), NOT the resume-time arg.
     // Fall back to the arg's domain only for old cursors that predate evmChainId.
@@ -731,10 +762,13 @@ export async function fundAccountFromPool(
         evmChainId: resolveEvmCctpDestination(destChainId).chainId,
         amountHuman: humanAmount(amount),
         ...(cursorSelection ? { selection: cursorSelection } : {}),
+        ...(counterId !== undefined ? { counterId } : {}),
       });
       // Consume the index only AFTER the resume cursor is durable, so a pre-burn
       // failure (fee quote, signature, proving) doesn't burn an index either.
-      consumeAccountIndex(evmAddress, accountIndex);
+      // `counterId` selects which channel's counter is advanced (the default
+      // channel for existing callers).
+      consumeAccountIndex(evmAddress, accountIndex, counterId);
       onBurned?.({ burnTxHash, eoaAddress, depositWallet, accountIndex });
       emit(
         'bridge',
@@ -811,6 +845,7 @@ export async function fundAccountFromPool(
     commitmentH,
     forwardTxHash,
     ...(cursorSelection ? { selection: cursorSelection } : {}),
+    ...(resolvedCounterId !== undefined ? { counterId: resolvedCounterId } : {}),
   };
 }
 
