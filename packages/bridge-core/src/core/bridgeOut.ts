@@ -27,11 +27,20 @@ import {
   deriveStarknetPrivateKey,
   deriveViewingKey,
 } from '../derivation/index';
-// Injectable: given a signature + accountIndex, returns the Polymarket CREATE2 deposit
-// wallet address. Trading code provides:
-//   (sig, idx) => deriveDepositWallet(getEoaWalletClient(sig, idx))
+// Injectable: given a signature + accountIndex + channel, returns the Polymarket CREATE2
+// deposit wallet address. Trading code provides:
+//   (sig, idx, channel) => deriveDepositWallet(getEoaWalletClient(sig, idx, channel))
+// The `channel` MUST feed the EOA derivation (derivePolygonEoa's channel) so the deposit
+// wallet lands in the SAME channel keyspace as the EOA that owns it — otherwise a channel
+// fund would mint to the DEFAULT wallet the channel EOA doesn't control (stranded funds).
+// undefined = the default channel (byte-identical legacy derivation). A pre-channel 2-arg
+// resolver still satisfies this type (the extra arg is ignored) and stays default-only.
 // Tests provide a deterministic stub.
-export type ResolveDepositWalletFn = (signature: string, accountIndex: number) => Promise<string>;
+export type ResolveDepositWalletFn = (
+  signature: string,
+  accountIndex: number,
+  channel?: string,
+) => Promise<string>;
 import { config, resolveEvmCctpDestination } from './config';
 import { u256Calldata } from './deposit';
 import { getRpcProvider, makeAccount } from './provider';
@@ -119,6 +128,10 @@ export interface BridgeOutArgs {
   signature: string;
   // Non-secret per-account index (persisted in localStorage) selecting the EOA.
   accountIndex: number;
+  // The account CHANNEL (see account-store). Scopes the derived EOA to the SAME
+  // keyspace the caller derived `accountNonce` in, so a session's EOA + commitment
+  // stay consistent; undefined = the default channel (byte-identical to legacy).
+  channel?: string;
   // Per-account nonce folded into claim_secret/H (poseidon([VK_child, counter])).
   accountNonce: bigint;
   // Fixed denomination to withdraw + burn, in USDC base units (1 USDC = 1e6).
@@ -174,7 +187,8 @@ export interface BridgeOutResult {
 // (deposit wallet) + the owning EOA, and H (recorded on-chain for the M10
 // return/claim leg).
 export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
-  const { signature, accountIndex, accountNonce, amount, resolveDepositWallet, onStatus } = args;
+  const { signature, accountIndex, accountNonce, amount, resolveDepositWallet, onStatus, channel } =
+    args;
   const minFinalityThreshold = args.minFinalityThreshold ?? defaultFinalityThreshold();
   // Fail closed on a fee/finality tier mismatch BEFORE any on-chain work (fund-safety).
   assertQuotedFinalityMatchesBurn(args.quotedFinalityThreshold, minFinalityThreshold);
@@ -196,20 +210,22 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
   const { address: snAddress } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
   const account = makeAccount(snAddress, snPrivateKey, provider);
   // Per-account fresh Polygon EOA — the signer that OWNS the deposit wallet.
-  const eoa = derivePolygonEoa(signature, accountIndex);
+  const eoa = derivePolygonEoa(signature, accountIndex, channel);
   // CCTP mint recipient = the EOA's CREATE2 deposit wallet (the CLOB order maker
   // that holds the funds), so the bridged USDC lands where the order signs — not
-  // on the bare EOA. Pure CREATE2 (no deploy, no builder creds); minting to a
-  // counterfactual address is fine, the balance sits there until it's deployed.
-  // Derived BEFORE the burn so a derivation failure aborts before funds commit.
-  // Independent of the STRK pool-fee read below (fetchPoolFeeAmount takes no
-  // args and doesn't depend on the deposit wallet, nor vice versa) — run them
-  // concurrently rather than sequentially.
+  // on the bare EOA. Pass the SAME channel as the EOA above so the deposit wallet
+  // derives in this channel's keyspace and stays owned by this channel's EOA (a
+  // channel-blind resolver would mint to the DEFAULT wallet — stranded funds).
+  // Pure CREATE2 (no deploy, no builder creds); minting to a counterfactual address
+  // is fine, the balance sits there until it's deployed. Derived BEFORE the burn so
+  // a derivation failure aborts before funds commit. Independent of the STRK pool-fee
+  // read below (fetchPoolFeeAmount takes no args and doesn't depend on the deposit
+  // wallet, nor vice versa) — run them concurrently rather than sequentially.
   onStatus?.('Deriving deposit wallet…');
   onStatus?.('Checking pool fee…');
   onStatus?.('Checking pool balance…');
   const [depositWallet, feeAmount, poolBalance] = await Promise.all([
-    resolveDepositWallet(signature, accountIndex),
+    resolveDepositWallet(signature, accountIndex, channel),
     fetchPoolFeeAmount(),
     discoverPrivateBalance({ account, viewingKey }),
   ]);
@@ -494,17 +510,20 @@ export interface FundAccountFromPoolArgs {
   // session" allocating from its own counter + record store) passes that channel's
   // id, so this fund's consume advances ITS counter and never the default one — and
   // because peek/records are namespaced by the same id, the channels' COUNTERS and
-  // RECORDS stay fully isolated. Purely a storage-namespacing choice: the derived
-  // EOA/wallet/commitment are unchanged (they depend on accountIndex, not on the
-  // channel).
+  // RECORDS stay fully isolated. The channel ALSO scopes DERIVATION: it is folded into
+  // the Polygon EOA (derivePolygonEoa), the deposit wallet (via the resolver, same
+  // channel), and the account nonce → claim_secret → commitment H. So channel `x`
+  // index 0 and the default index 0 resolve to DISTINCT wallets + a distinct on-chain
+  // commitment (no cross-channel collision). undefined = the default channel, whose
+  // derivations are byte-identical to the pre-channel code.
   //
-  // NOT namespaced: the in-flight burn/return RESUME cursors (`pmp.inflightBurn` /
-  // `pmp.inflightReturn`) are a single per-EVM-address slot, shared across channels.
-  // The cursor carries its own accountIndex, so a resume self-routes to the correct
-  // wallet (funds are never mis-sent), but a fund started while another channel's
-  // burn is still in flight resumes THAT burn instead of starting a fresh one. So
-  // callers must serialize funding to one in-flight burn per address across channels
-  // (the same single-slot invariant that predates channels), or namespace the cursor.
+  // The in-flight burn/return RESUME cursors (`pmp.inflightBurn` / `pmp.inflightReturn`)
+  // are a single per-EVM-address slot shared across channels, but each cursor PERSISTS
+  // its channel (alongside accountIndex), so a resume/recover self-routes to the correct
+  // channel + wallet. A fund started while another channel's burn is still in flight
+  // still resumes THAT burn (the slot is shared), so callers serialize funding to one
+  // in-flight burn per address across channels (the single-slot invariant that predates
+  // channels), or namespace the cursor.
   channel?: string;
   // Deterministic-test knobs forwarded to the mint pollers.
   intervalMs?: number;
@@ -705,7 +724,7 @@ export async function fundAccountFromPool(
     emit('bridge', 'running', 'Awaiting signature in your wallet…');
     const signature = await resolveSignature();
     const viewingKey = deriveViewingKey(signature);
-    const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
+    const accountNonce = deriveAccountNonce(viewingKey, accountIndex, channel);
 
     try {
       // `fast` (resolved at function scope above) sizes the fee quote AND the burn's
@@ -727,6 +746,7 @@ export async function fundAccountFromPool(
       const bridged = await bridgeOut({
         signature,
         accountIndex,
+        channel,
         accountNonce,
         amount,
         resolveDepositWallet,

@@ -81,6 +81,35 @@ function seedRedeployCursor(evmKey: string, index: number, amountWei: bigint, ol
   localStorage.setItem(INFLIGHT_RETURN_KEY, JSON.stringify(map));
 }
 
+// A cursor for a return burned from a non-default account CHANNEL: its commitment is
+// derived with the channel folded into the account nonce, and the channel is persisted on
+// the cursor. The scan must re-derive with THIS channel (read from the cursor) to match —
+// so it self-routes without the caller ever supplying the channel.
+function seedChannelCursor(evmKey: string, index: number, amountWei: bigint, channel: string): void {
+  const viewingKey = deriveViewingKey(SIGNATURE);
+  const snPrivateKey = deriveStarknetPrivateKey(SIGNATURE);
+  const { address } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
+  const commitment = deriveInboundCommitment({
+    userAddr: BigInt(address),
+    userPrivateKey: viewingKey,
+    inboundAddr: BigInt(config.inboundAnonymizerAddress),
+    sourceDomain: config.polygon.domain,
+    nonce: deriveAccountNonce(viewingKey, index, channel),
+  }).toString();
+  const raw = localStorage.getItem(INFLIGHT_RETURN_KEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  map[evmKey.toLowerCase()] = {
+    accountIndex: index,
+    burnTx: '0x0ab12cd34e',
+    sourceDomain: config.polygon.domain,
+    amount: amountWei.toString(),
+    commitment,
+    evmChainId: config.polygon.chainId,
+    channel,
+  };
+  localStorage.setItem(INFLIGHT_RETURN_KEY, JSON.stringify(map));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
@@ -125,6 +154,44 @@ describe('scanUnclaimedReturns (cursor-driven)', () => {
       probedEnd: 5,
       truncated: false,
     });
+  });
+
+  it('[channel] self-routes on a channel cursor — found WITHOUT a channel arg (Finding 1)', async () => {
+    // A return burned from a 'fast-session' channel at index 2. The scan takes NO channel
+    // arg; it must read the channel off the cursor and re-derive the commitment in that
+    // keyspace, else the burned USDC would be stranded (a default-nonce probe never matches).
+    seedChannelCursor('0xccc', 2, 777n, 'fast-session');
+    const scanResult = await scanUnclaimedReturns({ signature: SIGNATURE, accountIndexCount: 5 });
+    expect(scanResult.unclaimedReturns).toEqual([{ accountIndex: 2, amountWei: 777n }]);
+  });
+
+  it('[channel] one channel-blind sweep surfaces BOTH a default and a channel cursor', async () => {
+    // A default-channel return at index 1 and a 'fast-session' return at index 3 are DISTINCT
+    // accounts (distinct commitments). A single sweep with no channel arg must find both,
+    // proving candidate-channel iteration covers every channel present on-device without the
+    // caller enumerating them.
+    seedCursor('0xaaa', 1, 100n);
+    seedChannelCursor('0xbbb', 3, 200n, 'fast-session');
+    const scanResult = await scanUnclaimedReturns({ signature: SIGNATURE, accountIndexCount: 5 });
+    expect(scanResult.unclaimedReturns).toEqual([
+      { accountIndex: 1, amountWei: 100n },
+      { accountIndex: 3, amountWei: 200n },
+    ]);
+  });
+
+  it('[channel] surfaces BOTH cursors at the SAME index in different channels (no stop-at-first-channel)', async () => {
+    // Two DISTINCT accounts collide on index 2: the default channel (100n) and 'fast-session'
+    // (200n), each with its own commitment. A recovery scan must surface BOTH — stopping at
+    // the first channel hit would hide one stranded return (bugbot: "Scan stops at first
+    // channel").
+    seedCursor('0xaaa', 2, 100n);
+    seedChannelCursor('0xbbb', 2, 200n, 'fast-session');
+    const scanResult = await scanUnclaimedReturns({ signature: SIGNATURE, accountIndexCount: 5 });
+    const amountsAtIndex2 = scanResult.unclaimedReturns
+      .filter((u) => u.accountIndex === 2)
+      .map((u) => u.amountWei)
+      .sort();
+    expect(amountsAtIndex2).toEqual([100n, 200n]);
   });
 
   it('[config redeploy] surfaces a cursor whose burn predates a config change (matched via the burn-time inbound)', async () => {

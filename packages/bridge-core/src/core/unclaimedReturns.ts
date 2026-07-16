@@ -42,6 +42,12 @@ export interface UnclaimedReturn {
 
 export interface ScanUnclaimedReturnsArgs {
   signature: string;
+  // The account CHANNEL is NOT an arg: this sweep re-derives each commitment against every
+  // channel seen across this device's cursors (like it does for the burn-time inbound +
+  // source domain), so ONE sweep covers all channels' stuck returns — the caller never
+  // enumerates channels. undefined (the default channel) is included when a default cursor
+  // is present.
+  //
   // Probe indices [startIndex, accountIndexCount) — pass the account's next-unused
   // index (index allocation is monotonic, so every lower index may have run a return).
   // Zero or negative → nothing to scan.
@@ -108,6 +114,9 @@ export async function scanUnclaimedReturns(
   // The commitment also binds the burn-time CCTP SOURCE domain, so the probe must try
   // every source domain seen across cursors (a return can leave from Polygon 7/Base 6/…).
   const candidateSourceDomains = new Set<number>();
+  // The commitment also binds the account CHANNEL (via the nonce), so the probe must try
+  // every channel seen across cursors — including undefined (the default) when present.
+  const candidateChannels = new Set<string | undefined>();
   for (const { record } of listInflightReturns()) {
     // A malformed amount (should not happen — isValidInflightReturn guarantees a decimal
     // string) is skipped rather than throwing the whole sweep.
@@ -118,29 +127,48 @@ export async function scanUnclaimedReturns(
     }
     if (record.inboundAnonymizer) candidateInbounds.add(record.inboundAnonymizer);
     candidateSourceDomains.add(record.sourceDomain);
+    candidateChannels.add(record.channel);
   }
 
   const unclaimedReturns: UnclaimedReturn[] = [];
   if (cursorByCommitment.size > 0) {
     for (let accountIndex = probedStart; accountIndex < accountIndexCount; accountIndex++) {
-      const nonce = deriveAccountNonce(viewingKey, accountIndex);
-      probe: for (const candidateInbound of candidateInbounds) {
-        for (const candidateSourceDomain of candidateSourceDomains) {
-          // userPrivateKey MUST be the VIEWING key — the pool's proven identity key (see
-          // returnToPool's bind-time comment; the probe must match the SAME commitment the
-          // burn carried and the folded claim asserts). The commitment also binds the
-          // burn-time source domain, so probe each candidate (inbound × source_domain).
-          const commitment = deriveInboundCommitment({
-            userAddr: BigInt(snAddress),
-            userPrivateKey: viewingKey,
-            inboundAddr: BigInt(candidateInbound),
-            sourceDomain: candidateSourceDomain,
-            nonce,
-          });
-          const amountWei = cursorByCommitment.get(commitment.toString());
-          if (amountWei !== undefined && amountWei > 0n) {
-            unclaimedReturns.push({ accountIndex, amountWei });
-            break probe; // one hit per index is enough
+      // Each channel at this index is a DISTINCT account with its own commitment, so probe
+      // every candidate channel and collect a hit for EACH — do NOT stop at the first
+      // channel (different channels can leave separate stuck returns at the same index; the
+      // burn cursor's single-slot-per-address invariant makes that rare, but a recovery scan
+      // must never hide a stranded return).
+      for (const candidateChannel of candidateChannels) {
+        // The nonce depends on the channel, so derive it per candidate channel. A corrupt
+        // cursor channel throws in deriveAccountNonce → skip that candidate (never the sweep).
+        let nonce: bigint;
+        try {
+          nonce = deriveAccountNonce(viewingKey, accountIndex, candidateChannel);
+        } catch {
+          continue;
+        }
+        // inbound × source_domain are ALTERNATIVE bindings for THIS (index, channel) cursor,
+        // so the first match is that cursor — stop probing combos for this channel, then move
+        // on to the next channel.
+        channelHit: for (const candidateInbound of candidateInbounds) {
+          for (const candidateSourceDomain of candidateSourceDomains) {
+            // userPrivateKey MUST be the VIEWING key — the pool's proven identity key (see
+            // returnToPool's bind-time comment; the probe must match the SAME commitment the
+            // burn carried and the folded claim asserts). The commitment also binds the
+            // burn-time source domain + channel, so probe each candidate (channel × inbound ×
+            // source_domain).
+            const commitment = deriveInboundCommitment({
+              userAddr: BigInt(snAddress),
+              userPrivateKey: viewingKey,
+              inboundAddr: BigInt(candidateInbound),
+              sourceDomain: candidateSourceDomain,
+              nonce,
+            });
+            const amountWei = cursorByCommitment.get(commitment.toString());
+            if (amountWei !== undefined && amountWei > 0n) {
+              unclaimedReturns.push({ accountIndex, amountWei });
+              break channelHit;
+            }
           }
         }
       }
