@@ -340,7 +340,7 @@ describe('fundAccountFromPool — happy path (fresh burn)', () => {
     // Signed once; the account nonce was derived from the viewing key + index and
     // is what bridgeOut consumed (the app derives NO H/claim-secret itself).
     expect(resolveSignature).toHaveBeenCalledTimes(1);
-    expect(deriveAccountNonce).toHaveBeenCalledWith(VIEWING_KEY, ACCOUNT_INDEX);
+    expect(deriveAccountNonce).toHaveBeenCalledWith(VIEWING_KEY, ACCOUNT_INDEX, undefined);
     // Exactly one burn submit (fee=0 → no fee-approve; one proven withdraw+burn).
     expect(mSubmitAndTrack).toHaveBeenCalledTimes(1);
     // The attest+mint leg was gated on the deposit wallet (A1 recipient gate).
@@ -363,15 +363,23 @@ describe('fundAccountFromPool — happy path (fresh burn)', () => {
   it('consumes on the channel named by channel, leaving the default counter untouched', async () => {
     // Funding from a separate channel advances THAT channel's counter
     // (`pmp.bidIndex:<id>`) and never the default `pmp.bidIndex`, so a channel fund
-    // can't poison normal bidding. The index band (2^48+) is the caller's choice.
-    const reservedIndex = 2 ** 48 + 3;
-    const result = await fund({ channel: 'fast-session', accountIndex: reservedIndex });
+    // can't poison normal bidding. The channel — not the index value — provides the
+    // separation, so a channel index is a plain per-channel ordinal (no reserved band).
+    const channelIndex = 3;
+    const result = await fund({ channel: 'fast-session', accountIndex: channelIndex });
     // The result echoes the channel so the app records the account under it...
     expect(result.channel).toBe('fast-session');
+    // ...and the channel reaches ALL THREE per-account derivations (EOA + nonce/commitment
+    // + the deposit-wallet resolver), so the wallet the funds MINT to and its bound
+    // commitment live in the SAME channel keyspace as the EOA that owns it (Finding 2 —
+    // a channel-blind resolver would mint to the default wallet → stranded funds).
+    expect(derivePolygonEoa).toHaveBeenCalledWith(SIGNATURE, channelIndex, 'fast-session');
+    expect(deriveAccountNonce).toHaveBeenCalledWith(VIEWING_KEY, channelIndex, 'fast-session');
+    expect(resolveDepositWallet).toHaveBeenCalledWith(SIGNATURE, channelIndex, 'fast-session');
     // The channel's counter now points PAST this fund's index...
     expect(
       JSON.parse(localStorage.getItem('pmp.bidIndex:fast-session')!)[EVM_ADDRESS.toLowerCase()],
-    ).toBe(reservedIndex + 1);
+    ).toBe(channelIndex + 1);
     // ...and the default per-account counter is NOT written (no cross-channel poison).
     expect(localStorage.getItem(BID_INDEX_KEY)).toBeNull();
     // The rest of the fund is unaffected — cursor still cleared on success.

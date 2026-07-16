@@ -393,7 +393,7 @@ describe('bridgeOut — fee-buffer gate (Phase 3)', () => {
 describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () => {
   it('derives the per-account EOA from the signature + accountIndex', async () => {
     await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
-    expect(derivePolygonEoa).toHaveBeenCalledWith(SIGNATURE, ACCOUNT_INDEX);
+    expect(derivePolygonEoa).toHaveBeenCalledWith(SIGNATURE, ACCOUNT_INDEX, undefined);
   });
 
   it('withdraws the fixed denomination D to the Anonymizer (pool runs Withdraw first)', async () => {

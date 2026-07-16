@@ -81,10 +81,13 @@ const INFLIGHT_BURN_KEY = 'pmp.inflightBurn';
 // "fast session" whose index allocation + records never advance or poison the
 // default. The default is ABSENCE (undefined), NOT a magic string: so every string
 // is a valid, distinct channel id (no reserved word), matching this store's other
-// optional fields. A channel is pure STORAGE namespacing: addresses still derive
-// from (signature, accountIndex), unchanged — a channel's index band is the
-// caller's concern. channel is CALLER-TRUSTED (a compile-time constant, not
-// external input).
+// optional fields. This store handles the STORAGE namespacing (counter + records);
+// the SAME channel id ALSO scopes DERIVATION downstream — it is folded into the
+// Polygon EOA, the deposit wallet, and the account nonce → commitment H (see
+// derivation/*.ts + ResolveDepositWalletFn), so a channel's wallets + on-chain
+// commitments never collide with the default keyspace. undefined = the default
+// channel, whose derivations stay byte-identical to the pre-channel code. channel is
+// CALLER-TRUSTED (a compile-time constant, not external input).
 
 // A channel's record-store key: the legacy key when no channel is given, a per-id
 // suffix otherwise. The default (undefined) MUST stay `pmp.bids` (back-compat).
