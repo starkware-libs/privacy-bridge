@@ -49,8 +49,10 @@ import {
 import {
   waitForProvingBlock,
   getCurrentBlock,
+  isNodeLagError,
   PROVING_BLOCK_DEPTH,
 } from './proving';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry';
 import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
 import { deriveAccountNonce } from '../derivation/index';
 import { isTerminalAttestFailure, waitForBridgedMint } from './polygonMint';
@@ -1517,31 +1519,44 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     // value Iris polls. Declared outside `attempt` so that if submitAndTrack throws
     // AFTER send() already succeeded (tracking timeout), the first hash is preserved
     // and the retry guard below can return it instead of re-submitting.
-    await submitAndTrack(
-      provider,
-      async () => {
-        // Paymaster path: AVNU's relayer submits the proven apply_action (the fee
-        // withdraw is already baked into the proof). Manager path: submitProvenCall
-        // passes explicit resourceBounds so account.execute skips the proof-less fee
-        // estimate that would revert the proven apply_actions — see proven-submit.ts.
-        const res = paymasterCtx
-          ? await paymasterExecuteLeg(account, built.call, built.proofDetails, paymasterCtx, {
-              // Flip only when the AVNU relay actually starts (after any signMessage) —
-              // a pre-relay throw relays nothing and stays safely retryable.
-              onRelayStart: () => {
-                paymasterSubmissionStarted = true;
-              },
-            })
-          : await submitProvenCall(provider, account, built.call, built.proofDetails);
-        burnTxHash = res.transaction_hash;
-        return res;
+    //
+    // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this
+    // attempt's relay/hash state between lag retries). A non-lag error rethrows into the
+    // outer catch below unchanged. See nodeLagRetry.ts.
+    const runSubmit = async (): Promise<void> => {
+      await submitAndTrack(
+        provider,
+        async () => {
+          // Paymaster path: AVNU's relayer submits the proven apply_action (the fee
+          // withdraw is already baked into the proof). Manager path: submitProvenCall
+          // passes explicit resourceBounds so account.execute skips the proof-less fee
+          // estimate that would revert the proven apply_actions — see proven-submit.ts.
+          const res = paymasterCtx
+            ? await paymasterExecuteLeg(account, built.call, built.proofDetails, paymasterCtx, {
+                // Flip only when the AVNU relay actually starts (after any signMessage) —
+                // a pre-relay throw relays nothing and stays safely retryable.
+                onRelayStart: () => {
+                  paymasterSubmissionStarted = true;
+                },
+              })
+            : await submitProvenCall(provider, account, built.call, built.proofDetails);
+          burnTxHash = res.transaction_hash;
+          return res;
+        },
+        {
+          until: 'ACCEPTED_ON_L2',
+          onStatus: ({ finality }) =>
+            onStatus?.(`Submitting withdraw + burn (${humanizeFinality(finality)})…`),
+        },
+      );
+    };
+    await submitReusingProofOnNodeLag(runSubmit, {
+      resetRelayState: () => {
+        paymasterSubmissionStarted = false;
+        burnTxHash = '';
       },
-      {
-        until: 'ACCEPTED_ON_L2',
-        onStatus: ({ finality }) =>
-          onStatus?.(`Submitting withdraw + burn (${humanizeFinality(finality)})…`),
-      },
-    );
+      onStatus,
+    });
   };
 
   // burnTxHash is hoisted here so the retry guard can inspect it.
@@ -1556,6 +1571,10 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     // reverted atomically, no CCTP burn) — let it propagate so NO resume cursor is
     // written for a burn that never happened.
     if (burnTxHash && !isRevertedOrRejected(err)) return burnTxHash;
+    // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
+    // same-anchor re-prove would just node-lag again. Before the fail-closed guard so it
+    // also covers the manager path (mirrors bridgeBack).
+    if (isNodeLagError(err)) throw err;
     // AMBIGUITY GUARD (paymaster path): fail closed ONLY when the AVNU relay is
     // in-flight AND no tx hash was obtained (executeTransaction threw) — the relayer
     // may have broadcast the burn anyway (live-observed: a spurious error 156 over a

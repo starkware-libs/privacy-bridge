@@ -26,9 +26,11 @@ import {
 import {
   waitForProvingBlock,
   isProofExpiredError,
+  isNodeLagError,
   PROVING_BLOCK_DEPTH,
   IMMEDIATE_PROVING_BLOCK_DEPTH,
 } from './proving';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry';
 import { isAlreadyRegisteredError } from './register';
 import { buildReceiveMessageCall } from './snMint';
 
@@ -470,46 +472,59 @@ async function proveAndSubmitDeposit(
     const call = callAndProof.call as unknown as Call;
 
     onStatus?.('Submitting deposit…');
-    if (paymasterCtx) {
-      // AVNU's relayer submits the proven invoke_and_apply_action (the USDC approve is
-      // the signed user call); the fee withdraw is already in the proof.
-      const { transaction_hash } = await submitAndTrack(
-        provider,
-        () =>
-          paymasterExecuteLeg(account, call, proofDetails, paymasterCtx, {
-            // Flip only when the AVNU relay actually starts (after signMessage) — a
-            // wallet-rejected SNIP-9 signature relays nothing and stays retryable.
-            onRelayStart: () => {
-              paymasterSubmissionStarted = true;
-            },
-          }),
-        {
-          until: 'PRE_CONFIRMED',
-          onStatus: ({ finality }) => onStatus?.(`Submitting deposit (${humanizeFinality(finality)})…`),
-        },
-      );
-      submittedTxHash = transaction_hash;
-    } else {
-      // Manager path: a bare apply_actions (the approve already ran above) with explicit
-      // resourceBounds so the manager's execute skips the proof-less fee estimate that
-      // would revert — see proven-submit.ts.
-      await submitAndTrack(
-        provider,
-        async () => {
-          const res = await submitProvenCall(provider, account, call, proofDetails, {});
-          // Capture the hash the moment the submit lands so a tracking-timeout that
-          // throws AFTER this does NOT re-prove + re-submit (double deposit) — see
-          // the retry guard below.
-          managerDepositTxHash = res.transaction_hash;
-          return res;
-        },
-        {
-          until: 'PRE_CONFIRMED',
-          onStatus: ({ finality }) => onStatus?.(`Submitting deposit (${humanizeFinality(finality)})…`),
-        },
-      );
-      submittedTxHash = managerDepositTxHash;
-    }
+    // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this
+    // attempt's relay/hash state between lag retries). A non-lag error rethrows into the
+    // outer catch below unchanged. See nodeLagRetry.ts.
+    const runSubmit = async (): Promise<void> => {
+      if (paymasterCtx) {
+        // AVNU's relayer submits the proven invoke_and_apply_action (the USDC approve is
+        // the signed user call); the fee withdraw is already in the proof.
+        const { transaction_hash } = await submitAndTrack(
+          provider,
+          () =>
+            paymasterExecuteLeg(account, call, proofDetails, paymasterCtx, {
+              // Flip only when the AVNU relay actually starts (after signMessage) — a
+              // wallet-rejected SNIP-9 signature relays nothing and stays retryable.
+              onRelayStart: () => {
+                paymasterSubmissionStarted = true;
+              },
+            }),
+          {
+            until: 'PRE_CONFIRMED',
+            onStatus: ({ finality }) => onStatus?.(`Submitting deposit (${humanizeFinality(finality)})…`),
+          },
+        );
+        submittedTxHash = transaction_hash;
+      } else {
+        // Manager path: a bare apply_actions (the approve already ran above) with explicit
+        // resourceBounds so the manager's execute skips the proof-less fee estimate that
+        // would revert — see proven-submit.ts.
+        await submitAndTrack(
+          provider,
+          async () => {
+            const res = await submitProvenCall(provider, account, call, proofDetails, {});
+            // Capture the hash the moment the submit lands so a tracking-timeout that
+            // throws AFTER this does NOT re-prove + re-submit (double deposit) — see
+            // the retry guard below.
+            managerDepositTxHash = res.transaction_hash;
+            return res;
+          },
+          {
+            until: 'PRE_CONFIRMED',
+            onStatus: ({ finality }) => onStatus?.(`Submitting deposit (${humanizeFinality(finality)})…`),
+          },
+        );
+        submittedTxHash = managerDepositTxHash;
+      }
+    };
+    await submitReusingProofOnNodeLag(runSubmit, {
+      resetRelayState: () => {
+        paymasterSubmissionStarted = false;
+        managerDepositTxHash = '';
+        submittedTxHash = '';
+      },
+      onStatus,
+    });
   };
 
   // TRACKED-TERMINAL register collision → deposit-only recovery. `build({ autoRegister:
@@ -590,6 +605,10 @@ async function proveAndSubmitDeposit(
             'was not committed. Retry the deposit without autoRegister.',
         );
       }
+      // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
+      // same-anchor re-prove would just node-lag again. Before the fail-closed guard so it
+      // also covers the manager path (mirrors bridgeBack).
+      if (isNodeLagError(err)) throw err;
       // Paymaster path is NOT retryable once paymasterExecuteLeg has been invoked:
       // the AVNU relayer may have already queued/submitted the proven invoke, so
       // a rebuild + fresh SNIP-9 signature would relay a SECOND register+deposit
