@@ -85,6 +85,13 @@ const MAX_STEP_RETRIES = 2;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+// #432 — bounded poll for the folded-deposit sweep to reflect after a "Nonce already used"
+// revert (the accepted≠reflected window). Sized generously over the typical few-second
+// reflection lag; on timeout the convergence gives up and fails closed (never worse than the
+// prior single read). The interval mirrors waitForL2Commit's L2-commit poll.
+const NONCE_CONVERGE_TIMEOUT_MS = 20_000;
+const NONCE_CONVERGE_POLL_MS = 2_500;
+
 // Polls for COMMITTED (ACCEPTED_ON_L2) deployment. A self-deploy lands as
 // pre-confirmed first; register/deposit prove against committed state, so the
 // orchestrator waits here before continuing.
@@ -749,25 +756,40 @@ export async function moveIntoPool(
         // transient-retry loop (a re-fold would just revert "Nonce already used" again):
         // swallow it and fall through to the fail-closed paymaster rethrow with the ORIGINAL
         // AVNU error.
-        let settled: bigint | undefined;
-        try {
-          settled = await readDepositTokenBalance(address);
-        } catch {
-          settled = undefined;
+        // Confirm the funds were swept into the pool. The prior fold's sweep reflects with
+        // the SAME accepted≠reflected lag as the CCTP nonce, so a SINGLE read right after the
+        // revert often still shows the PRE-sweep balance — which used to fall straight through
+        // to fail-closed and force a manual re-click (#432). Poll (bounded) until the balance
+        // shows the funds left the account (<= 0 → swept), converging on the FIRST attempt. A
+        // read error counts as "not reflected yet" and is retried — it must NOT escape to
+        // drive runStep's transient-retry loop (a re-fold would just revert again). On timeout
+        // we fall through to the fail-closed rethrow (never worse than the old single read).
+        const convergeDeadline = Date.now() + NONCE_CONVERGE_TIMEOUT_MS;
+        for (let firstPoll = true; ; firstPoll = false) {
+          let settled: bigint | undefined;
+          try {
+            settled = await readDepositTokenBalance(address);
+          } catch {
+            settled = undefined;
+          }
+          if (settled !== undefined && settled <= 0n) {
+            // Funds already pulled into the pool by the prior atomic fold → COMPLETE. Clear
+            // the deferred burn cursor (the mint is definitively consumed) and any pool cursor,
+            // then emit the normal done terminal so the UI stops offering a doomed retry.
+            mintFold.clearMintCursor();
+            clearPendingPoolDeposit(address);
+            depositWei = fundedNetWei ?? amountWei;
+            emit('deposit', 'done', 'Already deposited into pool.');
+            return;
+          }
+          if (Date.now() > convergeDeadline) break;
+          if (firstPoll) emit('deposit', 'running', 'Confirming the deposit landed…');
+          await sleep(NONCE_CONVERGE_POLL_MS);
         }
-        if (settled !== undefined && settled <= 0n) {
-          // Funds already pulled into the pool by the prior atomic fold → COMPLETE. Clear
-          // the deferred burn cursor (the mint is definitively consumed) and any pool cursor,
-          // then emit the normal done terminal so the UI stops offering a doomed retry.
-          mintFold.clearMintCursor();
-          clearPendingPoolDeposit(address);
-          depositWei = fundedNetWei ?? amountWei;
-          emit('deposit', 'done', 'Already deposited into pool.');
-          return;
-        }
-        // Nonce consumed but funds still sit on the account (impossible for a PURE atomic
-        // fold), OR the balance read failed — fall through to the fail-closed rethrow rather
-        // than silently claim success on an anomalous / unverified half-state.
+        // Timed out without ever observing the sweep (nonce consumed but funds still sit on
+        // the account — impossible for a PURE atomic fold — OR the balance read kept failing):
+        // fall through to the fail-closed rethrow rather than claim success on an anomalous /
+        // unverified half-state.
       }
       // Bug-hunt E2: under an AVNU paymaster we CANNOT distinguish a pre-relay
       // throw from a post-broadcast ambiguous throw at this layer — depositToPool's
