@@ -505,17 +505,59 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
       expect(result.depositedNetWei).toBe(AMOUNT);
     });
 
+    it('reflection lag: sweep not visible on the FIRST read → polls and converges on the first attempt (no re-click) [#432]', async () => {
+      // The accepted≠reflected window: right after the revert the balance still shows the
+      // funded amount, and the sweep reflects only on a LATER poll. BEFORE the fix a single
+      // read saw the funds → fell through to fail-closed → red error → manual re-click. The
+      // bounded poll now waits out the lag and converges on the FIRST attempt.
+      mReadBalance.mockResolvedValueOnce(AMOUNT).mockResolvedValue(0n);
+
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      vi.useRealTimers();
+
+      // Converged on the first attempt (a single deposit call, no re-submission) despite the lag.
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(
+        steps.some(
+          ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
+        ),
+      ).toBe(true);
+      // The whole point: NO scary red error surfaced on the first attempt.
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
+      // It actually POLLED (>1 balance read) rather than giving up on the first read.
+      expect(mReadBalance.mock.calls.length).toBeGreaterThanOrEqual(2);
+      // Convergent completion: cursors cleared, deposited=false (a prior fold committed it).
+      expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+      expect(mClearPending).toHaveBeenCalledWith(ACCOUNT);
+      expect(result.deposited).toBe(false);
+      expect(result.depositedNetWei).toBe(AMOUNT);
+    });
+
     it('residual balance > 0 → fail closed (never claim done on an anomalous half-state)', async () => {
       mReadBalance.mockResolvedValue(AMOUNT); // impossible for a pure atomic fold → guard
 
-      await expect(
-        moveIntoPool({
-          signature: SIGNATURE,
-          funding: 'metamask',
-          amountWei: AMOUNT,
-          provider: fakeProvider(),
-        }),
-      ).rejects.toThrow(/nonce already used/i);
+      // The bounded poll never observes the sweep, so it exhausts its budget and fails closed.
+      vi.useFakeTimers();
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+      }).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = await p;
+      vi.useRealTimers();
+      expect(String(err)).toMatch(/nonce already used/i);
 
       // No false completion: the burn/pool cursors are NOT cleared on the anomalous path.
       expect(clearMintCursorSpy).not.toHaveBeenCalled();
@@ -526,17 +568,21 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
 
     it('balance read FAILS during convergence → fail closed (no false done, no retry loop)', async () => {
       // The post-revert balance read throws (RPC hiccup). It must NOT escape to drive the
-      // transient-retry loop; the run fails closed on the original AVNU error instead.
+      // transient-retry loop; the poll treats it as "not reflected yet", exhausts its budget,
+      // and the run fails closed on the original AVNU error instead.
       mReadBalance.mockRejectedValue(new Error('rpc: fetch failed'));
 
-      await expect(
-        moveIntoPool({
-          signature: SIGNATURE,
-          funding: 'metamask',
-          amountWei: AMOUNT,
-          provider: fakeProvider(),
-        }),
-      ).rejects.toThrow(/nonce already used/i);
+      vi.useFakeTimers();
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+      }).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = await p;
+      vi.useRealTimers();
+      expect(String(err)).toMatch(/nonce already used/i);
 
       expect(clearMintCursorSpy).not.toHaveBeenCalled();
       expect(mDeposit).toHaveBeenCalledTimes(1);
