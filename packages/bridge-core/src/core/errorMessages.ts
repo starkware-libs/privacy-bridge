@@ -46,6 +46,20 @@ const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: 
     pattern: /block hash mismatch[\s\S]*?stored block hash:\s*(?:0x)?0+\b/i,
     message: 'The Starknet node is briefly behind — your funds are safe.',
   },
+  // Single-tx deposit fold (CCTP receive_message folded INTO the pool deposit): an AVNU
+  // code-156 `argent/multicall-failed, Nonce already used, ENTRYPOINT_FAILED` on the FIRST
+  // attempt is the CCTP transmitter's already-consumed-nonce revert — moveIntoPool's own
+  // confirm-poll (is_nonce_used) already tries to converge this to a silent success; this
+  // covers the case where that bounded poll times out before the reflection lag clears. The
+  // deposit committed or is still settling, never lost — display-only: NOT reclassified as
+  // transient (errors.ts keeps the fail-closed markNonRetryable), so the orchestrator never
+  // auto-resubmits (double-mint-fold guard stays intact).
+  {
+    pattern: /nonce already used/i,
+    message:
+      'Your deposit is taking a moment to confirm on-chain. Your funds are safe — tap ' +
+      'Continue to check its status.',
+  },
   // GAS-token shortfall on the source chain (depositIn/returnIn pre-checks). The raw
   // message already names the token (POL/ETH), the amounts, and a faucet — and is a
   // DIFFERENT problem from a USDC/balance gap. PASSTHROUGH so the broad balance rule
