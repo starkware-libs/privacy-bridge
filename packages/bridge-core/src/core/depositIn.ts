@@ -616,6 +616,20 @@ export interface FundFromMetaMaskArgs {
   // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
   // fresh-re-burn behavior.
   onMintAlreadyConsumed?: () => void;
+  // Fired once the source-chain CCTP burn is confirmed — freshly (path 3) or when a
+  // prior run's burn is resumed (path 2) — with the burn tx hash + a source-chain
+  // block-explorer URL for it (when the source config carries one). Lets the caller
+  // surface the EVM-side leg on its deposit receipt: the Starknet mint/deposit tx alone
+  // omits where the funds were burned. Non-secret (public on-chain) and purely
+  // informational — it NEVER fires on the already-funded no-op (nothing burned this op).
+  onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
+}
+
+// Builds a source-chain block-explorer link for a burn tx, or undefined when the
+// source config carries no explorer base (keeps the callback informational-only).
+function burnExplorerUrl(source: EvmCctpSource | undefined, burnTx: string): string | undefined {
+  const base = source?.blockExplorerUrls?.[0];
+  return base ? `${base.replace(/\/+$/, '')}/tx/${burnTx}` : undefined;
 }
 
 // Bridges `amountWei` of USDC from the user's MetaMask into the derived Starknet
@@ -877,6 +891,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // cursor (fail-closed), same as any other unclassified resume failure.
   if (inflight) {
     onStatus?.('Resuming an in-flight deposit (already burned)…');
+    // Surface the (already-committed) burn from the cursor so the receipt links the
+    // EVM leg even when this run only finishes attest/mint. The explorer is resolved
+    // off the cursor's own source chain (authoritative on resume, like the burn tx).
+    args.onBurned?.({
+      burnTxHash: inflight.burnTx,
+      explorerUrl: burnExplorerUrl(getEvmCctpSource(inflight.evmChainId), inflight.burnTx),
+    });
     const result = await finishAttestAndMint(
       inflight.burnTx,
       inflight.sourceDomain,
@@ -1189,6 +1210,10 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       'WARNING: could not save the deposit resume point — do NOT reload this tab until the deposit completes.',
     );
   }
+
+  // The burn is committed on-chain — surface it (hash + source explorer link) so the
+  // caller can show the EVM leg on the deposit receipt, independent of attest/mint below.
+  args.onBurned?.({ burnTxHash: burnTx, explorerUrl: burnExplorerUrl(source, burnTx) });
 
   // 2-3. Attest (Iris is keyed by the EVM SOURCE domain), validate the attested
   // message (Fix 2), mint on Starknet, then clear the cursor. Same path the

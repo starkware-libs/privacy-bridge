@@ -346,6 +346,22 @@ describe('fundFromMetaMask — happy path (MetaMask on a supported source)', () 
     expect(mintCall.calldata[0]).toBe('0x9');
   });
 
+  it('fires onBurned once with the burn tx hash + a source-chain explorer link (fresh path)', async () => {
+    const burned: Array<{ burnTxHash: string; explorerUrl?: string }> = [];
+    await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      onBurned: (info) => burned.push(info),
+    });
+    // The two-tx fallback burn returns '0xburntx'; the source is Amoy, whose configured
+    // block-explorer base yields /tx/<hash> — so the app can link the EVM leg.
+    expect(burned).toEqual([
+      { burnTxHash: '0xburntx', explorerUrl: 'https://amoy.polygonscan.com/tx/0xburntx' },
+    ]);
+  });
+
   it('FAST: quotes the forwarding fee for the EVM→Starknet route, not Starknet→Polygon (issue #142)', async () => {
     // Bug: the fee was always quoted for starknetDomain(25)→polygonDomain(7) (the
     // fund/return route). Deposit-in burns EVM(Amoy, domain 7) → Starknet(25), so the
@@ -643,6 +659,31 @@ describe('fundFromMetaMask — inflight-deposit resume cursor (Fix 1/A2)', () =>
     expect(managerExecute.mock.calls[0][1].entrypoint).toBe('receive_message');
     // Cursor cleared on mint success.
     expect(localStorage.getItem(INFLIGHT_DEPOSIT_KEY)).toBe('{}');
+  });
+
+  it('fires onBurned from the cursor on resume (so the EVM leg links even when only attest/mint remain)', async () => {
+    seedInflightCursor({
+      burnTx: '0x0ab12cd34e',
+      sourceDomain: AMOY.domain,
+      amountWei: AMOUNT.toString(),
+      snRecipient: SN_RECIPIENT,
+      evmChainId: 80002,
+    });
+
+    const burned: Array<{ burnTxHash: string; explorerUrl?: string }> = [];
+    await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      onBurned: (info) => burned.push(info),
+    });
+
+    // The burn tx + its explorer come from the cursor's own source chain (authoritative
+    // on resume), never a fresh burn.
+    expect(burned).toEqual([
+      { burnTxHash: '0x0ab12cd34e', explorerUrl: 'https://amoy.polygonscan.com/tx/0x0ab12cd34e' },
+    ]);
   });
 
   it('#229: RESUME returns the net computed from the PERSISTED maxFee, not a fresh requote', async () => {

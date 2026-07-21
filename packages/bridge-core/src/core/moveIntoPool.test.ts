@@ -1039,4 +1039,46 @@ describe('moveIntoPool — tx hash threading (block-explorer links)', () => {
     expect(rec.txFor('register')).toBeUndefined();
     expect(rec.txFor('deposit')).toBeUndefined();
   });
+
+  it('forwards the EVM burn (hash + explorer url) from fundFromMetaMask to onBurned (metamask)', async () => {
+    // Fresh + metamask-funded: the fund runs in the deposit step, and fundFromMetaMask
+    // reports the confirmed source-chain burn — moveIntoPool relays it to its onBurned so
+    // the app can show the EVM leg (the onStep deposit tx is the Starknet side only).
+    mIsDeployed.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mIsRegistered.mockResolvedValue(false);
+    mEnsureDeployed.mockResolvedValue(100);
+    mFundMM.mockImplementation(async (args) => {
+      args.onBurned?.({ burnTxHash: '0xBURN', explorerUrl: 'https://scan.example/tx/0xBURN' });
+      return AMOUNT;
+    });
+
+    const burned: Array<{ burnTxHash: string; explorerUrl?: string }> = [];
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+      onBurned: (info) => burned.push(info),
+    });
+
+    expect(burned).toEqual([{ burnTxHash: '0xBURN', explorerUrl: 'https://scan.example/tx/0xBURN' }]);
+    // The callback was threaded into fundFromMetaMask (not synthesized by moveIntoPool).
+    expect(typeof mFundMM.mock.calls[0][0].onBurned).toBe('function');
+  });
+
+  it('never calls onBurned for treasury funding (no CCTP burn to surface)', async () => {
+    mIsDeployed.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mIsRegistered.mockResolvedValue(false);
+    mEnsureDeployed.mockResolvedValue(100);
+    const burned = vi.fn();
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'treasury',
+      amountWei: AMOUNT,
+      onBurned: burned,
+    });
+
+    expect(burned).not.toHaveBeenCalled();
+  });
 });
