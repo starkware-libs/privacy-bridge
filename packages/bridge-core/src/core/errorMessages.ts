@@ -9,6 +9,7 @@
 // the same defense-in-depth the fail(...) paths already relied on.
 
 import { sanitizeErrorMessage } from './tx';
+import { WALLET_UNAVAILABLE_COPY, WALLET_UNAVAILABLE_RE } from './walletErrors';
 
 // Ordered table. ORDER MATTERS: first matching pattern wins, so list MORE SPECIFIC
 // signatures before broad catch-alls. Entry shape:
@@ -18,6 +19,10 @@ import { sanitizeErrorMessage } from './tx';
 //   - `appendRaw: true`   → KEEP the copy AND append the sanitized cause in parens, so a
 //       broad catch-all never fully HIDES where/why it fired (visibility during bring-up).
 const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: boolean }> = [
+  // Dead/reloaded wallet extension: the inpage↔extension port was severed (MV3
+  // worker suspended on idle / extension updated), so personal_sign rejects with an
+  // opaque string or times out (see walletErrors.ts). Swap it for actionable copy.
+  { pattern: WALLET_UNAVAILABLE_RE, message: WALLET_UNAVAILABLE_COPY },
   // Write-once register: the pool stores the viewing key once, so re-registering
   // an already-registered account reverts with NON_ZERO_VALUE.
   { pattern: /NON_ZERO_VALUE/i, message: 'This account is already registered.' },
