@@ -38,7 +38,7 @@ import { getCapabilities, sendCalls, waitForCallsStatus } from 'viem/actions';
 
 import type { Account } from 'starknet';
 
-import { config, getEvmCctpSource, type EvmCctpSource } from './config';
+import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
@@ -628,13 +628,6 @@ export interface FundFromMetaMaskArgs {
   onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 
-// Builds a source-chain block-explorer link for a burn tx, or undefined when the
-// source config carries no explorer base (keeps the callback informational-only).
-function burnExplorerUrl(source: EvmCctpSource | undefined, burnTx: string): string | undefined {
-  const base = source?.blockExplorerUrls?.[0];
-  return base ? `${base.replace(/\/+$/, '')}/tx/${burnTx}` : undefined;
-}
-
 // Bridges `amountWei` of USDC from the user's MetaMask into the derived Starknet
 // account via CCTP. Idempotent + resumable (Fix 1 / Bundle A2):
 //   1. if the SN account already holds the NET (a prior fund-in's mint landed)
@@ -899,7 +892,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     // off the cursor's own source chain (authoritative on resume, like the burn tx).
     args.onBurned?.({
       burnTxHash: inflight.burnTx,
-      explorerUrl: burnExplorerUrl(getEvmCctpSource(inflight.evmChainId), inflight.burnTx),
+      explorerUrl: evmExplorerTxUrl(getEvmCctpSource(inflight.evmChainId), inflight.burnTx),
     });
     const result = await finishAttestAndMint(
       inflight.burnTx,
@@ -1216,7 +1209,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
 
   // The burn is committed on-chain — surface it (hash + source explorer link) so the
   // caller can show the EVM leg on the deposit receipt, independent of attest/mint below.
-  args.onBurned?.({ burnTxHash: burnTx, explorerUrl: burnExplorerUrl(source, burnTx) });
+  args.onBurned?.({ burnTxHash: burnTx, explorerUrl: evmExplorerTxUrl(source, burnTx) });
 
   // 2-3. Attest (Iris is keyed by the EVM SOURCE domain), validate the attested
   // message (Fix 2), mint on Starknet, then clear the cursor. Same path the
