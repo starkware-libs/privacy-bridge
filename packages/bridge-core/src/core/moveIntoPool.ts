@@ -37,6 +37,7 @@ import {
 } from './poolDepositCursor';
 import { RESIDUAL_DUST_THRESHOLD_WEI } from './residual';
 import { isTransientError, markNonRetryable } from './errors';
+import { assertNotAborted, isBridgeCancelledError } from './cancel';
 import { humanizeFinality } from './errorMessages';
 import { sanitizeErrorMessage } from './tx';
 
@@ -76,6 +77,13 @@ export interface MoveIntoPoolArgs {
   // (already deployed/registered, deposit resume), and on the paymaster register
   // no-op (folded into the deposit).
   onStep?: (step: MoveStep, status: StepStatus, detail?: string, txHash?: string) => void;
+  // Cooperative abort. Checked BETWEEN steps and threaded into fundFromMetaMask so
+  // its own safe pre-burn boundaries (chain switch, storage probe, approve/burn
+  // prompt) honor it too. The check is NEVER inserted past a broadcast — funds
+  // committed to CCTP can only be recovered by resume, not by cancel. On abort
+  // the orchestrator throws BridgeCancelledError; the caller (app) treats that as
+  // a soft cancel (reset UI, do not show a failure).
+  signal?: AbortSignal;
 }
 
 // Transparent-retry budget for a step whose submit reported a TRANSIENT error even
@@ -163,6 +171,10 @@ interface FundDepositTokenArgs {
   // FIX 1 (fold path): fired on RESUME when the CCTP nonce is already consumed ⟺ a prior
   // atomic fold deposit already committed. The deposit step converges on completion.
   onMintAlreadyConsumed?: () => void;
+  // Forwarded to fundFromMetaMask (metamask funding only) so its pre-burn abort
+  // checks honor the caller's cancel. Ignored by the treasury path (a manager tx
+  // has no wallet prompt to get stuck on).
+  signal?: AbortSignal;
 }
 
 // Funds the derived account with the pool-deposit USDC per `funding`. Returns the
@@ -190,6 +202,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
       deferMint: args.deferMint,
       onMintFold: args.onMintFold,
       onMintAlreadyConsumed: args.onMintAlreadyConsumed,
+      signal: args.signal,
     });
   }
   await ensureDepositTokenFunded({
@@ -221,10 +234,12 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
 export async function moveIntoPool(
   args: MoveIntoPoolArgs,
 ): Promise<{ depositedNetWei: bigint; deposited: boolean }> {
-  const { signature, funding, amountWei, provider, sourceChainId, resume, onStep } = args;
+  const { signature, funding, amountWei, provider, sourceChainId, resume, onStep, signal } = args;
   if (amountWei <= 0n) {
     throw new Error('Amount must be greater than zero.');
   }
+  // Fast-fail if the caller already aborted (avoids a wasted derive + isDeployed read).
+  assertNotAborted(signal, 'start');
 
   // Derive keys from the raw signature — IN-MEMORY ONLY, never logged/persisted.
   const privateKey = deriveStarknetPrivateKey(signature);
@@ -245,12 +260,21 @@ export async function moveIntoPool(
   // failure (or after the transient budget is exhausted); the caller humanizes +
   // surfaces the thrown error and maps the fired step to its UI.
   const runStep = async (step: MoveStep, body: () => Promise<void>): Promise<void> => {
+    // Cooperative cancel: don't even fire (step,'running') for a step past an
+    // aborted signal — otherwise the UI paints the next leg as active for an
+    // instant before the throw rewinds it. BridgeCancelledError is
+    // markNonRetryable, so a mid-body abort short-circuits the retry loop below.
+    assertNotAborted(signal, step);
     emit(step, 'running');
     for (let attempt = 0; ; attempt++) {
       try {
         await body();
         return;
       } catch (err) {
+        // A user cancel is NOT a step failure — it's the caller's intent.
+        // Skip the transient-retry loop AND the (step,'error') emit so the
+        // app can reset progress to idle without a red row.
+        if (isBridgeCancelledError(err)) throw err;
         if (isTransientError(err) && attempt < MAX_STEP_RETRIES) {
           emit(step, 'running', `Submit hiccup — retrying (${attempt + 1}/${MAX_STEP_RETRIES})…`);
           continue;
@@ -354,6 +378,7 @@ export async function moveIntoPool(
         provider,
         sourceChainId,
         onStatus: (m) => emit('deploy', 'running', m),
+        signal,
       });
       funded = true;
     }
@@ -603,6 +628,7 @@ export async function moveIntoPool(
         onMintAlreadyConsumed: () => {
           mintAlreadyConsumed = true;
         },
+        signal,
       });
       funded = true;
 

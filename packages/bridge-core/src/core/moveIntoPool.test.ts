@@ -1041,3 +1041,68 @@ describe('moveIntoPool — tx hash threading (block-explorer links)', () => {
     expect(rec.txFor('deposit')).toBeUndefined();
   });
 });
+
+// A cooperative cancel (from the app's Cancel button or an auto-timeout watchdog)
+// must stop the orchestrator BEFORE the next wallet write. Everything before the
+// CCTP burn broadcast is safe to abort — nothing has moved on-chain — and the
+// step-error emit is deliberately SUPPRESSED for a cancel so the UI can reset to
+// idle rather than painting a red row.
+describe('moveIntoPool — cooperative cancel via AbortSignal', () => {
+  it('an already-aborted signal throws BridgeCancelledError with no step touched', async () => {
+    // A fresh, undeployed account so the deploy step WOULD run absent the abort.
+    mIsDeployed.mockResolvedValue(false);
+    mIsRegistered.mockResolvedValue(false);
+
+    const controller = new AbortController();
+    controller.abort();
+    const rec = stepRecorder();
+
+    await expect(
+      moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'treasury',
+        amountWei: AMOUNT,
+        signal: controller.signal,
+        onStep: rec.onStep,
+      }),
+    ).rejects.toMatchObject({ name: 'BridgeCancelledError', cancelled: true });
+
+    // No step body ran — the abort caught at moveIntoPool's top-of-function guard.
+    expect(mEnsureDeployed).not.toHaveBeenCalled();
+    expect(mRegister).not.toHaveBeenCalled();
+    expect(mDeposit).not.toHaveBeenCalled();
+    // And no step ever fired 'running' (the runStep abort check pre-empts the emit).
+    expect(rec.events).toEqual([]);
+  });
+
+  it('aborting BETWEEN steps stops the next one and does NOT paint a red row', async () => {
+    // Fresh deploy runs; register would run next — abort as soon as deploy finishes.
+    mIsDeployed.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mIsRegistered.mockResolvedValue(false);
+    const controller = new AbortController();
+    mEnsureDeployed.mockImplementation(async () => {
+      controller.abort();
+      return 100;
+    });
+
+    const rec = stepRecorder();
+    await expect(
+      moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'treasury',
+        amountWei: AMOUNT,
+        signal: controller.signal,
+        onStep: rec.onStep,
+      }),
+    ).rejects.toMatchObject({ name: 'BridgeCancelledError' });
+
+    // Deploy completed; register + deposit never fired.
+    expect(rec.statusesFor('deploy')).toContain('done');
+    expect(mRegister).not.toHaveBeenCalled();
+    expect(mDeposit).not.toHaveBeenCalled();
+    // A cancel is user intent, NOT a step failure — no 'error' status is emitted
+    // (the UI resets to idle instead of showing a red row).
+    expect(rec.statusesFor('register')).not.toContain('error');
+    expect(rec.statusesFor('deposit')).not.toContain('error');
+  });
+});

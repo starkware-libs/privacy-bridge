@@ -62,6 +62,7 @@ import { switchChain, type EthereumProvider } from '../lib/ethereum';
 import { hasAnyInflightReturn } from './returnIn';
 import { hasAnyInflightBurn } from './account-store';
 import { assertStorageWritable } from './storageProbe';
+import { assertNotAborted } from './cancel';
 
 // CCTP Standard finality (free, finalized) — the default. 1000 = Fast (a small fee).
 const STANDARD_FINALITY = STANDARD_FINALITY_THRESHOLD;
@@ -629,6 +630,13 @@ export interface FundFromMetaMaskArgs {
   // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
   // fresh-re-burn behavior.
   onMintAlreadyConsumed?: () => void;
+  // Cooperative abort for the PRE-BURN phases. Checked at each safe boundary — before
+  // resolveSource, before the storage probe, and before the approve/burn submit — and
+  // NEVER after the burn broadcast (funds are committed to CCTP once the burn lands).
+  // On abort the function throws BridgeCancelledError; the RESUME path ignores the
+  // signal entirely (a resume runs only when a burn has already landed and must not
+  // strand funds mid-attestation).
+  signal?: AbortSignal;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -701,10 +709,14 @@ async function waitForBatchStatus(
 // so the caller deposits exactly what landed (never the gross). Standard → maxFee 0 →
 // net == gross (unchanged). Returns the net minted amount (USDC base units).
 export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigint> {
-  const { evmAddress, snRecipient, account: snAccount, amountWei, onStatus } = args;
+  const { evmAddress, snRecipient, account: snAccount, amountWei, onStatus, signal } = args;
   if (amountWei <= 0n) {
     throw new Error('fundFromMetaMask: amount must be greater than zero.');
   }
+  // NOTE: the abort check is deliberately DEFERRED to the fresh-path entry (below).
+  // A pre-flight check here would also abort the resume path (attest + mint on an
+  // already-landed burn), which must never be cancelable — cancelling a resume
+  // strands funds that are already committed to CCTP.
 
   // Finality + max_fee. Explicit args win (back-compat / tests); otherwise derive
   // from `fast` (defaults to config.cctp.fast). Fast quotes the forwarding max_fee
@@ -973,11 +985,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   }
 
   // (3) FRESH PATH.
+  assertNotAborted(signal, 'fresh-path');
   const ethProvider = args.provider;
   if (!ethProvider) {
     throw new Error('fundFromMetaMask: no wallet (EIP-1193 provider) was provided.');
   }
   const source = await resolveSource(ethProvider, onStatus, args.sourceChainId);
+  assertNotAborted(signal, 'source-resolved');
 
   const eip1193 = ethProvider as unknown as EIP1193Provider;
   const account = evmAddress as `0x${string}`;
@@ -1093,6 +1107,11 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // reload couldn't resume and the user could re-burn (double-spend). FRESH path
   // only; the resume path above has already burned.
   assertStorageWritable(STORAGE_PROBE_KEY, 'a deposit');
+
+  // LAST safe abort boundary: everything below submits a wallet write. Once
+  // sendCalls / writeContract returns a hash the burn is broadcast and funds
+  // are committed to CCTP — no further abort checks (recovery is via resume).
+  assertNotAborted(signal, 'pre-burn');
 
   // Belt-and-braces (#192): even after the preflight, gas price can spike between
   // the read above and broadcast. If viem still throws a RAW "insufficient funds"
@@ -1229,6 +1248,12 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       }),
     );
     await publicClient.waitForTransactionReceipt({ hash: approveTx });
+
+    // Between the approve landing and the burn submit, the wallet re-prompts for the
+    // burn confirmation. That popup can hang; a cancel here is still safe (the burn
+    // has not been broadcast yet — only an allowance was set, and allowances are idle
+    // capital, not committed funds).
+    assertNotAborted(signal, 'pre-burn-two-tx');
 
     // 1b. Burn the USDC toward the Starknet account (CCTP destinationDomain = Starknet).
     onStatus?.('Burning USDC on the source chain (CCTP)…');

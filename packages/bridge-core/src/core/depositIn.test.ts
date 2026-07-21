@@ -1866,3 +1866,101 @@ describe('isNonceAlreadyUsedError', () => {
     }
   });
 });
+
+// A cooperative cancel that fires BEFORE the burn is broadcast must refuse to submit
+// depositForBurn — funds can only be unrecoverable AFTER the burn lands, so a
+// cancel here is safe and MUST NOT re-emerge as a "resume" write. Once the burn
+// has broadcast, cancel is powerless (funds committed to CCTP); the resume cursor
+// is the recovery path and is unaffected by an already-aborted signal.
+describe('fundFromMetaMask — cooperative cancel via AbortSignal', () => {
+  it('an already-aborted signal throws BridgeCancelledError with no burn', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      fundFromMetaMask({
+        evmAddress: EVM_ADDRESS,
+        snRecipient: SN_RECIPIENT,
+        provider: ethProvider,
+        amountWei: AMOUNT,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'BridgeCancelledError', cancelled: true });
+
+    // No approve / burn / attestation ever went out.
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(waitForAttestation).not.toHaveBeenCalled();
+    // And no resume cursor was written — pre-burn cancel leaves NO state behind.
+    expect(hasInflightDeposit(EVM_ADDRESS)).toBe(false);
+  });
+
+  it('a signal aborted BETWEEN approve and burn stops the burn (two-tx path)', async () => {
+    const controller = new AbortController();
+    writeContract.mockImplementation(async (call: WriteArg) => {
+      // The approve is the first wallet write. Cancel just as it settles, so the
+      // pre-burn abort boundary catches it before depositForBurn is submitted.
+      if (call.functionName === 'approve') {
+        controller.abort();
+        return '0xapprovetx' as `0x${string}`;
+      }
+      return '0xburntx' as `0x${string}`;
+    });
+
+    await expect(
+      fundFromMetaMask({
+        evmAddress: EVM_ADDRESS,
+        snRecipient: SN_RECIPIENT,
+        provider: ethProvider,
+        amountWei: AMOUNT,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'BridgeCancelledError' });
+
+    // Approve went; burn did NOT — the abort caught the boundary between them.
+    const wroteBurn = writeContract.mock.calls.some(
+      (c) => c[0].functionName === 'depositForBurn',
+    );
+    expect(wroteBurn).toBe(false);
+    // Nothing to resume — no burn = no cursor.
+    expect(hasInflightDeposit(EVM_ADDRESS)).toBe(false);
+  });
+
+  it('does NOT abort a RESUME (a resume runs only when the burn already landed)', async () => {
+    // Persist a valid resume cursor for THIS funder. `burnTx` must match HEX_RE
+    // (^0x[0-9a-fA-F]+$) or the validated reader drops it and the resume path
+    // falls through to a fresh burn.
+    localStorage.setItem(
+      INFLIGHT_DEPOSIT_KEY,
+      JSON.stringify({
+        [EVM_ADDRESS.toLowerCase()]: {
+          burnTx: `0x${'ab'.repeat(32)}`,
+          sourceDomain: AMOY.domain,
+          amountWei: AMOUNT.toString(),
+          snRecipient: SN_RECIPIENT,
+          evmChainId: AMOY.chainId,
+        },
+      }),
+    );
+
+    const controller = new AbortController();
+    controller.abort();
+
+    // The resume path finishes attest+mint regardless of the signal — cancelling a
+    // resume would strand already-committed funds, so the signal is checked only
+    // BEFORE the fresh-path work. Here the account balance is 0 (default), so the
+    // resume path runs to attestation which completes with the mocked message.
+    await expect(
+      fundFromMetaMask({
+        evmAddress: EVM_ADDRESS,
+        snRecipient: SN_RECIPIENT,
+        provider: ethProvider,
+        amountWei: AMOUNT,
+        signal: controller.signal,
+      }),
+    ).resolves.toBeTypeOf('bigint');
+
+    // The resume did NOT re-approve/re-burn (it starts at attestation).
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(waitForAttestation).toHaveBeenCalledTimes(1);
+  });
+});
