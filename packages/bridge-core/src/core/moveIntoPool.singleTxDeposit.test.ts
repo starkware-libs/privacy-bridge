@@ -203,6 +203,38 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
     expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
   });
 
+  it('fold path anchors the deposit proof on deployBlock, NOT the post-attestation head (matches the prove-ahead anchor)', async () => {
+    // On the fold path the CCTP mint is deferred INTO the deposit tx — no standalone
+    // Starknet mint commits during funding. Recording `getCurrentBlock()` as the funding
+    // head there would be a spurious "latest" with no on-chain dep to age past: an inline
+    // re-prove (prebuilt-proof mismatch — AVNU fee drift, autoRegister flip) would then
+    // wait ~8 blocks past `latest` instead of past the (minutes-buried) deploy, adding
+    // ~16 s of pointless aging to the tail of the deposit. buildDepositProofAhead already
+    // uses deployBlock — the two paths must agree on the anchor.
+    configMock.paymaster = { feeMode: 'sponsored' };
+    // Fresh account: deploys THIS run (deployBlock=50), so the deposit needs a real
+    // anchor (immediateProve OFF — deployedAtStart is false). Registered at start so
+    // register isn't a fresh dep either (mirrors the fold's a-priori premise). Post-
+    // funding head mock returns 100 — the spurious latest we must NOT anchor on.
+    mIsDeployed.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mIsRegistered.mockResolvedValue(true);
+    mEnsureDeployed.mockResolvedValue(50);
+    mGetCurrentBlock.mockResolvedValue(100);
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    expect(mDeposit).toHaveBeenCalledTimes(1);
+    // A fold this run (foldMint threaded) proves it took the fold path.
+    expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
+    // RED pre-fix: 100 (getCurrentBlock, a spurious latest). GREEN after: 50 (deployBlock).
+    expect(mDeposit.mock.calls[0]![0].lastTxBlockNumber).toBe(50);
+  });
+
   it('a prove-ahead failure is swallowed — the deposit still proceeds (proves fresh inline)', async () => {
     configMock.paymaster = { feeMode: 'sponsored' };
     mBuildAhead.mockRejectedValue(new Error('prover hiccup'));
