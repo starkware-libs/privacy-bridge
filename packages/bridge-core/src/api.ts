@@ -44,5 +44,6 @@ export * from './core/strkPrice';
 export * from './core/tx';
 export * from './core/errors';
 export * from './core/errorMessages';
+export * from './core/walletErrors';
 export * from './core/account-store';
 export * from './core/polygonClient';
