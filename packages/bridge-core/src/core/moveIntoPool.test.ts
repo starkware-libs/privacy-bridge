@@ -1081,4 +1081,36 @@ describe('moveIntoPool — tx hash threading (block-explorer links)', () => {
 
     expect(burned).not.toHaveBeenCalled();
   });
+
+  it('de-dupes onBurned to once-per-burn when the fund resumes across a transient retry', async () => {
+    // fundFromMetaMask fires onBurned on BOTH a fresh burn and a later RESUME of that same
+    // burn. A transient failure AFTER the burn (attest/mint) leaves `funded` false, so the
+    // deposit step re-enters funding → fundFromMetaMask resume path → a SECOND onBurned for
+    // the SAME hash. moveIntoPool must forward the burn to its caller EXACTLY once.
+    mIsDeployed.mockResolvedValue(true);
+    mIsRegistered.mockResolvedValue(true);
+    let call = 0;
+    mFundMM.mockImplementation(async (args) => {
+      call += 1;
+      args.onBurned?.({ burnTxHash: '0xBURN', explorerUrl: 'https://scan.example/tx/0xBURN' });
+      // 1st attempt: burn committed, then attest/mint hits a transient error (funded stays
+      // false → runStep retries the deposit body). 2nd attempt: resume + succeed.
+      if (call === 1) throw new Error('submitAndTrack: timed out after 120000ms for 0xBURN');
+      return AMOUNT;
+    });
+
+    const burned: Array<{ burnTxHash: string; explorerUrl?: string }> = [];
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+      onBurned: (info) => burned.push(info),
+    });
+
+    // fundFromMetaMask ran twice (fresh burn + resume), firing onBurned each time…
+    expect(mFundMM).toHaveBeenCalledTimes(2);
+    // …but the caller sees the burn exactly ONCE.
+    expect(burned).toEqual([{ burnTxHash: '0xBURN', explorerUrl: 'https://scan.example/tx/0xBURN' }]);
+  });
 });

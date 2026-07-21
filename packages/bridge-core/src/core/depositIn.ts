@@ -616,12 +616,15 @@ export interface FundFromMetaMaskArgs {
   // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
   // fresh-re-burn behavior.
   onMintAlreadyConsumed?: () => void;
-  // Fired once the source-chain CCTP burn is confirmed — freshly (path 3) or when a
-  // prior run's burn is resumed (path 2) — with the burn tx hash + a source-chain
-  // block-explorer URL for it (when the source config carries one). Lets the caller
-  // surface the EVM-side leg on its deposit receipt: the Starknet mint/deposit tx alone
-  // omits where the funds were burned. Non-secret (public on-chain) and purely
-  // informational — it NEVER fires on the already-funded no-op (nothing burned this op).
+  // Fired when the source-chain CCTP burn is confirmed — on a FRESH burn (path 3) or when a
+  // prior run's burn is RESUMED from the cursor (path 2) — with the burn tx hash + a
+  // source-chain block-explorer URL for it (when the source config carries one). Lets the
+  // caller surface the EVM-side leg on its deposit receipt: the Starknet mint/deposit tx alone
+  // omits where the funds were burned. Non-secret (public on-chain) and purely informational —
+  // it NEVER fires on the already-funded no-op (nothing burned this op). This is PER-INVOCATION:
+  // a caller that RETRIES fundFromMetaMask after a fresh burn (e.g. a transient attest/mint
+  // failure) sees it fire AGAIN for the SAME hash on the resume, so callers that retry must
+  // de-dupe by burnTxHash — moveIntoPool does, making its own onBurned strictly once-per-burn.
   onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 

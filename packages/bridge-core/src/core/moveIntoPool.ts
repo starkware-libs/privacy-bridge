@@ -70,11 +70,13 @@ export interface MoveIntoPoolArgs {
   // (already deployed/registered, deposit resume), and on the paymaster register
   // no-op (folded into the deposit).
   onStep?: (step: MoveStep, status: StepStatus, detail?: string, txHash?: string) => void;
-  // Fired once the metamask-funding CCTP burn is confirmed (fresh or resumed), with the
-  // EVM burn tx hash + a source-chain explorer URL. The `deposit`/`deploy` onStep txHash
-  // is the STARKNET-side leg only; this surfaces the EVM SOURCE leg so the app can list
-  // both on the deposit receipt (mirrors the withdraw, which returns burnTxHash). Never
-  // fires for treasury funding (no CCTP burn) or the already-funded no-op.
+  // Fired AT MOST ONCE PER BURN once the metamask-funding CCTP burn is confirmed (fresh or
+  // resumed), with the EVM burn tx hash + a source-chain explorer URL. The `deposit`/`deploy`
+  // onStep txHash is the STARKNET-side leg only; this surfaces the EVM SOURCE leg so the app
+  // can list both on the deposit receipt (mirrors the withdraw, which returns burnTxHash).
+  // De-duped internally: fundFromMetaMask re-fires it on a resume of the same burn (e.g. after
+  // a transient attest/mint retry), but moveIntoPool forwards only the first sighting per hash.
+  // Never fires for treasury funding (no CCTP burn) or the already-funded no-op.
   onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 
@@ -218,6 +220,21 @@ export async function moveIntoPool(
     throw new Error('Amount must be greater than zero.');
   }
 
+  // De-dupe onBurned to at most once per burn hash (its documented once-per-burn contract).
+  // fundFromMetaMask fires it on BOTH a fresh burn and a later RESUME of that same burn; a
+  // transient attest/mint failure inside fundDepositToken leaves `funded` false, so runStep
+  // re-enters the deposit (or deploy) body → fundFromMetaMask resume path → a SECOND onBurned
+  // for the identical hash. Both fund call sites go through this wrapper so any burn surfaces
+  // exactly once regardless of which step funded or how many transient retries it took.
+  const seenBurns = new Set<string>();
+  const onBurnedOnce = onBurned
+    ? (info: { burnTxHash: string; explorerUrl?: string }) => {
+        if (seenBurns.has(info.burnTxHash)) return;
+        seenBurns.add(info.burnTxHash);
+        onBurned(info);
+      }
+    : undefined;
+
   // Derive keys from the raw signature — IN-MEMORY ONLY, never logged/persisted.
   const privateKey = deriveStarknetPrivateKey(signature);
   const viewingKey = deriveViewingKey(signature);
@@ -345,7 +362,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
-        onBurned,
+        onBurned: onBurnedOnce,
         onStatus: (m) => emit('deploy', 'running', m),
       });
       funded = true;
@@ -541,7 +558,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
-        onBurned,
+        onBurned: onBurnedOnce,
         onStatus: (m) => emit('deposit', 'running', m),
         // On the fold path defer the mint: fundFromMetaMask returns the attested bytes
         // via onMintFold instead of submitting the standalone mint tx. The mint then
