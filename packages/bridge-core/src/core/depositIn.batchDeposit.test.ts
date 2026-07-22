@@ -27,6 +27,8 @@ const {
   getGasPrice,
   estimateFeesPerGas,
   estimateContractGas,
+  getLogs,
+  getBlockNumber,
   custom,
   http,
   defineChain,
@@ -65,6 +67,11 @@ const {
       maxPriorityFeePerGas: 1_000_000_000n,
     })),
     estimateContractGas: vi.fn(async (): Promise<bigint> => 50_000n),
+    // publicClient.getLogs / getBlockNumber used by waitForBatchStatus's on-chain
+    // burn-event scan. Default: no matching log (existing tests untouched); the
+    // block-number snapshot returns a small placeholder.
+    getLogs: vi.fn(async () => [] as unknown[]),
+    getBlockNumber: vi.fn(async (): Promise<bigint> => 100n),
     custom: vi.fn((p: unknown) => ({ _custom: p })),
     http: vi.fn((url?: string) => ({ _http: url })),
     defineChain: vi.fn((c: { id: number }) => c),
@@ -95,6 +102,8 @@ vi.mock('viem', () => ({
     getGasPrice,
     estimateFeesPerGas,
     estimateContractGas,
+    getLogs,
+    getBlockNumber,
   })),
   custom,
   http,
@@ -182,6 +191,9 @@ beforeEach(() => {
     (call.functionName === 'approve' ? '0xapprovetx' : '0xburntx') as `0x${string}`,
   );
   getCallsStatus.mockResolvedValue(SUCCESS_STATUS);
+  // Scan defaults: no on-chain burn visible (existing tests unaffected).
+  getLogs.mockResolvedValue([]);
+  getBlockNumber.mockResolvedValue(100n);
 });
 
 afterEach(() => {
@@ -323,5 +335,121 @@ describe('fundFromMetaMask — batch-status (5730) resilience', () => {
 
     await expect(fundFromMetaMask({ ...DEPOSIT })).rejects.toThrow(/connection reset/i);
     expect(writeContract).not.toHaveBeenCalled();
+  });
+});
+
+describe('fundFromMetaMask — burn-event scan (chain-truth fallback for a wallet stuck on 5730)', () => {
+  // snAddressToBytes32('0x49abc') left-pads to 32 bytes lowercase.
+  const MINT_RECIPIENT_BYTES32 =
+    '0x0000000000000000000000000000000000000000000000000000000000049abc' as const;
+  // POLYGON_USDC_ADDRESS fixture (vitest.setup.ts) → source.usdc for the Amoy source.
+  const SOURCE_USDC = '0x00000000000000000000000000000000000000a4' as const;
+  // config.cctp.starknetDomain defaults to 25 when CCTP_STARKNET_DOMAIN is unset.
+  const STARKNET_DOMAIN = 25;
+  const buildBurnLog = (
+    over: Partial<{
+      amount: bigint;
+      mintRecipient: `0x${string}`;
+      destinationDomain: number;
+      burnToken: `0x${string}`;
+      transactionHash: `0x${string}`;
+    }> = {},
+  ) => ({
+    address: '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA',
+    args: {
+      burnToken: over.burnToken ?? SOURCE_USDC,
+      amount: over.amount ?? 1_000_000n,
+      depositor: EVM_ADDRESS.toLowerCase(),
+      mintRecipient: over.mintRecipient ?? MINT_RECIPIENT_BYTES32,
+      destinationDomain: over.destinationDomain ?? STARKNET_DOMAIN,
+      destinationTokenMessenger: `0x${'00'.repeat(32)}` as const,
+      destinationCaller: `0x${'00'.repeat(32)}` as const,
+      maxFee: 1000n,
+      minFinalityThreshold: 1000,
+      hookData: '0x' as const,
+    },
+    transactionHash: over.transactionHash ?? ('0xscanburn' as `0x${string}`),
+    blockNumber: 101n,
+    logIndex: 0,
+  });
+
+  it('wallet stuck on 5730 but burn is visible on chain: breaks the 180s wait via the on-chain scan', async () => {
+    getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
+    // MetaMask permanently returns "No matching bundle found" — the exact user-reported
+    // failure the fix is for. Without the scan this would time out at 180s.
+    getCallsStatus.mockRejectedValue(new UnknownBundleIdError());
+    // Chain shows our own burn on the second poll iteration.
+    getLogs.mockResolvedValueOnce([]).mockResolvedValue([buildBurnLog()]);
+
+    vi.useFakeTimers();
+    const promise = fundFromMetaMask({ ...DEPOSIT });
+    await vi.runAllTimersAsync();
+    const net = await promise;
+
+    // Single batch — we did NOT fall through to the two-tx path.
+    expect(sendCalls).toHaveBeenCalledTimes(1);
+    expect(writeContract).not.toHaveBeenCalled();
+    // Attest is driven by the scan-discovered tx hash, not any receipt from the wallet.
+    expect(waitForAttestation).toHaveBeenCalledWith('0xscanburn', expect.anything());
+    expect(net).toBe(999_000n);
+    // Block-number snapshot was taken BEFORE sendCalls (so a same-block burn is covered).
+    expect(getBlockNumber).toHaveBeenCalled();
+    const snapshotOrder = getBlockNumber.mock.invocationCallOrder[0];
+    const sendCallsOrder = sendCalls.mock.invocationCallOrder[0];
+    expect(snapshotOrder).toBeLessThan(sendCallsOrder);
+  });
+
+  it('scan filter: non-matching logs (wrong amount / recipient / depositor) are NOT treated as our burn', async () => {
+    getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
+    getCallsStatus.mockRejectedValue(new UnknownBundleIdError());
+    // Every poll returns burn logs that DON'T match this submission: wrong amount, wrong
+    // recipient, and a stale-looking log from a different depositor. None should match.
+    getLogs.mockResolvedValue([
+      buildBurnLog({ amount: 999_999n, transactionHash: '0xwrongamount' }),
+      buildBurnLog({
+        mintRecipient: `0x${'00'.repeat(31)}ff` as `0x${string}`,
+        transactionHash: '0xwrongrecipient',
+      }),
+      buildBurnLog({ destinationDomain: 99, transactionHash: '0xwrongdomain' }),
+      buildBurnLog({
+        burnToken: '0x00000000000000000000000000000000000000ff',
+        transactionHash: '0xwrongtoken',
+      }),
+    ]);
+
+    vi.useFakeTimers();
+    const promise = fundFromMetaMask({ ...DEPOSIT }).catch((error: unknown) => error);
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    // No spurious match → still hits the 180s timeout, same as pre-fix behavior.
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toMatch(/could not be confirmed/i);
+    // Critically: no re-burn was attempted from a wrong-log false positive.
+    expect(waitForAttestation).not.toHaveBeenCalled();
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(sendCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it('getLogs throws on every iteration: scan hiccup does NOT abort the outer poll — getCallsStatus success still wins', async () => {
+    getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
+    // Two 5730s, then a genuine batch success from the wallet. Meanwhile getLogs is broken.
+    getCallsStatus
+      .mockRejectedValueOnce(new UnknownBundleIdError())
+      .mockRejectedValueOnce(new UnknownBundleIdError())
+      .mockResolvedValue(SUCCESS_STATUS);
+    getLogs.mockRejectedValue(new Error('RPC 429 rate-limited'));
+
+    vi.useFakeTimers();
+    const promise = fundFromMetaMask({ ...DEPOSIT });
+    await vi.runAllTimersAsync();
+    const net = await promise;
+
+    // The scan RPC error was swallowed silently — no propagation, no re-burn.
+    expect(sendCalls).toHaveBeenCalledTimes(1);
+    expect(writeContract).not.toHaveBeenCalled();
+    // Downstream still uses the getCallsStatus receipt (not any scan artefact).
+    expect(waitForAttestation).toHaveBeenCalledWith('0xbatchburn', expect.anything());
+    expect(net).toBe(999_000n);
   });
 });
