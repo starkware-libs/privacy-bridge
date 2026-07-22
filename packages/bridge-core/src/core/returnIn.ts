@@ -172,6 +172,14 @@ export interface InflightReturn {
   // backward-compat: a cursor written before this field falls back to the current config
   // address (migrate-on-read) — correct as long as the address hasn't changed since.
   inboundAnonymizer?: string;
+  // The account CHANNEL the burned index belongs to (see account-store). The commitment
+  // in the burn's hookData binds the channel (via the account nonce), so a resume/recover
+  // MUST re-derive with THIS channel — recoverBridgeIn/scanUnclaimedReturns read it here
+  // and self-route (like inboundAnonymizer/sourceDomain), so a channel-blind caller
+  // recovers a channel's return without knowing its channel. OPTIONAL/backward-compat:
+  // absent on default-channel + pre-channel cursors → undefined = the default (byte-
+  // identical) derivation.
+  channel?: string;
   // LEGACY (ignored): pre-fold cursors carried a two-phase field. Kept optional so a
   // cursor written before the single-tx fold still validates + resumes.
   phase?: 'cctp' | 'claim';
@@ -236,7 +244,10 @@ export function isValidInflightReturn(value: unknown): value is InflightReturn {
     // OPTIONAL (backward-compat): absent on pre-redeploy cursors → falls back to config.
     // When present it must be a 0x-hex Starknet address (the burn-time InboundAnonymizer).
     (r.inboundAnonymizer === undefined ||
-      (typeof r.inboundAnonymizer === 'string' && /^0x[0-9a-fA-F]+$/.test(r.inboundAnonymizer)))
+      (typeof r.inboundAnonymizer === 'string' && /^0x[0-9a-fA-F]+$/.test(r.inboundAnonymizer))) &&
+    // OPTIONAL (backward-compat): absent on default-channel + pre-channel cursors. When
+    // present it must be a string (deriveAccountNonce re-validates its slug shape).
+    (r.channel === undefined || typeof r.channel === 'string')
   );
 }
 
@@ -356,6 +367,10 @@ export type SubmitGaslessBatch = (calls: ReturnBurnCall[]) => Promise<string>;
 export interface ReturnBurnToPoolArgs {
   // The account whose per-account deposit wallet holds the USDC to return (cross-account guard).
   accountIndex: number;
+  // The account CHANNEL the index belongs to (see account-store). Persisted VERBATIM into
+  // the resume cursor on the FRESH burn so a later resume/recover re-derives the commitment
+  // in the right keyspace. undefined = the default channel. Inert on a resume (no re-write).
+  channel?: string;
   // USDC base units (6 dp) to return. Must be > 0.
   amount: bigint;
   // The connected EVM address used to KEY the resume cursor.
@@ -412,7 +427,7 @@ export interface ReturnBurnResult {
 // Leaves the cursor in place on success (the claim stage clears it after the folded
 // claim lands). Never mints or claims here.
 export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<ReturnBurnResult> {
-  const { accountIndex, amount, evmAddress, commitment, depositWallet, submitGaslessBatch, onStatus } =
+  const { accountIndex, channel, amount, evmAddress, commitment, depositWallet, submitGaslessBatch, onStatus } =
     args;
   const minFinalityThreshold = args.minFinalityThreshold ?? STANDARD_FINALITY;
   const maxFee = args.maxFee ?? 0n;
@@ -609,6 +624,10 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     // reference it) so a resume/recover after a config redeploy claims against the SAME
     // contract the burn targeted — not the new config address.
     inboundAnonymizer: inbound,
+    // Pin the channel so a resume/recover re-derives the commitment in the SAME keyspace
+    // the burn bound (recoverBridgeIn/scanUnclaimedReturns read it and self-route). Omitted
+    // key on default-channel cursors (undefined) keeps them byte-identical to pre-channel.
+    channel,
   };
   if (!writeInflightReturnVerified(evmAddress, record)) {
     onStatus?.(
@@ -669,6 +688,11 @@ export interface ReturnToPoolArgs {
   signature: string;
   // The account whose per-account deposit wallet holds the USDC to return.
   accountIndex: number;
+  // The account CHANNEL (see account-store) the accountIndex belongs to. The caller
+  // MUST pass the SAME channel used at fund time so the nonce/commitment re-derived
+  // here matches what was bound on-chain (else COMMITMENT_MISMATCH → unclaimable).
+  // undefined = the default channel. Sourced from the account's channel-namespaced record.
+  channel?: string;
   // The connected EVM address that KEYS the resume cursor.
   evmAddress: string;
   // Injected FRESH-path prep (convert proceeds → native USDC, size the burn, build
@@ -732,7 +756,7 @@ export interface ReturnToPoolResult {
 //   - fresh: prepareFreshReturn() sizes + burns, then claims.
 // The cursor is CLEARED after the claim (the claim stage is its documented owner).
 export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPoolResult> {
-  const { signature, accountIndex, evmAddress, prepareFreshReturn, readReturnableBalance, destChainId, onStep } =
+  const { signature, accountIndex, channel, evmAddress, prepareFreshReturn, readReturnableBalance, destChainId, onStep } =
     args;
   const minFinalityThreshold = args.minFinalityThreshold ?? STANDARD_FINALITY;
   const maxFee = args.maxFee ?? 0n;
@@ -761,7 +785,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // input that derives the commitment carried in the burn's hookData — so both legs
   // reference the SAME commitment (COMMITMENT_MISMATCH otherwise).
   const viewingKey = deriveViewingKey(signature);
-  const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
+  const accountNonce = deriveAccountNonce(viewingKey, accountIndex, channel);
   const snPrivateKey = deriveStarknetPrivateKey(signature);
   const { address: snAddress } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
   // userPrivateKey MUST be the VIEWING key, not the Starknet account key: the
@@ -792,13 +816,17 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // CROSS-ACCOUNT GUARD (fund-safety): the cursor is keyed by EVM address only. If a
   // return for a DIFFERENT account is already in flight, refuse — resuming it under this
   // identity would attest another account's burn and then prove THIS commitment against
-  // it (COMMITMENT_MISMATCH / cross-account claim / stranding). Runs BEFORE the stale
-  // re-validation so the balance probe (which reads THIS account's wallet) never decides
-  // another account's cursor is stale.
-  if (cursor && cursor.accountIndex !== accountIndex) {
+  // it (COMMITMENT_MISMATCH / cross-account claim / stranding). The account identity is
+  // (channel, accountIndex): a DIFFERENT channel at the same index is a different wallet +
+  // commitment, so it must refuse too (both undefined = the default channel). Runs BEFORE
+  // the stale re-validation so the balance probe (which reads THIS account's wallet) never
+  // decides another account's cursor is stale.
+  if (cursor && (cursor.accountIndex !== accountIndex || cursor.channel !== channel)) {
+    const cursorLabel = cursor.channel ? `${cursor.channel} #${cursor.accountIndex}` : `#${cursor.accountIndex}`;
+    const requestedLabel = channel ? `${channel} #${accountIndex}` : `#${accountIndex}`;
     const err = new Error(
-      `A return for account #${cursor.accountIndex} is already in progress — ` +
-        `finish or resume it before returning account #${accountIndex}.`,
+      `A return for account ${cursorLabel} is already in progress — ` +
+        `finish or resume it before returning account ${requestedLabel}.`,
     );
     emit('cctp', 'error', err.message);
     throw err;
@@ -837,6 +865,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     try {
       burnResult = await returnBurnToPool({
         accountIndex,
+        channel,
         amount,
         evmAddress,
         commitment,
@@ -872,6 +901,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     try {
       burnResult = await returnBurnToPool({
         accountIndex,
+        channel,
         amount,
         evmAddress,
         commitment,
@@ -942,7 +972,9 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
 // claim needs the CCTP message/attestation, obtainable ONLY from the persisted burn tx
 // via Iris — there is no on-chain per-commitment ledger to scan cross-device anymore. So
 // this recovers on the device that holds the burn cursor. Idempotent + fund-safe:
-//   - match THIS identity's cursor by commitment (re-derived from signature+accountIndex);
+//   - match THIS identity's cursor by commitment (re-derived from signature + accountIndex +
+//     the cursor's OWN channel — self-routing, so a channel-blind caller like
+//     resumeBridgeTransfer recovers a channel's return without knowing its channel);
 //   - re-fetch the attestation (idempotent on burnTx);
 //   - CCTP nonce consumed ⟺ the folded claim already landed → clear + no-op;
 //   - else run the SAME folded claim as returnToPool. A reverted claim consumes no nonce,
@@ -951,7 +983,10 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
 export interface RecoverBridgeInArgs {
   // EVM wallet signature of the app's identity sign-message (in-memory only, never logged).
   signature: string;
-  // Non-secret per-account index → the deterministic per-return nonce/commitment.
+  // Non-secret per-account index → the deterministic per-return nonce/commitment. The
+  // CHANNEL is NOT an arg: it is read from each cursor (record.channel) and folded into
+  // the re-derived commitment per-cursor (self-routing), so this recovers a channel's
+  // return without the caller supplying the channel.
   accountIndex: number;
   onStatus?: (s: string) => void;
 }
@@ -980,7 +1015,6 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
   const viewingKey = deriveViewingKey(signature);
   const snPrivateKey = deriveStarknetPrivateKey(signature);
   const { address: snAddress } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
-  const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
 
   // Find this identity's post-burn cursor by re-deriving the commitment the burn carried in
   // its hookData and matching it (proves ownership without the EVM address). The commitment
@@ -996,6 +1030,10 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
       const recInbound = rec.inboundAnonymizer ?? inbound;
       let expected: bigint;
       try {
+        // Re-derive the nonce with the cursor's OWN channel (self-routing — a channel-blind
+        // caller need not know it), exactly as the burn bound it. undefined = default. A
+        // corrupt channel throws in deriveAccountNonce and skips this cursor (no match).
+        const nonce = deriveAccountNonce(viewingKey, accountIndex, rec.channel);
         expected = deriveInboundCommitment({
           userAddr: BigInt(snAddress),
           userPrivateKey: viewingKey,
@@ -1003,7 +1041,7 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
           // The commitment binds the burn-time source domain, so match against the
           // cursor's OWN persisted sourceDomain (authoritative once the burn landed).
           sourceDomain: rec.sourceDomain,
-          nonce: accountNonce,
+          nonce,
         });
       } catch {
         return false;
@@ -1015,6 +1053,9 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
     return { stuck: 0n };
   }
   const { evmAddress, record } = found;
+  // The claim's compute_additional_data nonce MUST reproduce the cursor's bound commitment,
+  // so derive it with the found cursor's OWN channel (the same one the match above used).
+  const accountNonce = deriveAccountNonce(viewingKey, accountIndex, record.channel);
 
   // Re-fetch the attestation (idempotent on burnTx). A demonstrably-terminal attestation
   // failure clears the cursor (the message will never mint to us); anything else PRESERVES

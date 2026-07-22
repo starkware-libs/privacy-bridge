@@ -73,6 +73,28 @@ const ACCOUNTS_KEY = 'pmp.bids';
 // dependency-free; the legacy in-flight burn cursor seeds a record on first migration.
 const INFLIGHT_BURN_KEY = 'pmp.inflightBurn';
 
+// An account CHANNEL groups a counter + its record store under one id. OMITTING
+// channel (the default) keeps the legacy `pmp.bids` / `pmp.bidIndex` keys, so
+// existing data and every current caller behave identically. Passing a channel
+// namespaces a SEPARATE counter + record store (`pmp.bids:<id>` / `pmp.bidIndex:<id>`),
+// letting one EVM identity hold several INDEPENDENT channels — e.g. a reused-wallet
+// "fast session" whose index allocation + records never advance or poison the
+// default. The default is ABSENCE (undefined), NOT a magic string: so every string
+// is a valid, distinct channel id (no reserved word), matching this store's other
+// optional fields. This store handles the STORAGE namespacing (counter + records);
+// the SAME channel id ALSO scopes DERIVATION downstream — it is folded into the
+// Polygon EOA, the deposit wallet, and the account nonce → commitment H (see
+// derivation/*.ts + ResolveDepositWalletFn), so a channel's wallets + on-chain
+// commitments never collide with the default keyspace. undefined = the default
+// channel, whose derivations stay byte-identical to the pre-channel code. channel is
+// CALLER-TRUSTED (a compile-time constant, not external input).
+
+// A channel's record-store key: the legacy key when no channel is given, a per-id
+// suffix otherwise. The default (undefined) MUST stay `pmp.bids` (back-compat).
+function accountsKeyFor(channel?: string): string {
+  return channel === undefined ? ACCOUNTS_KEY : `${ACCOUNTS_KEY}:${channel}`;
+}
+
 type AccountsMap = Record<string, DerivedAccountRecord[]>;
 
 // EVM address (40 hex) shape used to validate the persisted EOA recipient before
@@ -144,9 +166,9 @@ export function isValidAccountRecord(value: unknown): value is DerivedAccountRec
   return true;
 }
 
-function readAccountsMap(): AccountsMap {
+function readAccountsMap(channel?: string): AccountsMap {
   try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY);
+    const raw = localStorage.getItem(accountsKeyFor(channel));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object') return parsed as AccountsMap;
@@ -156,9 +178,9 @@ function readAccountsMap(): AccountsMap {
   }
 }
 
-function writeAccountsMap(map: AccountsMap): void {
+function writeAccountsMap(map: AccountsMap, channel?: string): void {
   try {
-    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(map));
+    localStorage.setItem(accountsKeyFor(channel), JSON.stringify(map));
   } catch {
     // Best-effort: the history list is a convenience; a storage failure must not
     // break the funding flow (the flow's own resume cursor is written separately).
@@ -167,9 +189,12 @@ function writeAccountsMap(map: AccountsMap): void {
 
 // Read the account history for an EVM address, newest first, dropping any
 // corrupt record.
-export function readDerivedAccounts(evmAddress: string): DerivedAccountRecord[] {
+export function readDerivedAccounts(
+  evmAddress: string,
+  channel?: string,
+): DerivedAccountRecord[] {
   if (!evmAddress) return [];
-  const rawList = readAccountsMap()[evmAddress.toLowerCase()];
+  const rawList = readAccountsMap(channel)[evmAddress.toLowerCase()];
   const list: unknown[] = Array.isArray(rawList) ? rawList : [];
   return list
     .map(migrateAccountIndexKey)
@@ -197,10 +222,11 @@ const LIFECYCLE_RANK: Record<AccountLifecycle, number> = {
 export function upsertDerivedAccount(
   evmAddress: string,
   patch: Partial<DerivedAccountRecord> & { accountIndex: number },
+  channel?: string,
 ): void {
   if (!evmAddress) return;
   const key = evmAddress.toLowerCase();
-  const map = readAccountsMap();
+  const map = readAccountsMap(channel);
   const rawEntry = map[key];
   const list: DerivedAccountRecord[] = (
     Array.isArray(rawEntry) ? rawEntry.map(migrateAccountIndexKey) : []
@@ -227,7 +253,7 @@ export function upsertDerivedAccount(
   const next = list.filter((record) => record.accountIndex !== patch.accountIndex);
   next.push(merged);
   map[key] = next;
-  writeAccountsMap(map);
+  writeAccountsMap(map, channel);
 }
 
 // Keep the higher-ranked lifecycle so updates never regress a settled account.
@@ -264,22 +290,31 @@ export function migrateLegacyAccounts(evmAddress: string): void {
       EVM_ADDRESS_RE.test(inflight.eoaAddress) &&
       typeof inflight.amountHuman === 'string'
     ) {
-      upsertDerivedAccount(evmAddress, {
-        accountIndex: inflight.bidIndex,
-        amountHuman: inflight.amountHuman,
-        eoaAddress: inflight.eoaAddress,
-        // The deposit wallet (mint recipient / order maker), when the cursor
-        // carries it; pre-redirect cursors lack it (minted to the bare EOA).
-        funder:
-          typeof inflight.depositWallet === 'string' && EVM_ADDRESS_RE.test(inflight.depositWallet)
-            ? inflight.depositWallet
+      // Route the migrated record into the CHANNEL the burn belonged to — the cursor
+      // records it for non-default channels. Without this, a session-channel burn
+      // would seed its reserved-band index into the DEFAULT `pmp.bids`, skewing the
+      // default peekNextAccountIndex up into the band (Bugbot). Absent → default.
+      const channel = typeof inflight.channel === 'string' ? inflight.channel : undefined;
+      upsertDerivedAccount(
+        evmAddress,
+        {
+          accountIndex: inflight.bidIndex,
+          amountHuman: inflight.amountHuman,
+          eoaAddress: inflight.eoaAddress,
+          // The deposit wallet (mint recipient / order maker), when the cursor
+          // carries it; pre-redirect cursors lack it (minted to the bare EOA).
+          funder:
+            typeof inflight.depositWallet === 'string' && EVM_ADDRESS_RE.test(inflight.depositWallet)
+              ? inflight.depositWallet
+              : undefined,
+          burnTxHash: typeof inflight.burnTxHash === 'string' && HEX_RE.test(inflight.burnTxHash)
+            ? inflight.burnTxHash
             : undefined,
-        burnTxHash: typeof inflight.burnTxHash === 'string' && HEX_RE.test(inflight.burnTxHash)
-          ? inflight.burnTxHash
-          : undefined,
-        lifecycle: 'attesting',
-        timestamp: Date.now(),
-      });
+          lifecycle: 'attesting',
+          timestamp: Date.now(),
+        },
+        channel,
+      );
     }
   } catch {
     // Migration is best-effort; ignore a corrupt legacy blob.
@@ -322,6 +357,12 @@ function isValidInflightBurnRecord(value: unknown): boolean {
 // orphan an in-flight counter, the same fund-safety class as ACCOUNTS_KEY.
 const ACCOUNT_INDEX_KEY = 'pmp.bidIndex';
 
+// A channel's counter key: the legacy key when no channel is given, a per-id
+// suffix otherwise (mirrors accountsKeyFor). The default MUST stay `pmp.bidIndex`.
+function accountIndexKeyFor(channel?: string): string {
+  return channel === undefined ? ACCOUNT_INDEX_KEY : `${ACCOUNT_INDEX_KEY}:${channel}`;
+}
+
 type AccountIndexMap = Record<string, number>;
 
 // Validate + drop any entry that isn't a non-negative integer (#137): a corrupt
@@ -330,9 +371,9 @@ type AccountIndexMap = Record<string, number>;
 // derive the WRONG per-account EOA. Dropping bad entries falls back to the
 // default-0 first-account behavior for that address, which is safe
 // (nextAccountIndex still reconciles against existing accounts).
-function readAccountIndexMap(): AccountIndexMap {
+function readAccountIndexMap(channel?: string): AccountIndexMap {
   try {
-    const raw = localStorage.getItem(ACCOUNT_INDEX_KEY);
+    const raw = localStorage.getItem(accountIndexKeyFor(channel));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -363,20 +404,29 @@ export function nextAccountIndex(counter: number, accounts: DerivedAccountRecord
 }
 
 // The next unused per-account index for an EVM address (0 on first account).
-export function peekNextAccountIndex(evmAddress: string): number {
-  const map = readAccountIndexMap();
+export function peekNextAccountIndex(
+  evmAddress: string,
+  channel?: string,
+): number {
+  const map = readAccountIndexMap(channel);
   const counter = map[evmAddress.toLowerCase()] ?? 0;
-  return nextAccountIndex(counter, readDerivedAccounts(evmAddress));
+  // Reconcile against THIS channel's records only, so a channel's records never
+  // advance another channel's next index.
+  return nextAccountIndex(counter, readDerivedAccounts(evmAddress, channel));
 }
 
 // Persist `index` as consumed so the NEXT account uses `index + 1`.
 // Best-effort — a storage failure must not break the funding flow (the EOA
 // still recovers from the signature + the index actually used this run).
-export function consumeAccountIndex(evmAddress: string, index: number): void {
+export function consumeAccountIndex(
+  evmAddress: string,
+  index: number,
+  channel?: string,
+): void {
   try {
-    const map = readAccountIndexMap();
+    const map = readAccountIndexMap(channel);
     map[evmAddress.toLowerCase()] = index + 1;
-    localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(channel), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }
@@ -390,13 +440,17 @@ export function consumeAccountIndex(evmAddress: string, index: number): void {
 // `highestChainUsedIndex + 1`. Belt-and-suspenders alongside the `pmp.bids`
 // reconciliation: it survives a later `pmp.bids` prune. Best-effort, same as
 // consumeAccountIndex — a storage failure must not break bidding.
-export function seedAccountIndex(evmAddress: string, minNextIndex: number): void {
+export function seedAccountIndex(
+  evmAddress: string,
+  minNextIndex: number,
+  channel?: string,
+): void {
   if (!Number.isInteger(minNextIndex) || minNextIndex <= 0) return;
   try {
-    const map = readAccountIndexMap();
+    const map = readAccountIndexMap(channel);
     const key = evmAddress.toLowerCase();
     map[key] = Math.max(map[key] ?? 0, minNextIndex);
-    localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(map));
+    localStorage.setItem(accountIndexKeyFor(channel), JSON.stringify(map));
   } catch {
     // ignore (persistence is a convenience).
   }

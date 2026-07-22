@@ -9,7 +9,8 @@ import { getRpcProvider } from './provider';
 import { sanitizeErrorMessage, submitAndTrack } from './tx';
 import { humanizeFinality } from './errorMessages';
 import { submitProvenCall } from './proven-submit';
-import { waitForProvingBlock } from './proving';
+import { waitForProvingBlock, isNodeLagError } from './proving';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry';
 import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
 
 export interface RegisterArgs {
@@ -159,15 +160,31 @@ async function proveAndSubmitRegister(
     // submitProvenCall passes EXPLICIT resourceBounds so the manager's execute skips
     // its implicit fee estimate — that estimate drops the proof and would revert in
     // the pool's proof verification before the proven invoke is ever submitted.
-    const { transaction_hash } = await submitAndTrack(
-      provider,
-      () => submitProvenCall(provider, account, call, proofDetails),
+    //
+    // Retry the SAME proof on full-node lag (the manager's RPC node briefly behind the
+    // proof's base block); a non-lag error rethrows into the outer catch. See nodeLagRetry.ts.
+    let registerTxHash = '';
+    await submitReusingProofOnNodeLag(
+      async () => {
+        const { transaction_hash } = await submitAndTrack(
+          provider,
+          () => submitProvenCall(provider, account, call, proofDetails),
+          {
+            until: 'PRE_CONFIRMED',
+            onStatus: ({ finality }) =>
+              onStatus?.(`Submitting registration (${humanizeFinality(finality)})…`),
+          },
+        );
+        registerTxHash = transaction_hash;
+      },
       {
-        until: 'PRE_CONFIRMED',
-        onStatus: ({ finality }) => onStatus?.(`Submitting registration (${humanizeFinality(finality)})…`),
+        resetRelayState: () => {
+          registerTxHash = '';
+        },
+        onStatus,
       },
     );
-    onTx?.(transaction_hash);
+    onTx?.(registerTxHash);
   };
 
   try {
@@ -181,6 +198,9 @@ async function proveAndSubmitRegister(
       onStatus?.('Already registered with pool.');
       return;
     }
+    // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
+    // same-anchor re-prove would just node-lag again (mirrors bridgeBack).
+    if (isNodeLagError(err)) throw err;
     // Drop the cached pool nonce so the retry fetches a fresh one, then rebuild
     // + re-prove against the SAME (already-aged) proving anchor.
     transfers.invalidateProofNonceCache();

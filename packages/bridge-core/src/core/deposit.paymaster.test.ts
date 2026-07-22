@@ -16,6 +16,12 @@ const STRK = '0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d'
 const FORWARDER = '0x123abc';
 const FEE = 1_500n; // pool fee in USDC (6dp), as AVNU's fee_action.amount
 
+// A full-node-lag ValidationFailure: "block hash mismatch" + a ZERO "stored block hash"
+// (matches proving.ts NODE_LAG_RE — the retryable, pre-broadcast code-156).
+const NODE_LAG_MSG =
+  'AVNU paymaster_executeTransaction error (code 156): ValidationFailure: "Invalid proof ' +
+  'facts: Block hash mismatch for block 11830268. Proof block hash: 2599, stored block hash: 0."';
+
 const h = vi.hoisted(() => ({
   cfg: {
     poolAddress: '0xPOOL',
@@ -49,7 +55,8 @@ vi.mock('./avnuPaymaster', () => ({
 vi.mock('./provider', () => ({ getRpcProvider: vi.fn(() => ({})), makeAccount: vi.fn() }));
 vi.mock('./proving', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./proving')>();
-  return { ...actual, waitForProvingBlock: h.waitForProvingBlock };
+  // Real isNodeLagError (the retry gate); instant sleep so the node-lag retry loop is fast.
+  return { ...actual, waitForProvingBlock: h.waitForProvingBlock, sleep: () => Promise.resolve() };
 });
 vi.mock('./tx', () => ({
   READ_BLOCK: 'latest',
@@ -215,6 +222,28 @@ describe('depositToPool — AVNU paymaster path (combined register+deposit)', ()
     expect(invalidateSpy).toHaveBeenCalledOnce();
     // The relay never started: executeTransaction was never reached on either attempt.
     expect(h.executeTransaction).not.toHaveBeenCalled();
+  });
+});
+
+// Full-node-lag auto-retry on the deposit leg: AVNU's validating node is briefly behind the
+// proof's base block, so executeTransaction rejects PRE-broadcast (code-156, "stored block
+// hash: 0"). deposit resubmits the SAME proof (no rebuild/re-prove); on exhaustion it
+// propagates without rebuilding. Mirrors the claim leg (bridgeBack.ts); see nodeLagRetry.ts.
+describe('depositToPool — full-node-lag auto-retry (paymaster)', () => {
+  it('a node-lag that never clears rejects (bounded), reusing the SAME proof — never re-proves', async () => {
+    const invalidateSpy = vi.spyOn(transfers, 'invalidateProofNonceCache');
+    h.executeTransaction.mockReset();
+    h.executeTransaction.mockRejectedValue(new Error(NODE_LAG_MSG)); // node never catches up
+
+    await expect(
+      depositToPool({ account: fakeAccount(), viewingKey: 7n, amountWei: 1_000_000n }),
+    ).rejects.toThrow(/block hash mismatch/i);
+
+    // 1 initial + 6 (MAX_NODE_LAG_RETRIES) = 7 relay attempts, all the SAME proof:
+    // buildTransaction ran ONCE (no rebuild), and the proof-nonce cache was never dropped.
+    expect(h.executeTransaction).toHaveBeenCalledTimes(7);
+    expect(h.buildTransaction).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).not.toHaveBeenCalled();
   });
 });
 

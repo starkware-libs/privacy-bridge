@@ -27,11 +27,20 @@ import {
   deriveStarknetPrivateKey,
   deriveViewingKey,
 } from '../derivation/index';
-// Injectable: given a signature + accountIndex, returns the Polymarket CREATE2 deposit
-// wallet address. Trading code provides:
-//   (sig, idx) => deriveDepositWallet(getEoaWalletClient(sig, idx))
+// Injectable: given a signature + accountIndex + channel, returns the Polymarket CREATE2
+// deposit wallet address. Trading code provides:
+//   (sig, idx, channel) => deriveDepositWallet(getEoaWalletClient(sig, idx, channel))
+// The `channel` MUST feed the EOA derivation (derivePolygonEoa's channel) so the deposit
+// wallet lands in the SAME channel keyspace as the EOA that owns it — otherwise a channel
+// fund would mint to the DEFAULT wallet the channel EOA doesn't control (stranded funds).
+// undefined = the default channel (byte-identical legacy derivation). A pre-channel 2-arg
+// resolver still satisfies this type (the extra arg is ignored) and stays default-only.
 // Tests provide a deterministic stub.
-export type ResolveDepositWalletFn = (signature: string, accountIndex: number) => Promise<string>;
+export type ResolveDepositWalletFn = (
+  signature: string,
+  accountIndex: number,
+  channel?: string,
+) => Promise<string>;
 import { config, resolveEvmCctpDestination } from './config';
 import { u256Calldata } from './deposit';
 import { getRpcProvider, makeAccount } from './provider';
@@ -49,8 +58,10 @@ import {
 import {
   waitForProvingBlock,
   getCurrentBlock,
+  isNodeLagError,
   PROVING_BLOCK_DEPTH,
 } from './proving';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry';
 import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
 import { deriveAccountNonce } from '../derivation/index';
 import { isTerminalAttestFailure, waitForBridgedMint } from './polygonMint';
@@ -117,6 +128,10 @@ export interface BridgeOutArgs {
   signature: string;
   // Non-secret per-account index (persisted in localStorage) selecting the EOA.
   accountIndex: number;
+  // The account CHANNEL (see account-store). Scopes the derived EOA to the SAME
+  // keyspace the caller derived `accountNonce` in, so a session's EOA + commitment
+  // stay consistent; undefined = the default channel (byte-identical to legacy).
+  channel?: string;
   // Per-account nonce folded into claim_secret/H (poseidon([VK_child, counter])).
   accountNonce: bigint;
   // Fixed denomination to withdraw + burn, in USDC base units (1 USDC = 1e6).
@@ -172,7 +187,8 @@ export interface BridgeOutResult {
 // (deposit wallet) + the owning EOA, and H (recorded on-chain for the M10
 // return/claim leg).
 export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
-  const { signature, accountIndex, accountNonce, amount, resolveDepositWallet, onStatus } = args;
+  const { signature, accountIndex, accountNonce, amount, resolveDepositWallet, onStatus, channel } =
+    args;
   const minFinalityThreshold = args.minFinalityThreshold ?? defaultFinalityThreshold();
   // Fail closed on a fee/finality tier mismatch BEFORE any on-chain work (fund-safety).
   assertQuotedFinalityMatchesBurn(args.quotedFinalityThreshold, minFinalityThreshold);
@@ -194,20 +210,22 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
   const { address: snAddress } = deriveStarknetAccount(snPrivateKey, config.ozClassHash);
   const account = makeAccount(snAddress, snPrivateKey, provider);
   // Per-account fresh Polygon EOA — the signer that OWNS the deposit wallet.
-  const eoa = derivePolygonEoa(signature, accountIndex);
+  const eoa = derivePolygonEoa(signature, accountIndex, channel);
   // CCTP mint recipient = the EOA's CREATE2 deposit wallet (the CLOB order maker
   // that holds the funds), so the bridged USDC lands where the order signs — not
-  // on the bare EOA. Pure CREATE2 (no deploy, no builder creds); minting to a
-  // counterfactual address is fine, the balance sits there until it's deployed.
-  // Derived BEFORE the burn so a derivation failure aborts before funds commit.
-  // Independent of the STRK pool-fee read below (fetchPoolFeeAmount takes no
-  // args and doesn't depend on the deposit wallet, nor vice versa) — run them
-  // concurrently rather than sequentially.
+  // on the bare EOA. Pass the SAME channel as the EOA above so the deposit wallet
+  // derives in this channel's keyspace and stays owned by this channel's EOA (a
+  // channel-blind resolver would mint to the DEFAULT wallet — stranded funds).
+  // Pure CREATE2 (no deploy, no builder creds); minting to a counterfactual address
+  // is fine, the balance sits there until it's deployed. Derived BEFORE the burn so
+  // a derivation failure aborts before funds commit. Independent of the STRK pool-fee
+  // read below (fetchPoolFeeAmount takes no args and doesn't depend on the deposit
+  // wallet, nor vice versa) — run them concurrently rather than sequentially.
   onStatus?.('Deriving deposit wallet…');
   onStatus?.('Checking pool fee…');
   onStatus?.('Checking pool balance…');
   const [depositWallet, feeAmount, poolBalance] = await Promise.all([
-    resolveDepositWallet(signature, accountIndex),
+    resolveDepositWallet(signature, accountIndex, channel),
     fetchPoolFeeAmount(),
     discoverPrivateBalance({ account, viewingKey }),
   ]);
@@ -331,6 +349,10 @@ export interface InflightBurn {
   // inspects it (keeps the SDK Polymarket-free); the app stores its market
   // selection here.
   selection?: Record<string, unknown>;
+  // The account CHANNEL this burn was funded from (see account-store). Persisted so
+  // a RESUME and the legacy-cursor migration route the record to the right channel;
+  // absent for default-channel burns (back-compat with older cursors).
+  channel?: string;
 }
 
 type InflightBurnMap = Record<string, InflightBurn>;
@@ -481,6 +503,28 @@ export interface FundAccountFromPoolArgs {
     depositWallet: string;
     accountIndex: number;
   }) => void;
+  // The account CHANNEL this fund's index belongs to (see account-store's channel
+  // model). OMIT for the default channel, so existing callers are unaffected: the
+  // index is consumed on the default `pmp.bidIndex` counter exactly as before. A
+  // caller funding from a SEPARATE channel (e.g. a reused-wallet "fast
+  // session" allocating from its own counter + record store) passes that channel's
+  // id, so this fund's consume advances ITS counter and never the default one — and
+  // because peek/records are namespaced by the same id, the channels' COUNTERS and
+  // RECORDS stay fully isolated. The channel ALSO scopes DERIVATION: it is folded into
+  // the Polygon EOA (derivePolygonEoa), the deposit wallet (via the resolver, same
+  // channel), and the account nonce → claim_secret → commitment H. So channel `x`
+  // index 0 and the default index 0 resolve to DISTINCT wallets + a distinct on-chain
+  // commitment (no cross-channel collision). undefined = the default channel, whose
+  // derivations are byte-identical to the pre-channel code.
+  //
+  // The in-flight burn/return RESUME cursors (`pmp.inflightBurn` / `pmp.inflightReturn`)
+  // are a single per-EVM-address slot shared across channels, but each cursor PERSISTS
+  // its channel (alongside accountIndex), so a resume/recover self-routes to the correct
+  // channel + wallet. A fund started while another channel's burn is still in flight
+  // still resumes THAT burn (the slot is shared), so callers serialize funding to one
+  // in-flight burn per address across channels (the single-slot invariant that predates
+  // channels), or namespace the cursor.
+  channel?: string;
   // Deterministic-test knobs forwarded to the mint pollers.
   intervalMs?: number;
   timeoutMs?: number;
@@ -504,6 +548,10 @@ export interface FundAccountFromPoolResult {
   // The opaque app metadata carried through the cursor (fresh: the arg; resume: the
   // stored value).
   selection?: Record<string, unknown>;
+  // The account CHANNEL this fund used (fresh: the arg; resume: the cursor's). Absent
+  // = the default channel. Lets the app record the (possibly resumed) account under
+  // the correct channel's store.
+  channel?: string;
 }
 
 // Read-only {eoaAddress, amountHuman} view of the persisted in-flight burn for an
@@ -589,6 +637,7 @@ export async function fundAccountFromPool(
     selection,
     onStep,
     onBurned,
+    channel,
   } = args;
   // Resolve the chosen destination chain up front (fail loud on an unsupported id,
   // before any sign/burn). Its domain drives the CCTP fee route + the forwarded-mint
@@ -628,6 +677,8 @@ export async function fundAccountFromPool(
   // app can key its account-history record on either path.
   let resolvedIndex = accountIndex;
   let cursorSelection: Record<string, unknown> | undefined = selection;
+  // The channel this fund belongs to (fresh: the arg; resume: the cursor's).
+  let resolvedChannel: string | undefined = channel;
   // True when resuming a pre-migration cursor that burned WITHOUT the
   // Forwarding-Service hook: Circle never generated a forwardTxHash for those, so
   // waitForBridgedMint would loop for 30 min then time out — surface a terminal
@@ -644,6 +695,7 @@ export async function fundAccountFromPool(
     depositWallet = inflight.depositWallet ?? inflight.eoaAddress;
     resolvedIndex = inflight.bidIndex;
     cursorSelection = inflight.selection;
+    resolvedChannel = inflight.channel;
     // Resolve the mint-watch destination domain from the burn's PERSISTED chain
     // (authoritative — the burn already committed to it), NOT the resume-time arg.
     // Fall back to the arg's domain only for old cursors that predate evmChainId.
@@ -672,7 +724,7 @@ export async function fundAccountFromPool(
     emit('bridge', 'running', 'Awaiting signature in your wallet…');
     const signature = await resolveSignature();
     const viewingKey = deriveViewingKey(signature);
-    const accountNonce = deriveAccountNonce(viewingKey, accountIndex);
+    const accountNonce = deriveAccountNonce(viewingKey, accountIndex, channel);
 
     try {
       // `fast` (resolved at function scope above) sizes the fee quote AND the burn's
@@ -694,6 +746,7 @@ export async function fundAccountFromPool(
       const bridged = await bridgeOut({
         signature,
         accountIndex,
+        channel,
         accountNonce,
         amount,
         resolveDepositWallet,
@@ -729,10 +782,13 @@ export async function fundAccountFromPool(
         evmChainId: resolveEvmCctpDestination(destChainId).chainId,
         amountHuman: humanAmount(amount),
         ...(cursorSelection ? { selection: cursorSelection } : {}),
+        ...(channel !== undefined ? { channel } : {}),
       });
       // Consume the index only AFTER the resume cursor is durable, so a pre-burn
       // failure (fee quote, signature, proving) doesn't burn an index either.
-      consumeAccountIndex(evmAddress, accountIndex);
+      // `channel` selects which channel's counter is advanced (the default
+      // channel for existing callers).
+      consumeAccountIndex(evmAddress, accountIndex, channel);
       onBurned?.({ burnTxHash, eoaAddress, depositWallet, accountIndex });
       emit(
         'bridge',
@@ -809,6 +865,7 @@ export async function fundAccountFromPool(
     commitmentH,
     forwardTxHash,
     ...(cursorSelection ? { selection: cursorSelection } : {}),
+    ...(resolvedChannel !== undefined ? { channel: resolvedChannel } : {}),
   };
 }
 
@@ -1517,31 +1574,44 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     // value Iris polls. Declared outside `attempt` so that if submitAndTrack throws
     // AFTER send() already succeeded (tracking timeout), the first hash is preserved
     // and the retry guard below can return it instead of re-submitting.
-    await submitAndTrack(
-      provider,
-      async () => {
-        // Paymaster path: AVNU's relayer submits the proven apply_action (the fee
-        // withdraw is already baked into the proof). Manager path: submitProvenCall
-        // passes explicit resourceBounds so account.execute skips the proof-less fee
-        // estimate that would revert the proven apply_actions — see proven-submit.ts.
-        const res = paymasterCtx
-          ? await paymasterExecuteLeg(account, built.call, built.proofDetails, paymasterCtx, {
-              // Flip only when the AVNU relay actually starts (after any signMessage) —
-              // a pre-relay throw relays nothing and stays safely retryable.
-              onRelayStart: () => {
-                paymasterSubmissionStarted = true;
-              },
-            })
-          : await submitProvenCall(provider, account, built.call, built.proofDetails);
-        burnTxHash = res.transaction_hash;
-        return res;
+    //
+    // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this
+    // attempt's relay/hash state between lag retries). A non-lag error rethrows into the
+    // outer catch below unchanged. See nodeLagRetry.ts.
+    const runSubmit = async (): Promise<void> => {
+      await submitAndTrack(
+        provider,
+        async () => {
+          // Paymaster path: AVNU's relayer submits the proven apply_action (the fee
+          // withdraw is already baked into the proof). Manager path: submitProvenCall
+          // passes explicit resourceBounds so account.execute skips the proof-less fee
+          // estimate that would revert the proven apply_actions — see proven-submit.ts.
+          const res = paymasterCtx
+            ? await paymasterExecuteLeg(account, built.call, built.proofDetails, paymasterCtx, {
+                // Flip only when the AVNU relay actually starts (after any signMessage) —
+                // a pre-relay throw relays nothing and stays safely retryable.
+                onRelayStart: () => {
+                  paymasterSubmissionStarted = true;
+                },
+              })
+            : await submitProvenCall(provider, account, built.call, built.proofDetails);
+          burnTxHash = res.transaction_hash;
+          return res;
+        },
+        {
+          until: 'ACCEPTED_ON_L2',
+          onStatus: ({ finality }) =>
+            onStatus?.(`Submitting withdraw + burn (${humanizeFinality(finality)})…`),
+        },
+      );
+    };
+    await submitReusingProofOnNodeLag(runSubmit, {
+      resetRelayState: () => {
+        paymasterSubmissionStarted = false;
+        burnTxHash = '';
       },
-      {
-        until: 'ACCEPTED_ON_L2',
-        onStatus: ({ finality }) =>
-          onStatus?.(`Submitting withdraw + burn (${humanizeFinality(finality)})…`),
-      },
-    );
+      onStatus,
+    });
   };
 
   // burnTxHash is hoisted here so the retry guard can inspect it.
@@ -1556,6 +1626,10 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     // reverted atomically, no CCTP burn) — let it propagate so NO resume cursor is
     // written for a burn that never happened.
     if (burnTxHash && !isRevertedOrRejected(err)) return burnTxHash;
+    // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
+    // same-anchor re-prove would just node-lag again. Before the fail-closed guard so it
+    // also covers the manager path (mirrors bridgeBack).
+    if (isNodeLagError(err)) throw err;
     // AMBIGUITY GUARD (paymaster path): fail closed ONLY when the AVNU relay is
     // in-flight AND no tx hash was obtained (executeTransaction threw) — the relayer
     // may have broadcast the burn anyway (live-observed: a spurious error 156 over a

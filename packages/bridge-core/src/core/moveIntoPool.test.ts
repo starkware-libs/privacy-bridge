@@ -70,6 +70,7 @@ vi.mock('./register', () => ({
 
 vi.mock('./deposit', () => ({
   depositToPool: vi.fn(),
+  buildDepositProofAhead: vi.fn(async () => undefined),
   ensureDepositTokenFunded: vi.fn(),
   readDepositTokenBalance: vi.fn(),
 }));

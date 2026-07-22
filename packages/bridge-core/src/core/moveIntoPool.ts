@@ -22,8 +22,14 @@ import { getRpcProvider, makeAccount } from './provider';
 import { getCurrentBlock } from './proving';
 import { ensureAccountDeployed, isDeployedOnL2 } from './deploy';
 import { isRegistered, registerWithPool } from './register';
-import { depositToPool, ensureDepositTokenFunded, readDepositTokenBalance } from './deposit';
-import { fundFromMetaMask, isNonceAlreadyUsedError } from './depositIn';
+import {
+  buildDepositProofAhead,
+  depositToPool,
+  ensureDepositTokenFunded,
+  readDepositTokenBalance,
+  type PrebuiltDepositProof,
+} from './deposit';
+import { fundFromMetaMask, isCctpMessageNonceUsed } from './depositIn';
 import {
   clearPendingPoolDeposit,
   readPendingPoolDeposit,
@@ -86,6 +92,17 @@ export interface MoveIntoPoolArgs {
 const MAX_STEP_RETRIES = 2;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// #432 / production first-attempt scare — bounded poll for the folded deposit's CCTP
+// nonce to show CONSUMED after an ambiguous/erroring paymaster submit (the
+// accepted≠reflected window). is_nonce_used is the AUTHORITATIVE, monotonic signal: on
+// the atomic fold path (receive_message folded INTO the pool deposit) it flips to
+// consumed ⟺ the whole mint→approve→pool pull→apply_action tx already committed. Sized
+// generously over the typical few-second reflection lag; on timeout the convergence
+// gives up and fails closed (never worse than the prior single read). The interval
+// mirrors waitForL2Commit's L2-commit poll.
+const FOLD_CONFIRM_TIMEOUT_MS = 10_000;
+const FOLD_CONFIRM_POLL_MS = 2_000;
 
 // Polls for COMMITTED (ACCEPTED_ON_L2) deployment. A self-deploy lands as
 // pre-confirmed first; register/deposit prove against committed state, so the
@@ -537,6 +554,16 @@ export async function moveIntoPool(
     // multicall's approve would approve the MANAGER's USDC, not the account's).
     const aPrioriAmount = !deployFeeChargedToUser && liveBalance === undefined;
     const foldEligible = !!config.paymaster && funding === 'metamask' && aPrioriAmount;
+    // PART A immediate-prove gate — used by BOTH the prove-ahead (below) and the inline
+    // depositToPool anchor. The deposit proof is money-INDEPENDENT (the pool reads the
+    // deposited amount on-chain at execution, not inside the proof), so its only on-chain
+    // dependencies are the account's deploy + register. When BOTH were already BURIED before
+    // this run (deployedAtStart / registeredAtStart — recomputed live by the deploy/register
+    // steps, never a stale persisted flag) AND the amount is a-priori (liveBalance undefined
+    // ⇒ not sized from chain; deploy-fee-OFF ⇒ the funder's reported net IS the deposit),
+    // there is nothing fresh to age past → prove at the IMMEDIATE depth. Excludes a user-paid
+    // deploy fee and a pending-cursor resume (both size from chain, so keep aging).
+    const immediateProve = deployedAtStart && registeredAtStart && aPrioriAmount;
     // mintFold / mintAlreadyConsumed are declared in the OUTER scope (next to `funded`) so
     // they survive a transient retry of this step — see the note there. Do NOT re-declare
     // or reset them here: the funding branch below is the sole writer and only runs while
@@ -548,9 +575,40 @@ export async function moveIntoPool(
     // account under a user-paid deploy fee lands here — a FRESH deposit that MUST
     // re-fund (the Bugbot MEDIUM: an already-deployed account is not, by itself, a
     // resume). On a transient retry the `funded` flag survives, so we never re-fund.
+    // PROVE-AHEAD (fold path): a deposit proof generated CONCURRENTLY with the CCTP
+    // burn+attestation, reused by depositToPool below iff it is still a faithful
+    // substitute. Undefined on every other path / attempt → depositToPool proves inline.
+    let prebuiltProof: PrebuiltDepositProof | undefined;
     const haveFundsAvailable = funded || (liveBalance !== undefined && liveBalance > 0n);
     if (!haveFundsAvailable) {
       emit('deposit', 'running', 'Funding deposit token…');
+
+      // Fire the deposit proof NOW, in parallel with the burn+attestation fundDepositToken
+      // is about to run. The deposit proof is money-INDEPENDENT (the pool reads the amount
+      // on-chain at execution, not inside the proof) and the amount is a-priori, so it needs
+      // nothing from the bridge — proving it during the (minutes-long) attestation wait
+      // instead of after it removes the proof time from the critical path. The gasless AVNU
+      // paymaster charges only the fixed pool fee (independent of the folded receive_message
+      // — docs/open-questions.md #13), so buildDepositProofAhead quotes it from a bare
+      // apply_action with no attestation dependency; depositToPool re-quotes the real fee and
+      // reuses this proof only if it still matches (else rebuilds — fail-closed, never wrong,
+      // at worst no speedup that once). Only on the FOLD path (paymaster + metamask + fresh
+      // burn) — that is the only deposit with an attestation wait to hide behind. The anchor
+      // mirrors the immediateProve / depositAnchorBlock choices below: a fresh account's only
+      // prior Starknet dep is the deploy (register + mint fold INTO the deposit tx), so age
+      // past deployBlock; a fully-buried account proves immediately. onStatus is intentionally
+      // omitted so the bridge's attestation progress owns the status line (no interleaving).
+      const proofAheadPromise: Promise<PrebuiltDepositProof | undefined> = foldEligible
+        ? buildDepositProofAhead({
+            account,
+            viewingKey,
+            amountWei,
+            lastTxBlockNumber: immediateProve ? undefined : deployBlock,
+            immediateProve,
+            autoRegister: !alreadyRegistered,
+          }).catch(() => undefined)
+        : Promise.resolve(undefined);
+
       fundedNetWei = await fundDepositToken({
         funding,
         account,
@@ -575,6 +633,14 @@ export async function moveIntoPool(
         },
       });
       funded = true;
+
+      // Await the concurrent proof (running/done by now) so it can never dangle, and adopt
+      // it ONLY when a mint was actually folded (the proof was built for the fold's
+      // autoRegister) AND the net it proved (amountWei, a-priori) still equals what we
+      // deposit. A fold-resume that found the mint already consumed, or any future
+      // non-a-priori net, fails this guard → depositToPool proves fresh.
+      const proofAhead = await proofAheadPromise;
+      if (mintFold && fundedNetWei === amountWei) prebuiltProof = proofAhead;
       // Funding just committed — it's the fresher proving dependency than the deploy.
       // Recorded in the CROSS-ATTEMPT scope so a transient deposit retry (which skips
       // this branch, `funded` already true) still ages the proof past the funding.
@@ -640,18 +706,8 @@ export async function moveIntoPool(
       depositWei = settled;
     }
 
-    // PART A — immediate-prove gate. The deposit proof is money-INDEPENDENT (the pool
-    // reads the deposited amount on-chain at execution, not inside the proof), so its only
-    // real on-chain dependencies are the account's deploy + register. When BOTH were
-    // already BURIED before this run (deployedAtStart / registeredAtStart — recomputed live
-    // by the deploy/register steps, never a stale persisted flag) AND the amount is known
-    // a-priori (net = gross − maxFee, NOT read from a post-mint balance — `liveBalance`
-    // undefined means we did not size from chain, and deploy-fee-OFF means the funder's
-    // reported net IS the deposit), there is nothing fresh to age past → prove immediately.
-    // A-priori excludes: a user-paid deploy fee (amount = post-deploy balance) and a
-    // pending-cursor resume (amount = live balance) — both size from chain, so keep aging.
-    // `aPrioriAmount` was computed with the fold precondition above (same definition).
-    const immediateProve = deployedAtStart && registeredAtStart && aPrioriAmount;
+    // `immediateProve` (the PART A gate) was computed above, next to `foldEligible`, since
+    // the prove-ahead needs it too.
 
     // BUG 3 (#305 recurring on the AUTO-continue path) — recompute `alreadyRegistered`
     // LIVE right before the fold. The register step already re-reads isRegistered, but on
@@ -700,53 +756,95 @@ export async function moveIntoPool(
         foldMint: mintFold
           ? { message: mintFold.message, attestation: mintFold.attestation }
           : undefined,
+        // PROVE-AHEAD: the proof generated in parallel with the attestation above (fold
+        // path only). depositToPool reuses it on the first attempt iff AVNU's real fee and
+        // its autoRegister still match — otherwise (or on any retry) it proves fresh.
+        prebuiltProof,
         onTx: (hash) => {
           depositTxHash = hash;
         },
         onStatus: (m) => emit('deposit', 'running', m),
       });
     } catch (err) {
-      // FOLD-RESUME RACE (issue #432) — authoritative backstop for the accepted≠reflected
-      // window the pre-submit is_nonce_used probe (depositIn.ts) can't cover. That probe
-      // converges when a prior fold deposit is already REFLECTED at `pre_confirmed`; in the
-      // window between a prior fold's broadcast and its reflection a quick retry probes the
-      // nonce as still-unused, re-folds, and the atomic multicall reverts "Nonce already
-      // used". By the atomic-fold invariant that revert is DEFINITIVE proof the prior fold
-      // committed — receive_message marks the CCTP nonce used ONLY if the whole
-      // mint → approve → pool pull → apply_action tx succeeded — so converge on completion
+      // FOLD-RESUME RACE / AMBIGUOUS POST-RELAY ERROR (issue #432 + a production
+      // first-attempt scare) — authoritative backstop for the accepted≠reflected window the
+      // pre-submit is_nonce_used probe (depositIn.ts) can't cover. That probe converges when a
+      // prior fold deposit is already REFLECTED at `pre_confirmed`; in the window between a
+      // prior fold's broadcast and its reflection a quick retry (or the client just receiving
+      // an ambiguous post-broadcast throw, e.g. a bare AVNU code-156 dump that does NOT even
+      // say "Nonce already used") can surface a scary error even though the fold actually
+      // landed on-chain. is_nonce_used is the AUTHORITATIVE, MONOTONIC signal — once
+      // receive_message lands it reads consumed forever, and on the atomic fold path
+      // (receive_message folded INTO the pool deposit) consumed ⟺ the whole
+      // mint → approve → pool pull → apply_action tx committed (they succeed or revert
+      // together). So poll it for ANY paymaster error while a mint was folded into THIS tx —
+      // not just the literal "Nonce already used" revert text — and converge on completion
       // instead of surfacing a scary failure + stuck retry. Gated on `mintFold` (a
-      // receive_message WAS folded into this tx), so "Nonce already used" here can only be
-      // the CCTP transmitter's revert, never a Starknet account-nonce error. Emits the same
-      // done terminal as the onMintAlreadyConsumed convergence above, but — UNLIKE that
-      // sibling — MUST also clear the deferred burn cursor here (it is still live; the
-      // sibling's was already cleared inside fundFromMetaMask).
-      if (mintFold && isNonceAlreadyUsedError(err)) {
-        // Confirm the funds were swept into the pool. On a pure atomic fold this is ~always
-        // true (mint + pool pull are one tx), so it is a redundant backstop, NOT the safety
-        // guarantee — the isNonceAlreadyUsedError gate is what proves the deposit landed. If
-        // this RPC read itself throws we must NOT let its error escape and drive runStep's
-        // transient-retry loop (a re-fold would just revert "Nonce already used" again):
-        // swallow it and fall through to the fail-closed paymaster rethrow with the ORIGINAL
-        // AVNU error.
-        let settled: bigint | undefined;
-        try {
-          settled = await readDepositTokenBalance(address);
-        } catch {
-          settled = undefined;
+      // receive_message WAS folded into this tx) so it can never fire for a non-fold deposit.
+      // Emits the same done terminal as the onMintAlreadyConsumed convergence above, but —
+      // UNLIKE that sibling — MUST also clear the deferred burn cursor here (it is still live;
+      // the sibling's was already cleared inside fundFromMetaMask). READ-ONLY: this never
+      // resubmits/re-folds/re-burns/re-proves anything — it only observes chain state.
+      if (mintFold && config.paymaster) {
+        const convergeDeadline = Date.now() + FOLD_CONFIRM_TIMEOUT_MS;
+        for (let firstPoll = true; ; firstPoll = false) {
+          // A read error counts as "not reflected yet" and is retried within the window — it
+          // must NEVER escape to drive runStep's transient-retry loop (a re-fold would just
+          // revert again, or worse, double-submit against an ambiguous prior state).
+          let used = false;
+          try {
+            used = await isCctpMessageNonceUsed(mintFold.message);
+          } catch {
+            used = false;
+          }
+          if (used) {
+            // The CCTP nonce is authoritative for "the mint definitively happened" — but on
+            // its own it is NOT sufficient proof the funds reached the POOL: a PRIOR run could
+            // have minted this same CCTP message via the STANDALONE (non-fold) path, leaving
+            // the funds sitting undeposited on the account, and a later fold-eligible retry
+            // would then read the nonce as used while the deposit never actually folded them
+            // in. Confirm with a balance cross-check as defense-in-depth: on the pure atomic
+            // fold, receive_message + pool-pull are ONE tx, so the funds never rest on the
+            // account — a swept (≤ dust) balance is ALWAYS true in the good case and only
+            // fails for that anomalous standalone-residual half-state. Live production shows a
+            // fully-successful fold deposit still leaves ~300 base units of dust on the
+            // account, so the threshold is RESIDUAL_DUST_THRESHOLD_WEI, never a bare `<= 0n`
+            // (that would never converge on a dust-carrying account). A read failure is
+            // "not confirmed yet" — swallow it and keep polling, never let it escape.
+            let settled: bigint | undefined;
+            try {
+              settled = await readDepositTokenBalance(address);
+            } catch {
+              settled = undefined;
+            }
+            if (settled !== undefined && settled <= RESIDUAL_DUST_THRESHOLD_WEI) {
+              // Both signals agree: the nonce is consumed AND the funds are (near-)swept →
+              // the atomic fold committed. Converge exactly like the normal success path:
+              // clear cursors, report the a-priori net, emit the calm completion terminal —
+              // no resubmission, ever.
+              mintFold.clearMintCursor();
+              clearPendingPoolDeposit(address);
+              depositWei = fundedNetWei ?? amountWei;
+              emit('deposit', 'done', 'Already deposited into pool.');
+              return;
+            }
+            // Nonce used but the balance hasn't confirmed swept yet (still settling, OR the
+            // anomalous standalone-residual half-state, OR the read itself failed) — do NOT
+            // converge. Keep polling until the deadline; never claim done on an unconfirmed
+            // half-state.
+          }
+          if (Date.now() > convergeDeadline) break;
+          if (firstPoll) emit('deposit', 'running', 'Confirming your deposit landed…');
+          await sleep(FOLD_CONFIRM_POLL_MS);
         }
-        if (settled !== undefined && settled <= 0n) {
-          // Funds already pulled into the pool by the prior atomic fold → COMPLETE. Clear
-          // the deferred burn cursor (the mint is definitively consumed) and any pool cursor,
-          // then emit the normal done terminal so the UI stops offering a doomed retry.
-          mintFold.clearMintCursor();
-          clearPendingPoolDeposit(address);
-          depositWei = fundedNetWei ?? amountWei;
-          emit('deposit', 'done', 'Already deposited into pool.');
-          return;
-        }
-        // Nonce consumed but funds still sit on the account (impossible for a PURE atomic
-        // fold), OR the balance read failed — fall through to the fail-closed rethrow rather
-        // than silently claim success on an anomalous / unverified half-state.
+        // Timed out without ever observing BOTH the nonce consumed AND the balance swept: log
+        // the FULL technical error for support/debugging (the user only ever sees the
+        // humanized copy), then fall through to the EXISTING fail-closed paymaster rethrow
+        // below — never worse than today (fail closed, funds safe, user can Continue).
+        console.error(
+          '[moveIntoPool] deposit fold did not confirm within window; underlying error:',
+          err,
+        );
       }
       // Bug-hunt E2: under an AVNU paymaster we CANNOT distinguish a pre-relay
       // throw from a post-broadcast ambiguous throw at this layer — depositToPool's

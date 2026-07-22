@@ -9,6 +9,7 @@
 // the same defense-in-depth the fail(...) paths already relied on.
 
 import { sanitizeErrorMessage } from './tx';
+import { WALLET_UNAVAILABLE_COPY, WALLET_UNAVAILABLE_RE } from './walletErrors';
 
 // Ordered table. ORDER MATTERS: first matching pattern wins, so list MORE SPECIFIC
 // signatures before broad catch-alls. Entry shape:
@@ -18,6 +19,10 @@ import { sanitizeErrorMessage } from './tx';
 //   - `appendRaw: true`   → KEEP the copy AND append the sanitized cause in parens, so a
 //       broad catch-all never fully HIDES where/why it fired (visibility during bring-up).
 const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: boolean }> = [
+  // Dead/reloaded wallet extension: the inpage↔extension port was severed (MV3
+  // worker suspended on idle / extension updated), so personal_sign rejects with an
+  // opaque string or times out (see walletErrors.ts). Swap it for actionable copy.
+  { pattern: WALLET_UNAVAILABLE_RE, message: WALLET_UNAVAILABLE_COPY },
   // Write-once register: the pool stores the viewing key once, so re-registering
   // an already-registered account reverts with NON_ZERO_VALUE.
   { pattern: /NON_ZERO_VALUE/i, message: 'This account is already registered.' },
@@ -45,6 +50,20 @@ const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: 
   {
     pattern: /block hash mismatch[\s\S]*?stored block hash:\s*(?:0x)?0+\b/i,
     message: 'The Starknet node is briefly behind — your funds are safe.',
+  },
+  // Single-tx deposit fold (CCTP receive_message folded INTO the pool deposit): an AVNU
+  // code-156 `argent/multicall-failed, Nonce already used, ENTRYPOINT_FAILED` on the FIRST
+  // attempt is the CCTP transmitter's already-consumed-nonce revert — moveIntoPool's own
+  // confirm-poll (is_nonce_used) already tries to converge this to a silent success; this
+  // covers the case where that bounded poll times out before the reflection lag clears. The
+  // deposit committed or is still settling, never lost — display-only: NOT reclassified as
+  // transient (errors.ts keeps the fail-closed markNonRetryable), so the orchestrator never
+  // auto-resubmits (double-mint-fold guard stays intact).
+  {
+    pattern: /nonce already used/i,
+    message:
+      'Your deposit is taking a moment to confirm on-chain. Your funds are safe — tap ' +
+      'Continue to check its status.',
   },
   // GAS-token shortfall on the source chain (depositIn/returnIn pre-checks). The raw
   // message already names the token (POL/ETH), the amounts, and a faucet — and is a

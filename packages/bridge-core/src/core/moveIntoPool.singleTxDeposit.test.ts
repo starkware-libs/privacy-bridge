@@ -56,17 +56,18 @@ vi.mock('./register', () => ({
 
 vi.mock('./deposit', () => ({
   depositToPool: vi.fn(),
+  buildDepositProofAhead: vi.fn(async () => undefined),
   ensureDepositTokenFunded: vi.fn(),
   readDepositTokenBalance: vi.fn(),
 }));
 
 vi.mock('./depositIn', async (importOriginal) => {
-  // Bind to the REAL isNonceAlreadyUsedError (not a copied regex) so the convergence gate
-  // is exercised through the production classifier — a mis-worded revert or a later
-  // narrowing of the match is caught here, not hidden behind a stale stub. Only
   // fundFromMetaMask is mocked (it drives live CCTP/network on the real path).
+  // isCctpMessageNonceUsed is ALSO mocked here — it is the authoritative convergence signal
+  // the deposit catch block polls, and tests drive it directly rather than through a proxy
+  // (a balance read).
   const actual = await importOriginal<typeof import('./depositIn')>();
-  return { ...actual, fundFromMetaMask: vi.fn() };
+  return { ...actual, fundFromMetaMask: vi.fn(), isCctpMessageNonceUsed: vi.fn() };
 });
 
 vi.mock('./poolDepositCursor', () => ({
@@ -79,8 +80,8 @@ import { moveIntoPool } from './moveIntoPool';
 import { getCurrentBlock } from './proving';
 import { isDeployedOnL2, ensureAccountDeployed } from './deploy';
 import { isRegistered, registerWithPool } from './register';
-import { depositToPool, readDepositTokenBalance } from './deposit';
-import { fundFromMetaMask } from './depositIn';
+import { buildDepositProofAhead, depositToPool, readDepositTokenBalance } from './deposit';
+import { fundFromMetaMask, isCctpMessageNonceUsed } from './depositIn';
 import {
   readPendingPoolDeposit,
   recordPendingPoolDeposit,
@@ -93,8 +94,10 @@ const mEnsureDeployed = vi.mocked(ensureAccountDeployed);
 const mIsRegistered = vi.mocked(isRegistered);
 const mRegister = vi.mocked(registerWithPool);
 const mDeposit = vi.mocked(depositToPool);
+const mBuildAhead = vi.mocked(buildDepositProofAhead);
 const mReadBalance = vi.mocked(readDepositTokenBalance);
 const mFundMM = vi.mocked(fundFromMetaMask);
+const mIsNonceUsed = vi.mocked(isCctpMessageNonceUsed);
 const mReadPending = vi.mocked(readPendingPoolDeposit);
 const mRecordPending = vi.mocked(recordPendingPoolDeposit);
 const mClearPending = vi.mocked(clearPendingPoolDeposit);
@@ -122,7 +125,13 @@ beforeEach(() => {
   // A fresh account holds nothing on-chain; the standalone-mint paths' chainResidual guard
   // (#433) reads this. Fold + convergence tests set an explicit balance where it matters.
   mReadBalance.mockResolvedValue(0n);
+  mIsNonceUsed.mockResolvedValue(false);
   clearMintCursorSpy = vi.fn();
+  // Prove-ahead default: resolve to undefined (no prebuilt) so tests that don't care see
+  // today's inline prove; the wiring tests below override this per-case. Set here (not just
+  // via the vi.mock factory) because clearAllMocks keeps implementations, so a prior test's
+  // mockResolvedValue would otherwise leak forward.
+  mBuildAhead.mockResolvedValue(undefined);
   // fundFromMetaMask double: when asked to DEFER, hand back the attested bytes via
   // onMintFold (as the real one does on the fold path); otherwise a plain net return.
   mFundMM.mockImplementation(async (args) => {
@@ -161,6 +170,71 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
 
     // The burn cursor is cleared only AFTER the deposit landed.
     expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fold path proves AHEAD (concurrent with the burn+attestation) and threads it as prebuiltProof', async () => {
+    configMock.paymaster = { feeMode: 'sponsored' };
+    const AHEAD = {
+      call: { contractAddress: '0xPOOL', entrypoint: 'apply_actions', calldata: [] },
+      proofDetails: { proof: '0xAHEAD', proofFacts: ['0xf'] },
+      feeAmount: 1_500n,
+      autoRegister: false,
+    };
+    mBuildAhead.mockResolvedValue(AHEAD as never);
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    // The proof was generated up-front for the a-priori net, at the IMMEDIATE depth
+    // (account already deployed + registered), with the already-registered account's
+    // autoRegister:false — so it can be built while the CCTP attestation is still pending.
+    expect(mBuildAhead).toHaveBeenCalledTimes(1);
+    const aheadArgs = mBuildAhead.mock.calls[0]![0];
+    expect(aheadArgs.amountWei).toBe(AMOUNT);
+    expect(aheadArgs.immediateProve).toBe(true);
+    expect(aheadArgs.autoRegister).toBe(false);
+
+    // depositToPool received that exact ready proof to reuse (alongside the folded mint).
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBe(AHEAD);
+    expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
+  });
+
+  it('a prove-ahead failure is swallowed — the deposit still proceeds (proves fresh inline)', async () => {
+    configMock.paymaster = { feeMode: 'sponsored' };
+    mBuildAhead.mockRejectedValue(new Error('prover hiccup'));
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    // Prove-ahead is a pure optimization: its rejection must NOT fail the deposit. The
+    // deposit ran with no prebuilt (depositToPool proves fresh) but still folded the mint.
+    expect(mBuildAhead).toHaveBeenCalledTimes(1);
+    expect(mDeposit).toHaveBeenCalledTimes(1);
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBeUndefined();
+    expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({ message: MESSAGE, attestation: ATTESTATION });
+  });
+
+  it('non-fold paths never prove ahead (no attestation wait to hide behind)', async () => {
+    // Manager path (no paymaster): fold ineligible → no prove-ahead, no prebuilt.
+    configMock.paymaster = undefined;
+
+    await moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    });
+
+    expect(mBuildAhead).not.toHaveBeenCalled();
+    expect(mDeposit.mock.calls[0]![0].prebuiltProof).toBeUndefined();
   });
 
   it('treasury funding → no fold (proven 2-tx flow)', async () => {
@@ -237,16 +311,22 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
       pendingCursor = null;
     });
 
-    // Run 1: the folded mint+deposit tx REVERTS (nothing minted; EVM funds burned).
+    // Run 1: the folded mint+deposit tx REVERTS (nothing minted; EVM funds burned). Under the
+    // widened fold-confirm gate (mintFold + paymaster, any error) this ALSO enters the bounded
+    // nonce-poll before failing closed — mIsNonceUsed defaults to false (beforeEach), so it
+    // exhausts the window and rethrows the original revert. Fake timers collapse that wait.
     mDeposit.mockRejectedValueOnce(new Error('apply_actions reverted on-chain'));
-    await expect(
-      moveIntoPool({
-        signature: SIGNATURE,
-        funding: 'metamask',
-        amountWei: AMOUNT,
-        provider: fakeProvider(),
-      }),
-    ).rejects.toThrow(/reverted/i);
+    vi.useFakeTimers();
+    const run1 = moveIntoPool({
+      signature: SIGNATURE,
+      funding: 'metamask',
+      amountWei: AMOUNT,
+      provider: fakeProvider(),
+    }).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const run1Err = await run1;
+    vi.useRealTimers();
+    expect(String(run1Err)).toMatch(/reverted/i);
 
     // The mint never landed → on resume the derived account holds ZERO deposit token.
     mReadBalance.mockResolvedValue(0n);
@@ -382,26 +462,24 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
     });
   });
 
-  // ISSUE #432 — the accepted≠reflected window the pre-submit is_nonce_used probe CANNOT
-  // cover. A prior fold deposit was broadcast (AVNU code-156 ambiguous) but not yet
-  // reflected; a quick retry re-folds because is_nonce_used still reads false, and the
-  // atomic multicall reverts "Nonce already used" (AVNU code-156 / argent multicall). By
-  // the atomic-fold invariant that revert PROVES the prior fold committed, so moveIntoPool
-  // must converge on completion — never surface the raw revert as a stuck failure.
-  describe('fold submit reverts "Nonce already used" (accepted≠reflected retry)', () => {
+  // ISSUE #432 / production first-attempt scare — the accepted≠reflected window the
+  // pre-submit is_nonce_used probe CANNOT cover. A prior fold deposit was broadcast (an AVNU
+  // code-156 error, ambiguous OR the transmitter's literal "Nonce already used" revert) but
+  // not yet reflected. moveIntoPool's OWN confirm-poll re-reads is_nonce_used directly (the
+  // authoritative, monotonic signal) rather than proxying through a balance read, so it
+  // converges on BOTH the literal revert text AND any other ambiguous post-relay error.
+  describe('fold submit errors (accepted≠reflected retry) — nonce-poll convergence', () => {
     beforeEach(() => {
       configMock.paymaster = { feeMode: 'sponsored' };
-      // The fold IS attempted (default mock defers + fires onMintFold), but the atomic
-      // deposit reverts with the transmitter's already-consumed-nonce revert (AVNU shape).
+    });
+
+    it('literal "Nonce already used" revert + nonce reads used immediately → CONVERGE to done', async () => {
       mDeposit.mockRejectedValue(
         new Error(
           "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
         ),
       );
-    });
-
-    it('balance swept to 0 → CONVERGE to done: no throw, burn cursor + pool cursor cleared', async () => {
-      mReadBalance.mockResolvedValue(0n); // prior fold pulled the funds into the pool
+      mIsNonceUsed.mockResolvedValue(true);
 
       const steps: Array<[string, string, string | undefined]> = [];
       const result = await moveIntoPool({
@@ -412,69 +490,258 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
         onStep: (step, status, detail) => steps.push([step, status, detail]),
       });
 
-      // The fold WAS attempted (and reverted), but the run converged instead of failing.
+      // The fold WAS attempted (and reverted), but the run converged instead of failing —
+      // and it was NEVER resubmitted.
       expect(mDeposit).toHaveBeenCalledTimes(1);
       expect(mDeposit.mock.calls[0]![0].foldMint).toEqual({
         message: MESSAGE,
         attestation: ATTESTATION,
       });
+      expect(mIsNonceUsed).toHaveBeenCalledWith(MESSAGE);
       expect(
         steps.some(
           ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
         ),
       ).toBe(true);
-      // No error terminal was emitted for the deposit step.
       expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
-      // Deferred burn cursor cleared (mint definitively consumed) + pool cursor cleared.
       expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
       expect(mClearPending).toHaveBeenCalledWith(ACCOUNT);
-      // A prior run committed the deposit → deposited false, net = the a-priori amount.
       expect(result.deposited).toBe(false);
       expect(result.depositedNetWei).toBe(AMOUNT);
     });
 
-    it('residual balance > 0 → fail closed (never claim done on an anomalous half-state)', async () => {
-      mReadBalance.mockResolvedValue(AMOUNT); // impossible for a pure atomic fold → guard
+    // THE red→green regression this fix targets: an AMBIGUOUS post-relay error whose message
+    // does NOT say "Nonce already used" at all (e.g. a bare gateway/timeout-style code-156
+    // dump). The prior version of this fix only gated on the literal revert text, so this case
+    // slipped straight to fail-closed on the FIRST attempt. The nonce-poll gate (keyed on
+    // `mintFold` + `config.paymaster`, not on error text) must still converge it.
+    it('ambiguous post-relay error (no "Nonce already used" text) + reflection lag → converges (no re-click)', async () => {
+      mDeposit.mockRejectedValue(
+        new Error(
+          'AVNU paymaster paymaster_executeTransaction error (code 156): gateway timeout, please retry',
+        ),
+      );
+      // Reflection lag: the nonce reads unused on the first poll, then used on the next.
+      mIsNonceUsed.mockResolvedValueOnce(false).mockResolvedValue(true);
 
-      await expect(
-        moveIntoPool({
-          signature: SIGNATURE,
-          funding: 'metamask',
-          amountWei: AMOUNT,
-          provider: fakeProvider(),
-        }),
-      ).rejects.toThrow(/nonce already used/i);
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      vi.useRealTimers();
 
+      // Converged on the first attempt (a single deposit call, no re-submission) despite the
+      // message never mentioning "nonce".
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(
+        steps.some(
+          ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
+        ),
+      ).toBe(true);
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
+      // It actually POLLED (>1 nonce read) rather than giving up on the first read.
+      expect(mIsNonceUsed.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+      expect(mClearPending).toHaveBeenCalledWith(ACCOUNT);
+      expect(result.deposited).toBe(false);
+      expect(result.depositedNetWei).toBe(AMOUNT);
+    });
+
+    it('nonce never observed used within the window → fail closed (never worse than today)', async () => {
+      const originalErr = new Error(
+        "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+      );
+      mDeposit.mockRejectedValue(originalErr);
+      mIsNonceUsed.mockResolvedValue(false); // never confirms
+
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      }).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = await p;
+      vi.useRealTimers();
+
+      expect(String(err)).toMatch(/nonce already used/i);
       // No false completion: the burn/pool cursors are NOT cleared on the anomalous path.
       expect(clearMintCursorSpy).not.toHaveBeenCalled();
       // Fail closed, do NOT loop: the paymaster path marks the error non-retryable, so the
       // deposit is attempted exactly once (a regression that retried would call it twice).
       expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(true);
+      // The full technical error is logged for support/debugging on timeout.
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy.mock.calls[0]![1]).toBe(originalErr);
+
+      consoleErrorSpy.mockRestore();
     });
 
-    it('balance read FAILS during convergence → fail closed (no false done, no retry loop)', async () => {
-      // The post-revert balance read throws (RPC hiccup). It must NOT escape to drive the
-      // transient-retry loop; the run fails closed on the original AVNU error instead.
-      mReadBalance.mockRejectedValue(new Error('rpc: fetch failed'));
+    it('a per-iteration nonce-read RPC error is swallowed — the poll continues and still converges', async () => {
+      mDeposit.mockRejectedValue(
+        new Error(
+          "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+        ),
+      );
+      // First poll throws (RPC hiccup) — must be swallowed, not escape to runStep's retry
+      // loop or surface as the thrown error. Second poll observes the nonce consumed.
+      mIsNonceUsed.mockRejectedValueOnce(new Error('rpc: fetch failed')).mockResolvedValue(true);
 
-      await expect(
-        moveIntoPool({
-          signature: SIGNATURE,
-          funding: 'metamask',
-          amountWei: AMOUNT,
-          provider: fakeProvider(),
-        }),
-      ).rejects.toThrow(/nonce already used/i);
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      vi.useRealTimers();
 
-      expect(clearMintCursorSpy).not.toHaveBeenCalled();
+      expect(mIsNonceUsed.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(
+        steps.some(
+          ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
+        ),
+      ).toBe(true);
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
       expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+      expect(result.deposited).toBe(false);
+    });
+
+    // GUARD (re-added per coordinator review): `is_nonce_used` alone is NOT sufficient proof
+    // the funds reached the POOL. A PRIOR run could have minted this SAME CCTP message via the
+    // STANDALONE (non-fold) path, leaving the funds sitting undeposited on the account; a later
+    // fold-eligible retry then reads the nonce as used while the deposit never actually folded
+    // them in. The balance cross-check must block a false "done" in that half-state.
+    it('nonce used but balance still ABOVE dust (standalone-residual half-state) → fail closed, never a false done', async () => {
+      mDeposit.mockRejectedValue(
+        new Error(
+          "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+        ),
+      );
+      mIsNonceUsed.mockResolvedValue(true); // nonce IS consumed…
+      mReadBalance.mockResolvedValue(AMOUNT); // …but the full amount still sits on the account
+
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      }).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = await p;
+      vi.useRealTimers();
+
+      expect(String(err)).toMatch(/nonce already used/i);
+      // Never a false completion — the funds are NOT confirmed swept into the pool.
+      expect(steps.some(([, , d]) => d === 'Already deposited into pool.')).toBe(false);
+      expect(clearMintCursorSpy).not.toHaveBeenCalled();
+      expect(mClearPending).not.toHaveBeenCalled();
+      // Fail closed, never resubmitted.
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+    });
+
+    // PRODUCTION EVIDENCE: a real, fully-successful fold deposit still leaves ~300 base units
+    // of dust on the account (rounding / fee remainder) — so the threshold MUST be
+    // RESIDUAL_DUST_THRESHOLD_WEI, never a bare `<= 0n` (which would never converge on a
+    // dust-carrying account and would falsely fail-close every real success).
+    it('nonce used + balance is production-observed DUST (300 wei, below threshold) → CONVERGES to done', async () => {
+      mDeposit.mockRejectedValue(
+        new Error(
+          "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+        ),
+      );
+      mIsNonceUsed.mockResolvedValue(true);
+      mReadBalance.mockResolvedValue(300n); // production-observed post-fold dust
+
+      const steps: Array<[string, string, string | undefined]> = [];
+      const result = await moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      });
+
+      expect(
+        steps.some(
+          ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
+        ),
+      ).toBe(true);
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
+      expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+      expect(mClearPending).toHaveBeenCalledWith(ACCOUNT);
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(result.deposited).toBe(false);
+    });
+
+    it('balance read THROWS while nonce keeps reading used → keeps polling, never a false done on the failed read', async () => {
+      mDeposit.mockRejectedValue(
+        new Error(
+          "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+        ),
+      );
+      mIsNonceUsed.mockResolvedValue(true);
+      // First balance read throws; a later one succeeds ≤ dust — must NOT converge on the
+      // failed read, only on the later successful confirmed-swept read.
+      mReadBalance
+        .mockRejectedValueOnce(new Error('rpc: fetch failed'))
+        .mockResolvedValue(0n);
+
+      vi.useFakeTimers();
+      const steps: Array<[string, string, string | undefined]> = [];
+      const p = moveIntoPool({
+        signature: SIGNATURE,
+        funding: 'metamask',
+        amountWei: AMOUNT,
+        provider: fakeProvider(),
+        onStep: (step, status, detail) => steps.push([step, status, detail]),
+      });
+      await vi.runAllTimersAsync();
+      const result = await p;
+      vi.useRealTimers();
+
+      expect(mReadBalance.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(
+        steps.some(
+          ([s, st, d]) => s === 'deposit' && st === 'done' && d === 'Already deposited into pool.',
+        ),
+      ).toBe(true);
+      expect(steps.some(([s, st]) => s === 'deposit' && st === 'error')).toBe(false);
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+      expect(clearMintCursorSpy).toHaveBeenCalledTimes(1);
+      expect(result.deposited).toBe(false);
     });
 
     it('non-fold deposit that surfaces "nonce already used" does NOT converge (mintFold gate)', async () => {
       // Treasury funding → no CCTP mint folded (mintFold undefined). Even if the deposit
       // reverts with the same string, the `mintFold &&` gate must BLOCK convergence — only
-      // a folded receive_message revert proves the atomic-fold deposit landed.
-      mReadBalance.mockResolvedValue(0n);
+      // a folded receive_message revert/error proves the atomic-fold deposit landed.
+      mDeposit.mockRejectedValue(
+        new Error(
+          "AVNU paymaster paymaster_executeTransaction error (code 156): 'argent/multicall-failed', 'Nonce already used', 'ENTRYPOINT_FAILED'",
+        ),
+      );
 
       const steps: Array<[string, string, string | undefined]> = [];
       await expect(
@@ -487,9 +754,11 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
         }),
       ).rejects.toThrow(/nonce already used/i);
 
-      // Never emitted the false completion terminal.
+      // Never emitted the false completion terminal, and never even consulted the nonce
+      // (the mintFold gate short-circuits before the poll).
       expect(steps.some(([, , d]) => d === 'Already deposited into pool.')).toBe(false);
       expect(clearMintCursorSpy).not.toHaveBeenCalled();
+      expect(mIsNonceUsed).not.toHaveBeenCalled();
     });
   });
 });

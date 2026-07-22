@@ -69,9 +69,9 @@ import {
   getCurrentBlock,
   isProofExpiredError,
   isNodeLagError,
-  sleep,
   IMMEDIATE_PROVING_BLOCK_DEPTH,
 } from './proving';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry';
 import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
 
 export interface ClaimToPoolArgs {
@@ -544,43 +544,17 @@ export async function submitProvenClaim(proven: ProvenClaim): Promise<string> {
     );
   };
 
-  // FULL-NODE-LAG retry budget. AVNU's validating node is briefly behind the proof's base
-  // block (isNodeLagError). A few-block lag catches up in seconds; ~6×5s ≈ 30s stays FAR
-  // under the pool's 450-block (~15 min) proof-validity window, and never hangs the UI (the
-  // onStatus heartbeat below keeps it alive). Exhaustion is not a hard failure — it
-  // propagates (→ resumable in the UI, which re-attempts / offers a manual Continue).
-  const MAX_NODE_LAG_RETRIES = 6;
-  const NODE_LAG_RETRY_DELAY_MS = 5_000;
-
-  // Submit `p`, and on a full-node-lag ValidationFailure resubmit the IDENTICAL proof after
-  // a short wait (bounded), reusing the SAME proof — NO rebuild / NO re-prove. Safe because:
-  //  - the node-lag error is a PRE-BROADCAST validation reject (get_block_hash for the base
-  //    block still reads 0), so executeTransaction threw with no hash — nothing was relayed;
-  //  - resubmitting an IDENTICAL proof is inherently double-spend-safe (its pool nullifiers
-  //    can be consumed on-chain at most once, and the Cairo claim is idempotent —
-  //    NOTHING_TO_CLAIM on an already-drained ledger). This is why it bypasses the
-  //    fail-closed ambiguity guard below, UNLIKE the post-broadcast code-156 gateway error.
-  // A NON-node-lag error rethrows at the identical point, so every existing guard (expiry
-  // re-anchor, timed-out-landed, fail-closed, stale-nonce rebuild) is left untouched.
-  const submitReusingProofOnNodeLag = async (p: ProvenClaim): Promise<void> => {
-    for (let lagAttempt = 0; ; lagAttempt++) {
-      try {
-        await submit(p);
-        return;
-      } catch (err) {
-        if (!isNodeLagError(err) || lagAttempt >= MAX_NODE_LAG_RETRIES) throw err;
-        // Pre-broadcast reject relayed nothing — clear the dead relay/hash state so the
-        // resubmit classifies its OWN outcome, then reuse the IDENTICAL proof.
+  // Submit `p`, retrying the IDENTICAL proof on full-node lag (resetRelayState clears this
+  // leg's relay/hash state between lag retries). A non-lag error or an exhausted budget
+  // rethrows at the identical point, leaving every existing guard untouched. See nodeLagRetry.ts.
+  const submitClaimReusingProofOnNodeLag = (p: ProvenClaim): Promise<void> =>
+    submitReusingProofOnNodeLag(() => submit(p), {
+      resetRelayState: () => {
         paymasterSubmissionStarted = false;
         claimTxHash = '';
-        onStatus?.(
-          `Starknet node is briefly behind; retrying the same proof ` +
-            `(${lagAttempt + 1}/${MAX_NODE_LAG_RETRIES})…`,
-        );
-        await sleep(NODE_LAG_RETRY_DELAY_MS);
-      }
-    }
-  };
+      },
+      onStatus,
+    });
 
   // PART C bound (mirrors deposit.ts): at most this many FRESH-anchor re-proves. With the
   // 450-block validity window this essentially never fires now that the proof is built
@@ -611,7 +585,7 @@ export async function submitProvenClaim(proven: ProvenClaim): Promise<string> {
 
   for (let expiryAttempt = 0; ; expiryAttempt++) {
     try {
-      await submitReusingProofOnNodeLag(working);
+      await submitClaimReusingProofOnNodeLag(working);
     } catch (err) {
       // PART C first: a proof-freshness revert re-anchors to a fresh head, NOT the
       // same-anchor stale-nonce path below.
@@ -647,7 +621,7 @@ export async function submitProvenClaim(proven: ProvenClaim): Promise<string> {
       // (already-aged) anchor — the failed submit committed no new block.
       working = await working.rebuild();
       try {
-        await submitReusingProofOnNodeLag(working);
+        await submitClaimReusingProofOnNodeLag(working);
       } catch (retryErr) {
         // The same-anchor retry can ALSO hit an expiry (its base finally aged out) —
         // re-anchor via the outer loop rather than failing (bounded).
