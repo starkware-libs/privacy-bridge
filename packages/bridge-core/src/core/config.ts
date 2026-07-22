@@ -289,6 +289,20 @@ export interface EvmCctpDest {
   blockExplorerUrls?: string[];
 }
 
+// Build a block-explorer transaction URL for an EVM CCTP chain config, or undefined
+// when it carries no explorer base (keeps callers' links informational-only, never a
+// dead href). Generic over `{ blockExplorerUrls }` so BOTH directions share it: the
+// deposit-in CCTP burn on an EvmCctpSource, and a bridge-out mint on an EvmCctpDest.
+// The app's own explorerTxUrl only knows Starknet + Polygon, so the SDK must resolve
+// arbitrary EVM source/dest explorers (Base, Arbitrum, …) from the config here.
+export function evmExplorerTxUrl(
+  cfg: { blockExplorerUrls?: string[] } | undefined,
+  txHash: string,
+): string | undefined {
+  const base = cfg?.blockExplorerUrls?.[0];
+  return base ? `${base.replace(/\/+$/, '')}/tx/${txHash}` : undefined;
+}
+
 // STRK→US(D)C helper — pure, network-independent. Kept module-level (not inside
 // configFor) so both the static config defaults and the live-price path share it.
 // USDC-equivalent of `strkHuman` STRK at `priceUsd` $/STRK, as a plain decimal

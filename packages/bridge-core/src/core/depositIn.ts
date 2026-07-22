@@ -40,7 +40,7 @@ import { getCallsStatus, getCapabilities, sendCalls } from 'viem/actions';
 
 import type { Account } from 'starknet';
 
-import { config, getEvmCctpSource, type EvmCctpSource } from './config';
+import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
@@ -629,6 +629,16 @@ export interface FundFromMetaMaskArgs {
   // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
   // fresh-re-burn behavior.
   onMintAlreadyConsumed?: () => void;
+  // Fired when the source-chain CCTP burn is confirmed — on a FRESH burn (path 3) or when a
+  // prior run's burn is RESUMED from the cursor (path 2) — with the burn tx hash + a
+  // source-chain block-explorer URL for it (when the source config carries one). Lets the
+  // caller surface the EVM-side leg on its deposit receipt: the Starknet mint/deposit tx alone
+  // omits where the funds were burned. Non-secret (public on-chain) and purely informational —
+  // it NEVER fires on the already-funded no-op (nothing burned this op). This is PER-INVOCATION:
+  // a caller that RETRIES fundFromMetaMask after a fresh burn (e.g. a transient attest/mint
+  // failure) sees it fire AGAIN for the SAME hash on the resume, so callers that retry must
+  // de-dupe by burnTxHash — moveIntoPool does, making its own onBurned strictly once-per-burn.
+  onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -943,6 +953,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // cursor (fail-closed), same as any other unclassified resume failure.
   if (inflight) {
     onStatus?.('Resuming an in-flight deposit (already burned)…');
+    // Surface the (already-committed) burn from the cursor so the receipt links the
+    // EVM leg even when this run only finishes attest/mint. The explorer is resolved
+    // off the cursor's own source chain (authoritative on resume, like the burn tx).
+    args.onBurned?.({
+      burnTxHash: inflight.burnTx,
+      explorerUrl: evmExplorerTxUrl(getEvmCctpSource(inflight.evmChainId), inflight.burnTx),
+    });
     const result = await finishAttestAndMint(
       inflight.burnTx,
       inflight.sourceDomain,
@@ -1280,6 +1297,10 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       'WARNING: could not save the deposit resume point — do NOT reload this tab until the deposit completes.',
     );
   }
+
+  // The burn is committed on-chain — surface it (hash + source explorer link) so the
+  // caller can show the EVM leg on the deposit receipt, independent of attest/mint below.
+  args.onBurned?.({ burnTxHash: burnTx, explorerUrl: evmExplorerTxUrl(source, burnTx) });
 
   // 2-3. Attest (Iris is keyed by the EVM SOURCE domain), validate the attested
   // message (Fix 2), mint on Starknet, then clear the cursor. Same path the

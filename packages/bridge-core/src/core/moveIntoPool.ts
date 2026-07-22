@@ -76,6 +76,14 @@ export interface MoveIntoPoolArgs {
   // (already deployed/registered, deposit resume), and on the paymaster register
   // no-op (folded into the deposit).
   onStep?: (step: MoveStep, status: StepStatus, detail?: string, txHash?: string) => void;
+  // Fired AT MOST ONCE PER BURN once the metamask-funding CCTP burn is confirmed (fresh or
+  // resumed), with the EVM burn tx hash + a source-chain explorer URL. The `deposit`/`deploy`
+  // onStep txHash is the STARKNET-side leg only; this surfaces the EVM SOURCE leg so the app
+  // can list both on the deposit receipt (mirrors the withdraw, which returns burnTxHash).
+  // De-duped internally: fundFromMetaMask re-fires it on a resume of the same burn (e.g. after
+  // a transient attest/mint retry), but moveIntoPool forwards only the first sighting per hash.
+  // Never fires for treasury funding (no CCTP burn) or the already-funded no-op.
+  onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 
 // Transparent-retry budget for a step whose submit reported a TRANSIENT error even
@@ -151,6 +159,8 @@ interface FundDepositTokenArgs {
   provider?: EthereumProvider;
   sourceChainId?: number;
   onStatus?: (s: string) => void;
+  // Forwarded to fundFromMetaMask: surface the confirmed EVM burn (hash + explorer URL).
+  onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
   // PART B fold (metamask funding only): defer the Starknet mint and hand its attested
   // bytes to onMintFold so the caller folds it into the deposit tx. Ignored for
   // treasury funding (no CCTP mint to fold).
@@ -187,6 +197,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
       amountWei: args.amountWei,
       onStatus: args.onStatus,
       sourceChainId: args.sourceChainId,
+      onBurned: args.onBurned,
       deferMint: args.deferMint,
       onMintFold: args.onMintFold,
       onMintAlreadyConsumed: args.onMintAlreadyConsumed,
@@ -221,10 +232,25 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
 export async function moveIntoPool(
   args: MoveIntoPoolArgs,
 ): Promise<{ depositedNetWei: bigint; deposited: boolean }> {
-  const { signature, funding, amountWei, provider, sourceChainId, resume, onStep } = args;
+  const { signature, funding, amountWei, provider, sourceChainId, resume, onStep, onBurned } = args;
   if (amountWei <= 0n) {
     throw new Error('Amount must be greater than zero.');
   }
+
+  // De-dupe onBurned to at most once per burn hash (its documented once-per-burn contract).
+  // fundFromMetaMask fires it on BOTH a fresh burn and a later RESUME of that same burn; a
+  // transient attest/mint failure inside fundDepositToken leaves `funded` false, so runStep
+  // re-enters the deposit (or deploy) body → fundFromMetaMask resume path → a SECOND onBurned
+  // for the identical hash. Both fund call sites go through this wrapper so any burn surfaces
+  // exactly once regardless of which step funded or how many transient retries it took.
+  const seenBurns = new Set<string>();
+  const onBurnedOnce = onBurned
+    ? (info: { burnTxHash: string; explorerUrl?: string }) => {
+        if (seenBurns.has(info.burnTxHash)) return;
+        seenBurns.add(info.burnTxHash);
+        onBurned(info);
+      }
+    : undefined;
 
   // Derive keys from the raw signature — IN-MEMORY ONLY, never logged/persisted.
   const privateKey = deriveStarknetPrivateKey(signature);
@@ -353,6 +379,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
+        onBurned: onBurnedOnce,
         onStatus: (m) => emit('deploy', 'running', m),
       });
       funded = true;
@@ -589,6 +616,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
+        onBurned: onBurnedOnce,
         onStatus: (m) => emit('deposit', 'running', m),
         // On the fold path defer the mint: fundFromMetaMask returns the attested bytes
         // via onMintFold instead of submitting the standalone mint tx. The mint then

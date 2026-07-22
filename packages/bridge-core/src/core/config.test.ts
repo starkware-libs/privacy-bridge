@@ -12,6 +12,7 @@ import {
   EVM_CCTP_SOURCES,
   config,
   configFor,
+  evmExplorerTxUrl,
   getEvmCctpSource,
   isAnonymizerConfigured,
   network,
@@ -346,6 +347,26 @@ describe('strkFeeToUsdc', () => {
     expect(strkFeeToUsdc('-1', 2)).toBe('0.5');
     expect(strkFeeToUsdc('0.5', -2)).toBe('0.5');
     expect(strkFeeToUsdc('nope', 2)).toBe('0.5');
+  });
+});
+
+describe('evmExplorerTxUrl (shared source/dest explorer link builder)', () => {
+  it('builds <base>/tx/<hash> from the first explorer base', () => {
+    expect(evmExplorerTxUrl({ blockExplorerUrls: ['https://amoy.polygonscan.com'] }, '0xabc')).toBe(
+      'https://amoy.polygonscan.com/tx/0xabc',
+    );
+  });
+
+  it('trims a trailing slash on the base so the /tx/ join never doubles up', () => {
+    expect(evmExplorerTxUrl({ blockExplorerUrls: ['https://etherscan.io/'] }, '0xdef')).toBe(
+      'https://etherscan.io/tx/0xdef',
+    );
+  });
+
+  it('returns undefined when the config has no explorer base (link stays informational-only)', () => {
+    expect(evmExplorerTxUrl({ blockExplorerUrls: [] }, '0xabc')).toBeUndefined();
+    expect(evmExplorerTxUrl({}, '0xabc')).toBeUndefined();
+    expect(evmExplorerTxUrl(undefined, '0xabc')).toBeUndefined();
   });
 });
 
