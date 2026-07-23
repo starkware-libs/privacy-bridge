@@ -84,9 +84,7 @@ jobs:
 
       - name: Set up pnpm
         if: steps.guard.outputs.run == 'true'
-        uses: pnpm/action-setup@v4
-        with:
-          version: '9.15.0'
+        uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
 
       - name: Set up Node
         if: steps.guard.outputs.run == 'true'
@@ -95,11 +93,17 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
+      # pnpm ignores ${ENV} in credential lines from the committed .npmrc, so the
+      # GitHub Packages token must live in a user-level ~/.npmrc it will expand.
+      - name: Authenticate to GitHub Packages
+        if: steps.guard.outputs.run == 'true'
+        run: echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install
         if: steps.guard.outputs.run == 'true'
         run: pnpm install --frozen-lockfile
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         if: steps.guard.outputs.run == 'true'
