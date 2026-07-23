@@ -1,3 +1,14 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+
+# Supply-chain hardening (all require pnpm >=10.26; see packageManager pin).
+# Release cooldown: never install a version published less than 1 day ago,
+# so a compromised fresh publish can't be pulled in immediately.
+minimumReleaseAge: 1440
+# Fail installs when a package's trust evidence (trusted publisher / provenance)
+# downgrades relative to an earlier release.
+trustPolicy: no-downgrade
+# Only direct deps may use exotic sources (git+ssh:, https: tarballs); block
+# them in transitive deps.
+blockExoticSubdeps: true
