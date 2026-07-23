@@ -40,7 +40,7 @@ import { getCallsStatus, getCapabilities, sendCalls } from 'viem/actions';
 
 import type { Account } from 'starknet';
 
-import { config, getEvmCctpSource, type EvmCctpSource } from './config';
+import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
@@ -171,6 +171,30 @@ const TOKEN_MESSENGER_ABI = [
       { name: 'minFinalityThreshold', type: 'uint32' },
     ],
     outputs: [],
+  },
+] as const satisfies Abi;
+
+// TokenMessengerV2 DepositForBurn event — used by waitForBatchStatus's on-chain
+// scan to discover our burn tx hash when the wallet stops answering
+// wallet_getCallsStatus (see the scan block inside waitForBatchStatus). Indexed
+// per Circle's V2: burnToken, depositor, minFinalityThreshold. All other fields
+// are matched in code after the RPC-side filter narrows to (address, depositor).
+const TOKEN_MESSENGER_EVENT_ABI = [
+  {
+    type: 'event',
+    name: 'DepositForBurn',
+    inputs: [
+      { name: 'burnToken', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'depositor', type: 'address', indexed: true },
+      { name: 'mintRecipient', type: 'bytes32', indexed: false },
+      { name: 'destinationDomain', type: 'uint32', indexed: false },
+      { name: 'destinationTokenMessenger', type: 'bytes32', indexed: false },
+      { name: 'destinationCaller', type: 'bytes32', indexed: false },
+      { name: 'maxFee', type: 'uint256', indexed: false },
+      { name: 'minFinalityThreshold', type: 'uint32', indexed: true },
+      { name: 'hookData', type: 'bytes', indexed: false },
+    ],
   },
 ] as const satisfies Abi;
 
@@ -629,6 +653,16 @@ export interface FundFromMetaMaskArgs {
   // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
   // fresh-re-burn behavior.
   onMintAlreadyConsumed?: () => void;
+  // Fired when the source-chain CCTP burn is confirmed — on a FRESH burn (path 3) or when a
+  // prior run's burn is RESUMED from the cursor (path 2) — with the burn tx hash + a
+  // source-chain block-explorer URL for it (when the source config carries one). Lets the
+  // caller surface the EVM-side leg on its deposit receipt: the Starknet mint/deposit tx alone
+  // omits where the funds were burned. Non-secret (public on-chain) and purely informational —
+  // it NEVER fires on the already-funded no-op (nothing burned this op). This is PER-INVOCATION:
+  // a caller that RETRIES fundFromMetaMask after a fresh burn (e.g. a transient attest/mint
+  // failure) sees it fire AGAIN for the SAME hash on the resume, so callers that retry must
+  // de-dupe by burnTxHash — moveIntoPool does, making its own onBurned strictly once-per-burn.
+  onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -637,6 +671,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 type BatchStatusResult =
   | { kind: 'success'; receipts: Awaited<ReturnType<typeof getCallsStatus>>['receipts'] }
   | { kind: 'failure'; statusCode: string }
+  // Wallet stopped answering wallet_getCallsStatus, but the CCTP burn event was found
+  // on chain for this funder+recipient+amount — the bundle DID broadcast. Same downstream
+  // path as 'success', keyed off the on-chain tx hash from the log.
+  | { kind: 'scan-success'; burnTx: `0x${string}` }
   // Deadline reached while the bundle was ACKNOWLEDGED (a real status was seen) but never
   // settled. The batch may be in-flight, so the caller must NOT re-burn.
   | { kind: 'in-flight' }
@@ -656,16 +694,52 @@ function isUnknownBundleIdError(error: unknown): boolean {
   return false;
 }
 
+// Options for the interleaved on-chain scan. Second signal alongside
+// wallet_getCallsStatus: if the wallet stops answering (5730 forever) but the CCTP
+// DepositForBurn event with (depositor, mintRecipient, amount, destinationDomain)
+// matching this submission is visible on chain, the bundle DID broadcast — resolve
+// with the tx hash and let the caller take the same downstream path as 'success'.
+// A same-block landing is covered by snapshotting fromBlock BEFORE sendCalls.
+interface BurnScanOptions {
+  publicClient: ReturnType<typeof createPublicClient>;
+  tokenMessenger: `0x${string}`;
+  burnToken: `0x${string}`;
+  depositor: `0x${string}`;
+  mintRecipient: `0x${string}`;
+  amountWei: bigint;
+  destinationDomain: number;
+  fromBlock: bigint;
+}
+
 // Poll wallet_getCallsStatus until the bundle settles (success/failure) or `timeoutMs`
 // elapses, absorbing a transient UnknownBundleIdError as not-ready-yet (see
 // BATCH_CALLS_TIMEOUT_MS for why viem's waitForCallsStatus can't be used here). A non-5730
 // error propagates immediately.
+//
+// Interleaved second signal: on every poll, also scan the source chain for our own CCTP
+// DepositForBurn event. A match unambiguously identifies THIS submission's burn (the RPC
+// filter is scoped to our TokenMessenger + depositor; the code-side match locks it to our
+// mintRecipient + amount + destinationDomain). If the wallet is stuck returning 5730 for a
+// bundle it actually broadcast, this breaks the 180s wait as soon as the burn is on chain.
+// A getLogs failure is swallowed (non-fatal) so a scan-RPC hiccup can't abort a still-
+// progressing wallet_getCallsStatus poll.
 async function waitForBatchStatus(
   walletClient: Parameters<typeof getCallsStatus>[0],
-  { id, timeoutMs, pollIntervalMs }: { id: string; timeoutMs: number; pollIntervalMs: number },
+  {
+    id,
+    timeoutMs,
+    pollIntervalMs,
+    scan,
+  }: {
+    id: string;
+    timeoutMs: number;
+    pollIntervalMs: number;
+    scan: BurnScanOptions;
+  },
 ): Promise<BatchStatusResult> {
   const deadline = Date.now() + timeoutMs;
   let acknowledged = false;
+  const wantMintRecipient = scan.mintRecipient.toLowerCase();
   for (;;) {
     try {
       const result = await getCallsStatus(walletClient, { id });
@@ -677,6 +751,32 @@ async function waitForBatchStatus(
       if (!isUnknownBundleIdError(error)) throw error;
       // 5730: the wallet doesn't (yet) know this bundle id — not fatal; keep polling.
     }
+
+    // Second signal: is the burn already visible on chain?
+    try {
+      const logs = await scan.publicClient.getLogs({
+        address: scan.tokenMessenger,
+        event: TOKEN_MESSENGER_EVENT_ABI[0],
+        args: { depositor: scan.depositor },
+        fromBlock: scan.fromBlock,
+        toBlock: 'latest',
+      });
+      const match = logs.find(
+        (log) =>
+          log.args.mintRecipient?.toLowerCase() === wantMintRecipient &&
+          log.args.amount === scan.amountWei &&
+          Number(log.args.destinationDomain) === scan.destinationDomain &&
+          log.args.burnToken?.toLowerCase() === scan.burnToken.toLowerCase() &&
+          log.transactionHash !== null,
+      );
+      if (match?.transactionHash) {
+        return { kind: 'scan-success', burnTx: match.transactionHash };
+      }
+    } catch {
+      // Scan-RPC hiccup — keep polling; the batch may still settle via getCallsStatus
+      // or a later scan iteration.
+    }
+
     if (Date.now() >= deadline) {
       return acknowledged ? { kind: 'in-flight' } : { kind: 'never-acknowledged' };
     }
@@ -943,6 +1043,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // cursor (fail-closed), same as any other unclassified resume failure.
   if (inflight) {
     onStatus?.('Resuming an in-flight deposit (already burned)…');
+    // Surface the (already-committed) burn from the cursor so the receipt links the
+    // EVM leg even when this run only finishes attest/mint. The explorer is resolved
+    // off the cursor's own source chain (authoritative on resume, like the burn tx).
+    args.onBurned?.({
+      burnTxHash: inflight.burnTx,
+      explorerUrl: evmExplorerTxUrl(getEvmCctpSource(inflight.evmChainId), inflight.burnTx),
+    });
     const result = await finishAttestAndMint(
       inflight.burnTx,
       inflight.sourceDomain,
@@ -1152,6 +1259,11 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   let burnTx: `0x${string}` | undefined;
   if (supportsAtomicBatch) {
     onStatus?.('Approving + burning USDC in one confirmation…');
+    // Snapshot the source-chain block BEFORE sendCalls so the interleaved burn-event
+    // scan inside waitForBatchStatus can find a same-block landing (a public RPC's
+    // block height typically lags the sequencer by 0-1 block). Pre-broadcast throw is
+    // safe — nothing is committed yet.
+    const scanFromBlock = await publicClient.getBlockNumber();
     const { id } = await guardGas(() =>
       sendCalls(walletClient, {
         account,
@@ -1169,10 +1281,26 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     // two-tx path's receipt wait; we can't persist the resume cursor until this yields the
     // burn tx hash, so a shorter window would make a slow batch more prone than the two-tx
     // path to burn-then-throw before the cursor is written (reload double-spend risk).
+    //
+    // Second signal (the `scan` field): a wallet stuck returning 5730 for a bundle it
+    // actually broadcast makes the batch invisible via wallet_getCallsStatus for the full
+    // 180s; scanning our own CCTP DepositForBurn event on chain each iteration breaks the
+    // wait as soon as the burn is visible. Same downstream path — the scan-produced tx
+    // hash flows through the same cursor-persist → onBurned → attest → mint sequence.
     const batchStatus = await waitForBatchStatus(walletClient, {
       id,
       timeoutMs: BATCH_CALLS_TIMEOUT_MS,
       pollIntervalMs: BATCH_POLL_INTERVAL_MS,
+      scan: {
+        publicClient,
+        tokenMessenger: source.tokenMessenger as `0x${string}`,
+        burnToken: source.usdc as `0x${string}`,
+        depositor: account,
+        mintRecipient: snAddressToBytes32(snRecipient),
+        amountWei,
+        destinationDomain: config.cctp.starknetDomain,
+        fromBlock: scanFromBlock,
+      },
     });
     if (batchStatus.kind === 'success') {
       // Atomic execution yields ONE receipt (both calls in a single tx); a wallet that
@@ -1189,6 +1317,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         );
       }
       burnTx = batchBurnReceipt.transactionHash;
+    } else if (batchStatus.kind === 'scan-success') {
+      // Wallet stopped answering wallet_getCallsStatus but the burn event is on chain —
+      // the bundle DID broadcast. There is no viem batch receipt to validate; the log
+      // itself proves the burn happened for our (depositor, mintRecipient, amount,
+      // destinationDomain). Attest / mint only need the tx hash (finishAttestAndMint →
+      // waitForAttestation is Iris-keyed by tx hash + source domain).
+      burnTx = batchStatus.burnTx;
     } else if (batchStatus.kind === 'failure') {
       throw new Error(
         `CCTP approve+burn batch did not succeed on ${source.chainName} (status ${batchStatus.statusCode})`,
@@ -1280,6 +1415,10 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       'WARNING: could not save the deposit resume point — do NOT reload this tab until the deposit completes.',
     );
   }
+
+  // The burn is committed on-chain — surface it (hash + source explorer link) so the
+  // caller can show the EVM leg on the deposit receipt, independent of attest/mint below.
+  args.onBurned?.({ burnTxHash: burnTx, explorerUrl: evmExplorerTxUrl(source, burnTx) });
 
   // 2-3. Attest (Iris is keyed by the EVM SOURCE domain), validate the attested
   // message (Fix 2), mint on Starknet, then clear the cursor. Same path the

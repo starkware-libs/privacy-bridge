@@ -13,6 +13,15 @@ describe('humanizeError', () => {
       );
     });
 
+    it('maps a dead/reloaded wallet extension error to actionable restart-and-refresh copy', () => {
+      expect(humanizeError(new Error('Extension context invalidated.'))).toMatch(
+        /lost its connection/i,
+      );
+      expect(humanizeError(new Error('[ChromeTransport] chromePort disconnected'))).toMatch(
+        /refresh this page/i,
+      );
+    });
+
     it('maps an insufficient-balance revert to the check-your-funds copy AND appends the raw cause', () => {
       const out = humanizeError(new Error('execution failed: insufficient balance'));
       expect(out).toContain('Insufficient balance — check your funds and retry.');

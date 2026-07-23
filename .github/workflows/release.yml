@@ -29,10 +29,16 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      # pnpm ignores ${ENV} in credential lines from the committed .npmrc, so the
+      # GitHub Packages token must live in a user-level ~/.npmrc it will expand.
+      # Written once here — it authenticates both the install and the publish below.
+      - name: Authenticate to GitHub Packages
+        run: echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
 
       # prepublishOnly builds dist/ (tsc). --no-git-checks: skip pnpm's clean-tree
       # guard in CI. apps/bridge is private, so --filter targets only the SDK.

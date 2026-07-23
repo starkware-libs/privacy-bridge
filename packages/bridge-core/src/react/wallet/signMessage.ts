@@ -8,6 +8,7 @@
 
 import { getAddress, isAddressEqual, recoverMessageAddress } from 'viem';
 import { switchChain, type EthereumProvider, type AddChainParams } from '../../lib/ethereum';
+import { withSignTimeout } from '../../core/walletErrors';
 
 export { switchChain, type EthereumProvider, type AddChainParams };
 
@@ -27,11 +28,16 @@ export async function signMessage(
     Array.from(new TextEncoder().encode(message))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-  // personal_sign param order is [data, address].
-  const signature = (await provider.request({
-    method: 'personal_sign',
-    params: [hexMessage, address],
-  })) as `0x${string}`;
+  // personal_sign param order is [data, address]. Bounded by withSignTimeout: a
+  // zombie provider (extension reloaded mid-idle) can leave this pending forever —
+  // the approval can't route back through the dead port — so time it out into an
+  // actionable error instead of hanging. Safe: a signature moves no value.
+  const signature = (await withSignTimeout(() =>
+    provider.request({
+      method: 'personal_sign',
+      params: [hexMessage, address],
+    }),
+  )) as `0x${string}`;
   // Require a canonical 65-byte EOA (ECDSA) signature: 0x + 130 hex chars. All
   // downstream key derivation assumes this exact shape, and ecrecover (below) only
   // works on it. A smart-account / ERC-1271 / EIP-7702 signer could return a
