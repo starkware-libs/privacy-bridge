@@ -1,0 +1,48 @@
+# Repo-specific Semgrep rules encoding privacy-bridge threat-model invariants.
+# Generic rulesets (p/typescript, p/secrets) don't know these; they're the main
+# reason Semgrep earns its place in this repo. Loaded via `--config .semgrep/`.
+rules:
+  # Threat-model hard rule: never log or persist wallet signatures or private
+  # keys. Only the read-only viewing key may be persisted, so the pattern below
+  # deliberately does NOT match `viewingKey`/`viewing_key`.
+  - id: no-log-secret-material
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Never log wallet signatures or private keys (threat-model hard rule). Only
+      the read-only viewing key may be persisted. Remove or scrub the secret. If
+      this is a genuine false positive, annotate the line with
+      `// nosemgrep: no-log-secret-material` and say why.
+    patterns:
+      - pattern-either:
+          - pattern: console.$M(...)
+          - pattern: $LOG.log(...)
+          - pattern: $LOG.debug(...)
+          - pattern: $LOG.info(...)
+          - pattern: $LOG.warn(...)
+          - pattern: $LOG.error(...)
+      - pattern-regex: (?i)(signature|private[_-]?key|priv[_-]?key|secret[_-]?key|mnemonic)
+
+  # Config-injection rule (CLAUDE.md "Config injection"): bridge-core reads NO
+  # build-tool env. The consuming app reads its own env and passes it in via
+  # initBridgeConfig(env). Reaching for import.meta.env / process.env inside core
+  # breaks that boundary.
+  - id: bridge-core-no-build-env
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      bridge-core must read NO build-tool env. Inject config via
+      initBridgeConfig(env) instead of import.meta.env / process.env
+      (see CLAUDE.md "Config injection").
+    paths:
+      include:
+        - packages/bridge-core/src/**
+      exclude:
+        - '*.test.ts'
+        - '*.test.tsx'
+        - '**/__testkit__/**'
+        - '**/vitest.setup.ts'
+        - '**/vitest.config.ts'
+    pattern-either:
+      - pattern: import.meta.env
+      - pattern: process.env

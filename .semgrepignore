@@ -1,0 +1,9 @@
+# Paths Semgrep should not scan. node_modules is ignored by Semgrep's built-in
+# defaults; the rest are build output, local git worktrees, and Cairo artifacts
+# (Semgrep has no Cairo support) that would only add noise.
+dist/
+target/
+.turbo/
+.worktrees/
+.claude/worktrees/
+.snfoundry_cache/
