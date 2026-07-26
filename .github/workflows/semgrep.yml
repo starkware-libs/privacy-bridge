@@ -1,0 +1,53 @@
+name: Semgrep
+
+# Static-analysis security gate for the TypeScript workspace (bridge-core +
+# apps/bridge). Runs Semgrep OSS — no account, no SEMGREP_APP_TOKEN, no dashboard
+# — with the community TypeScript + secrets rulesets plus the repo's own
+# threat-model rules in .semgrep/. FAILS on any finding at WARNING or ERROR.
+# Semgrep OSS has no literal "Medium"; WARNING+ERROR is the conventional
+# "medium and above" (Semgrep Cloud maps High/Medium/Low -> ERROR/WARNING/INFO).
+# INFO findings do not block.
+#
+# Resolving a block: fix the finding, or — if it's a false positive — annotate
+# the line with `// nosemgrep: <rule-id>` (shows up in the diff, so a reviewer
+# sees the waiver). Repo admins may also merge-bypass. Semgrep has NO Cairo
+# support: the anonymizer contracts are gated by `scarb` + human review, not here.
+#
+# Triggers mirror ci.yml (pull_request + merge_group + push:main) and the job
+# runs unconditionally, so it stays a stable, always-reporting required check
+# that never stalls the merge queue.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'PR' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    # Pinned by digest (semgrep/semgrep:1.170.1) per the repo's supply-chain
+    # posture; bump deliberately to pick up engine + parser updates.
+    container:
+      image: semgrep/semgrep@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep scan (fail on WARNING+ERROR = medium+)
+        run: |
+          semgrep scan \
+            --config p/typescript \
+            --config p/secrets \
+            --config .semgrep/ \
+            --severity ERROR \
+            --severity WARNING \
+            --error \
+            --exclude '**/*.test.ts' \
+            --exclude '**/*.test.tsx' \
+            --metrics off
