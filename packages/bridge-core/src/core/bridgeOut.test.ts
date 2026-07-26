@@ -687,6 +687,43 @@ describe('bridgeOutToWallet — Leg B cash-out (withdraw + decoy-H burn)', () =>
   });
 });
 
+describe('bridgeOutToWallet — partial-strand gate', () => {
+  const cash = (amount: bigint) =>
+    bridgeOutToWallet({ signature: SIGNATURE, amount, destination: DEST_ADDRESS });
+
+  it('rejects a partial cash-out that would strand less than the fee-buffer', async () => {
+    // balance = amount + (buffer − 1) → remaining = buffer − 1 → strand.
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT + RETURN_FEE_BUFFER_WEI - 1n);
+    await expect(cash(AMOUNT)).rejects.toThrow(/strand less than|fee-buffer/i);
+  });
+
+  it('fails closed BEFORE any on-chain work (no proof built, no submit)', async () => {
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT + RETURN_FEE_BUFFER_WEI - 1n);
+    await expect(cash(AMOUNT)).rejects.toThrow();
+    expect(transfers.build).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('allows a partial cash-out that leaves exactly the fee-buffer', async () => {
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT + RETURN_FEE_BUFFER_WEI);
+    const res = await cash(AMOUNT);
+    expect(res.burnTxHash).toBe(BURN_TX_HASH);
+  });
+
+  it('allows a full exit (amount == poolBalance) — legitimate drain', async () => {
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT);
+    const res = await cash(AMOUNT);
+    expect(res.burnTxHash).toBe(BURN_TX_HASH);
+  });
+
+  it('offers both allowed values in the error (max-with-buffer AND full-exit)', async () => {
+    // 1 USDC pool; cashing out 0.6 → remaining 0.4 (< 0.5 buffer) → strand.
+    // Max with buffer = 0.5; full exit = 1.
+    discoverPrivateBalance.mockResolvedValueOnce(1_000_000n);
+    await expect(cash(600_000n)).rejects.toThrow(/0\.5 USDC[\s\S]*1 USDC/);
+  });
+});
+
 describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
   const FORWARDER = '0xFEEFWD';
   const FEE = 148056n; // ~0.148 USDC pool fee, in the deposit token
