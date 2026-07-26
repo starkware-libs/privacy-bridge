@@ -118,9 +118,8 @@ const SN_DOMAIN = 25n;
 // cancels a deficit; compiler.js:457-465, mirrored in bridgeBack.ts). So a
 // bid-funding bridgeOut must LEAVE at least this much in the pool. 0.5 USDC gives
 // comfortable headroom over the live return-fee quote (~0.14 mainnet / ~0.04
-// testnet). cashOut / bridgeOutToWallet enforce the same buffer for a PARTIAL
-// cash-out (allows a full exit that drains the pool, but rejects a partial that
-// would strand a sub-buffer residual — see the PARTIAL-STRAND GATE below).
+// testnet). cashOut / bridgeOutToWallet do NOT gate — a full exit legitimately
+// drains the pool.
 export const RETURN_FEE_BUFFER_WEI = 500_000n; // 0.5 USDC @ 6dp
 
 export interface BridgeOutArgs {
@@ -950,25 +949,6 @@ export async function bridgeOutToWallet(
   // mint_recipient: the 20-byte EVM destination as a u256 (numeric value of the
   // addr) — mirrors bridgeOut()'s BigInt(eoa.address).
   const mintRecipient = BigInt(destination);
-
-  // PARTIAL-STRAND GATE: a cash-out is legit as a FULL exit (drains the pool) or as
-  // a partial that LEAVES the return-fee buffer intact — never anything in between.
-  // A residual below RETURN_FEE_BUFFER_WEI can't fund a later private-return fee,
-  // and the pool's still-non-zero balance conceals that from the user next time they
-  // try to sell (the return would then revert with "Insufficient balance"). Mirrors
-  // the bridgeOut() gate; the extra `amount == poolBalance` branch is what
-  // distinguishes cash-out (exit) from bid-funding (never a full exit).
-  onStatus?.('Checking pool balance…');
-  const poolBalance = await discoverPrivateBalance({ account, viewingKey });
-  if (amount !== poolBalance && poolBalance > amount && poolBalance - amount < RETURN_FEE_BUFFER_WEI) {
-    const maxWithBuffer = poolBalance > RETURN_FEE_BUFFER_WEI ? poolBalance - RETURN_FEE_BUFFER_WEI : 0n;
-    throw new Error(
-      `Cashing out ${humanAmount(amount)} USDC would strand less than the ` +
-        `${humanAmount(RETURN_FEE_BUFFER_WEI)} USDC pool fee-buffer needed for future returns. ` +
-        `Cash out at most ${humanAmount(maxWithBuffer)} USDC (keeps the buffer) or ` +
-        `${humanAmount(poolBalance)} USDC (full exit, no buffer left).`,
-    );
-  }
 
   // STRK protocol fee: the MANAGER approves it up front (manager-paid submit).
   onStatus?.('Checking pool fee…');

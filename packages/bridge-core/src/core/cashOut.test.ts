@@ -88,14 +88,6 @@ vi.mock('@starkware-libs/starknet-privacy-sdk', () => ({
   IndexerDiscoveryProvider: class {},
 }));
 
-// bridgeOutToWallet's PARTIAL-STRAND GATE reads the pool balance via
-// discoverPrivateBalance; default AMPLE so the existing cashOut tests clear the
-// gate. Gate-specific tests live in bridgeOut.test.ts.
-vi.mock('./discover', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./discover')>()),
-  discoverPrivateBalance: vi.fn(async () => 1_000_000_000n), // 1000 USDC
-}));
-
 vi.mock('./provider', () => ({
   getRpcProvider: () => ({ callContract: vi.fn() }),
   makeAccount: () => account,
