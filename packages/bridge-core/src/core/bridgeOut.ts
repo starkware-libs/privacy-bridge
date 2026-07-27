@@ -116,11 +116,14 @@ const SN_DOMAIN = 25n;
 // via the anonymizer's noteId-bound OpenNoteDeposit which the SDK's resolveNotes
 // does not count toward spendable balance (only a noteId===undefined open deposit
 // cancels a deficit; compiler.js:457-465, mirrored in bridgeBack.ts). So a
-// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.5 USDC gives
-// comfortable headroom over the live return-fee quote (~0.14 mainnet / ~0.04
-// testnet). cashOut / bridgeOutToWallet do NOT gate — a full exit legitimately
-// drains the pool.
-export const RETURN_FEE_BUFFER_WEI = 500_000n; // 0.5 USDC @ 6dp
+// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.20 USDC
+// covers ONE return's live fee (~0.14 mainnet / ~0.04 testnet) plus AVNU's
+// documented 15-17% paymaster-drift markup with a modest safety margin: 0.14 ×
+// 1.17 ≈ 0.164, so 0.20 leaves ~22% headroom above the drifted quote. Sized to
+// cover a SINGLE return; subsequent returns need a fresh deposit to top the pool
+// up. cashOut / bridgeOutToWallet do NOT gate — a full exit legitimately drains
+// the pool.
+export const RETURN_FEE_BUFFER_WEI = 200_000n; // 0.20 USDC @ 6dp
 
 export interface BridgeOutArgs {
   // EVM wallet signature of the app's identity sign-message — the only secret input;

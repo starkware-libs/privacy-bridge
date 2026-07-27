@@ -379,8 +379,8 @@ describe('bridgeOut — fee-buffer gate (Phase 3)', () => {
   });
 
   it('surfaces the max spendable amount in the error', async () => {
-    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT); // 1 USDC; max = 1 - 0.5 = 0.5
-    await expect(bid()).rejects.toThrow(/bridge at most 0\.5 USDC/);
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT); // 1 USDC; max = 1 - 0.20 = 0.80
+    await expect(bid()).rejects.toThrow(/bridge at most 0\.8 USDC/);
   });
 
   it('allows a withdraw that leaves exactly the fee-buffer', async () => {
