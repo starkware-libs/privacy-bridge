@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Contract test for bridgeOut() — the one-click BUY steps 1-2 pool tx:

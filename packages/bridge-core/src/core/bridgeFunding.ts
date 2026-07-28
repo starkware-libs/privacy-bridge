@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bridge funding plan: the user types a **bet** (what they want on the CLOB); the
 // pool burn funds `bet + reserve` where `reserve = quoted CCTP max_fee + swap
 // slippage reserve + $0.05 cushion + an optional caller-supplied `extraReserveMicro`.

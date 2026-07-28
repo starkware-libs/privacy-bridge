@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // WalletConnect v2 (Reown) lazy-singleton provider for the bridge-core wallet
 // layer. WC is ONE of the wallet paths — it coexists with injected EIP-6963
 // extensions (see injectedProvider.ts). registerWalletConnect() inserts the WC

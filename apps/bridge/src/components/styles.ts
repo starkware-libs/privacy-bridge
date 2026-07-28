@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Inline style tokens for apps/bridge. Kept as a single module so each
  * component doesn't repeat colours. No external CSS-in-JS dep — plain objects.

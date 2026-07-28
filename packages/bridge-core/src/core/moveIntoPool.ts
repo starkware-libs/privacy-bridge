@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Move funds INTO the pool: sign-derived account → deploy → register → deposit,
 // funded either from the dev treasury or the user's own EVM USDC (CCTP deposit-in).
 // This is the composed orchestrator that replaces the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Debug-mode logging for diagnosing bridge value-path failures — Starknet RPC /
 // prover / indexer (the per-network proxied paths `/rpc/<network>` etc.), plus the
 // direct-origin AVNU paymaster, Circle Iris attestation, and Pimlico bundler calls.

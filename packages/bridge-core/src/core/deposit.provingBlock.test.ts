@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // #105 regression: waitForProvingBlock treats lastTxBlockNumber === undefined as "an
 // INDEPENDENT action — skip aging". But the non-paymaster deposit path's approve is a
 // genuine DEPENDENCY (the deposit's proof must see the approve committed) — its block

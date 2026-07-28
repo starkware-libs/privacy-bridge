@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // On-ramp settlement poll — the authoritative "funds landed" check for the card
 // funding flow. Moved out of apps/web (IdentityContext) so ALL bridging logic lives
 // in bridge-core: useOnrampFunding now uses this by DEFAULT (the waitForBalance dep

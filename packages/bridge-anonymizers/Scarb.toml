@@ -2,6 +2,7 @@
 name = "bridge_anonymizers"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 starknet.workspace = true

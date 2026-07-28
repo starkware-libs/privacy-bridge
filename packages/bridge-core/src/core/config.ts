@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bridge config — INJECTED, framework-agnostic (no build-tool env coupling).
 // This is the bridge-core portion of the config — network, Starknet RPC/prover/indexer,
 // pool, anonymizer, CCTP, Polygon, AVNU, admin. Trading-specific config (CLOB,

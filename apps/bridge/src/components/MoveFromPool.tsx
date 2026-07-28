@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Move From Pool flow: Starknet privacy pool → CCTP burn → arbitrary EVM destination.
  * Calls bridgeOutToWallet (bridge-core/bridgeOut) using the in-memory signature.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Safe JSON parsing for `fetch` responses.
 //
 // The native `Response.json()` throws a bare, useless `SyntaxError: Unexpected

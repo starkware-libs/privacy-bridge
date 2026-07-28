@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared pool STRK protocol-fee helpers — the manager-paid fee-approve pattern
 // used by both bridgeOut.ts (withdraw+burn / cash-out) and bridgeBack.ts (claim).
 // Moved out of bridgeOut.ts, which bridgeBack.ts used to hand-copy verbatim

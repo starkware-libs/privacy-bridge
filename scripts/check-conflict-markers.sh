@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 StarkWare Industries Ltd.
+
 # Fail if any tracked file contains an unresolved Git merge-conflict marker.
 # Minimal guard wired into `pnpm lint` (and thus CI). Scans tracked files only,
 # so build output / node_modules are never matched.

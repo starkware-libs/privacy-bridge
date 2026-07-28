@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Return funds: the inverse of the return-CCTP burn (returnIn.ts). ONE atomic,
 // proof-authorized pool tx on the Starknet side — the FOLDED single-tx claim:
 //

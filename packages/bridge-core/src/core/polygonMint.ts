@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // CCTP V2 Forwarding-Service flow: poll Circle Iris for the burn's attestation
 // (the EVM->Starknet fund-in leg still needs the raw {message, attestation} to
 // replay), and — on the Starknet->Polygon FUND-ACCOUNT leg — poll Iris for the

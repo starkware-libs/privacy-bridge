@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Offline unit tests for the CCTP attestation poll + the Forwarding-Service mint
 // poll (BUY 3-4), the frozen shape in docs/bridge-interface.md §4. No network is
 // touched: global.fetch is mocked for Circle Iris. The fund-account leg no longer submits

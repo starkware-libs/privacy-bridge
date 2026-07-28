@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Domain-separation labels for key derivation. These are part of the derivation
 // contract: the EVM signature is folded with each label so the Starknet account
 // key, the pool viewing key, and every per-account Polygon EOA derive from

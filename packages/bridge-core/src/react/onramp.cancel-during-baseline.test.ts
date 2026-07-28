@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Regression (Slice E2): cancel while the baseline read is IN FLIGHT must drop the
 // result — the flow must NOT advance to 'widget'/'polling' and must NOT deposit.
 // This is the token/isLive invalidation invariant applied to the earliest async

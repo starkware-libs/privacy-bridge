@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Secret-hygiene test helper (docs/bridge-sdk-refactor.md §3 "Secret hygiene").
 //
 // Slice 0 prereq for the new orchestrators (moveIntoPool/fundBid/cashOut/

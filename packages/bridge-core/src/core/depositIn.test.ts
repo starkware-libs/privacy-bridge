@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Behavioural tests for the fund-from-MetaMask CCTP deposit-in leg
 // (fundFromMetaMask). Exercises the REAL depositIn.ts against mocked viem (no EVM
 // RPC), a mocked Iris attestation, and a mocked Starknet manager submit. The

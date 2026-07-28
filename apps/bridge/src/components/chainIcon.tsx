@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Inline SVG brand marks for the CCTP source chains, keyed by EIP-155 chain id
  * (mainnet + testnet share a brand). Self-contained (no external asset fetch — the

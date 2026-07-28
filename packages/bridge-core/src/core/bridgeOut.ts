@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // One-click funding: withdraw a fixed denomination from the privacy pool to the
 // Anonymizer and burn it via CCTP toward a fresh per-account Polygon EOA — in ONE
 // signed pool tx (Withdraw{recipient=Anonymizer} + InvokeExternal ->

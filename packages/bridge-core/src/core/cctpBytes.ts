@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Encodes an opaque CCTP byte blob (the Iris `message` / `attestation`, each a
 // 0x-hex string) into Starknet calldata for MessageTransmitterV2.receive_message.
 //

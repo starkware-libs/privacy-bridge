@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, expect, it } from 'vitest';
 import { deriveViewingKey } from './viewing-key.js';
 import { derivePolygonEoa } from './polygon-key.js';

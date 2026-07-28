@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // PART C — rebuild-on-EXPIRY (deposit.ts, manager path).
 //
 // A pool proof-freshness revert (PROOF_EXPIRED / INVALID_BASE_BLOCK_NUMBER) means the

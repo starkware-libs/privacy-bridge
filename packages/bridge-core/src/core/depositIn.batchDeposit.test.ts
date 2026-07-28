@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // EIP-5792 single-signature deposit: fundFromMetaMask's fresh path should batch the
 // ERC-20 approve + CCTP depositForBurn into ONE wallet_sendCalls when the wallet
 // reports atomic support, and fall back to the two-transaction path otherwise. Both

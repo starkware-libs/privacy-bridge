@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 

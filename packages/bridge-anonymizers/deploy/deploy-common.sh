@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 StarkWare Industries Ltd.
+
 # Shared declare + deploy helper for the anonymizer contracts, sourced by the
 # per-network deploy scripts. Each caller sets the constructor constants and calls
 # `declare_and_deploy <ContractName> <calldata...>`.

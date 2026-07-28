@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bug-hunt B3: config.ts does `Number(e.vars.SOMETHING || default)` for
 // several numeric env vars (proofValidityBlocks, cctp.starknetDomain,
 // cctp.defaultEvmSourceChainId, cctp.defaultDestChainId, polygon.chainId,

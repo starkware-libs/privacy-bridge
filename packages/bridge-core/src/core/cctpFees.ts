@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // CCTP V2 max_fee computation, DIRECTION-AWARE (issue #199).
 //
 // Two distinct destinations, two fee shapes:

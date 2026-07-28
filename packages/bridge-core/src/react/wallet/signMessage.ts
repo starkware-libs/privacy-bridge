@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // EIP-1193 provider helpers for the WalletConnect-only wallet layer:
 // signMessage (with the signer-binding guard), shortenAddress, switchChain.
 //

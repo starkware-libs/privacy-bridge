@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, expect, it } from 'vitest';
 import { deployFunding, DEPLOY_FUND_FLOOR_WEI, buildDeploymentData } from './deploy';
 import { config } from './config';

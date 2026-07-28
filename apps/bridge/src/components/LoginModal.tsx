@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { useWallet } from '@starkware-libs/starknet-privacy-bridge/react';
 import { useNetwork } from '../NetworkContext';
 import { styles } from './styles';

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Regression (Slice E2, #189): reopening the modal mid-poll must invalidate the
 // stale poll continuation — it must NOT deposit, and a FRESH session that lands
 // funds must deposit exactly once (no double-deposit from the persisted poll).

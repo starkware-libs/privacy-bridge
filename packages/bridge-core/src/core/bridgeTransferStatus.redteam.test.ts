@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Regression coverage for two value-path holes the adversarial review PROVED in the
 // unified status/resume engine, now FIXED:
 //   F-D: priority masked a RESUMABLE return-to-pool behind a DEFERRED from-pool burn.

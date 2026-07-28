@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Debounced CCTP forward-fee estimate for the deposit-in leg (EVM source →
 // Starknet), moved out of DepositModal — Slice C. Display/guard-only: the
 // caller folds `maxFeeRaw` into its own net-of-fees math (e.g. `depositNetMicro`)

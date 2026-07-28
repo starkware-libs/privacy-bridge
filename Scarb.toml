@@ -4,6 +4,7 @@ members = ["packages/bridge-anonymizers"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024_07"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 starknet = "2.19.1"

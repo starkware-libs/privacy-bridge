@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // C3 — proves the "already-funded" no-op gate (gate 1) in fundFromMetaMask returns
 // the WRONG net on an UPWARD CCTP fee drift.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // bridge-core/react — React hooks for bridge functionality.
 // Wallet plumbing and identity hooks for both apps/bridge and apps/web.
 

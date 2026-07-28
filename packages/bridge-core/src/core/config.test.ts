@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Pins the NETWORK master switch (docs/mainnet-cutover-plan.md §1-§2): the default
 // keeps every testnet default; 'mainnet' flips the network-scoped defaults (EVM
 // source registry, Starknet CCTP destination, deposit token, Polygon block, default

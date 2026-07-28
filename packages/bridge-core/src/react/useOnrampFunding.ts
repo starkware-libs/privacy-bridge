@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // bridge-core/react — frozen card-on-ramp funding phase machine (Slice E2).
 //
 // Moves the DepositModal card-on-ramp session/token/isLive machine into a shared

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Bug 1 (value-path): useBridgeFundingEstimate must NOT serve the previous bet's
  * `ready` plan during the 400ms debounce after the bet changes. If it did, a

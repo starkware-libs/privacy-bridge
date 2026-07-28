@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * #179b / #201 (SDK-side regression): the card-on-ramp phase machine moved into this
  * hook (Slice E2). #201's fix — "keep the background reconcile alive across a modal

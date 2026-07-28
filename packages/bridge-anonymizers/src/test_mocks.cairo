@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! Test-only mocks of the external contracts the anonymizers talk to (the
 //! contracts under test are the real ones):
 //! - `MockTokenMessengerMinter` records the args + hook of the last CCTP burn.

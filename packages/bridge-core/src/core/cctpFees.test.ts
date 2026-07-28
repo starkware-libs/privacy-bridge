@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Offline unit tests for the CCTP V2 Forwarding-Service fee computation
 // (cctpFees.ts). No network is touched: the Iris fee endpoint is mocked via an
 // injected fetchImpl. The live values can only be verified against

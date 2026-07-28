@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! snforge suite for the outbound anonymizer (the BUY leg). CCTP messenger + USDC
 //! are mocked; the contract under test is real. Covers: `privacy_invoke` rejects a
 //! non-pool caller and the zero-amount / amount<=max_fee guards; as the pool it

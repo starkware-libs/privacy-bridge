@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // PROVE-AHEAD (deposit.ts, paymaster path) — the deposit proof generated CONCURRENTLY
 // with the CCTP burn+attestation (moveIntoPool) and reused by depositToPool when AVNU's
 // real fee still matches. Exercises the REAL deposit.ts + proven-submit.ts; only the

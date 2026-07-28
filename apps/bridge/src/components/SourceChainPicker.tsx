@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Generic CCTP chain picker. A native <select> can't render a per-option icon, so this
  * is a small accessible custom dropdown: a trigger button (selected chain's icon + name)

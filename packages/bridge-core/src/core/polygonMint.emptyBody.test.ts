@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // pollIris (via waitForAttestation) must treat an OK-but-empty/non-JSON 200 body
 // as transient. Circle's Iris occasionally serves a blank or partial 200 mid-
 // attestation; the body parse must be retried like a 5xx/429 rather than escaping

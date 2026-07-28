@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Unit tests for the FOLD-ONLY unclaimed-returns scan: it is now a CURSOR-DRIVEN local

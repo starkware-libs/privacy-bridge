@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // BUGHUNT B — accountScan.scanDerivedAccounts writes recovered accounts to
 // pmp.bids but NEVER seeds the pmp.bidIndex counter.
 //

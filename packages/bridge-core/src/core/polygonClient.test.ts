@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, it, expect } from 'vitest';
 import { createPublicClient, custom, encodeAbiParameters, type PublicClient } from 'viem';
 import { readUsdcBalance, sumErc20Balances } from './polygonClient';
