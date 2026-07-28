@@ -232,6 +232,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         restoreAttemptedRef.current = false;
         return;
       }
+      // …but for the bare-global branch, provider identity is NOT sufficient: it only
+      // catches the global being REPLACED, not a second wallet announcing while the same
+      // global stays in place. Because the read deliberately outlives discovery changes
+      // (above), the pre-read `injectedProviderCount()` check would otherwise never
+      // re-fire — so a wallet announcing during a slow read leaves the global
+      // unattributable, we commit against the injection-race winner, and `sessionEntered`
+      // makes the silent read's guard a permanent no-op so nothing retracts it. Refuse for
+      // this load, as the pre-read check does; the record survives for a later visit.
+      if (saved.rdns === null && injectedProviderCount() > 1) return;
       // Re-check the session at RESOLVE time: entering one through the ALREADY-pinned
       // wallet (connect('io.metamask'), or resumeSession()) changes none of this effect's
       // deps, so nothing else would stop a late restore from overwriting the clicked

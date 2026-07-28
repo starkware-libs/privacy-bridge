@@ -385,6 +385,42 @@ describe('WalletProvider — restore lifecycle', () => {
     expect(localStorage.getItem(WALLET_SESSION_KEY)).toBeNull();
   });
 
+  it('refuses a lone-global record when a second wallet announces DURING the read', async () => {
+    // Bugbot HIGH: the pre-read `injectedProviderCount()` check cannot fire again, because
+    // the read is deliberately allowed to outlive discovery changes (the S4 fix). RED
+    // without the resolve-time re-check: the global is unattributable by the time the read
+    // lands, yet the session commits against whichever extension won the injection race —
+    // and `sessionEntered` then makes the silent read's ambiguity guard a permanent no-op,
+    // so nothing retracts it. Provider identity does NOT catch this: the same global still
+    // owns `window.ethereum`, the newcomer merely announced.
+    const { provider, release } = deferredProvider([MM_ADDR]);
+    (window as unknown as { ethereum: unknown }).ethereum = provider;
+    recordSession(MM_ADDR, null);
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    // Unambiguous at the decision point: nothing has announced, so the read starts.
+    await letAnnounceWindowClose();
+    await waitFor(() => expect(provider.request).toHaveBeenCalled());
+
+    // Two injected wallets announce while the read is still parked (a cold MV3 worker takes
+    // seconds). The global is now contended, and one of them holds the SAME account — so
+    // neither the address check nor signer-binding could tell them apart.
+    act(() => {
+      announce(MM_INFO, makeProvider([MM_ADDR]) as unknown as EthereumProvider);
+      announce(PH_INFO, makeProvider([MM_ADDR]) as unknown as EthereumProvider);
+    });
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    expect(result.current.isConnected).toBe(false);
+    expect(result.current.address).toBeNull();
+    expect(result.current.sessionRestored).toBe(false);
+    // Refused, not forgotten — a later visit where the global is unambiguous can restore.
+    expect(readWalletSession()).not.toBeNull();
+  });
+
   it('a foreign pre-session wallet locking does NOT wipe another wallet record', async () => {
     // RED (pre-fix): the accountsChanged→[] branch cleared unconditionally, and
     // pre-session the listener binds to the bare global — so a locked squatter extension
