@@ -37,6 +37,13 @@ export type WalletContextValue = {
   // or a rehydrated WC session) but the user has NOT entered the session this
   // visit. The app offers a one-click "Resume session" instead of a fresh Connect.
   canResume: boolean;
+  // True when the live session was RESTORED from this device's recorded session (a
+  // page refresh) rather than entered by a click this visit. Consumers must not fire
+  // anything that needs a user GESTURE off a restored session — most importantly an
+  // identity `personal_sign`, which would then pop unsolicited on every page load.
+  // Offer it behind an explicit control instead. Cleared by a fresh connect/resume,
+  // by a wallet-side account switch, and by disconnect.
+  sessionRestored: boolean;
   openLoginModal: () => void;
   closeLoginModal: () => void;
   // Select the wallet (by rdns or uuid) and connect through it, entering the

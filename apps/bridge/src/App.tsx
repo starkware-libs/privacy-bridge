@@ -10,20 +10,28 @@ import { styles } from './components/styles';
 
 /** Auto-derive identity once per connected address (mirrors apps/web SessionEffect). */
 function SessionEffect() {
-  const { isConnected, address } = useWallet();
+  const { isConnected, address, sessionRestored } = useWallet();
   const { snAddress, deriveStatus, deriveIdentity } = useIdentity();
   // Trigger once when a new address connects and we don't yet have keys.
   useEffect(() => {
     if (!isConnected || !address) return;
     if (snAddress || deriveStatus.status !== 'idle') return;
+    // A session RESTORED across a page refresh had no user gesture behind it, so
+    // prompting here would open a personal_sign popup unbidden on every page load.
+    // The dashboard offers the sign button instead (see needsSign there).
+    if (sessionRestored) return;
     void deriveIdentity();
-  }, [isConnected, address, snAddress, deriveStatus.status, deriveIdentity]);
+  }, [isConnected, address, sessionRestored, snAddress, deriveStatus.status, deriveIdentity]);
   return null;
 }
 
 function ConnectedDashboard() {
   const { address } = useWallet();
-  const { deriveStatus, deriveIdentity } = useIdentity();
+  const { snAddress, deriveStatus, deriveIdentity } = useIdentity();
+  // Connected but keyless and nothing in flight — either a failed/rejected derive, or a
+  // session restored across a refresh (which deliberately does NOT auto-prompt). Both need
+  // the same explicit affordance, or a restored session strands with no way to sign in.
+  const needsSign = !snAddress && (deriveStatus.status === 'error' || deriveStatus.status === 'idle');
 
   return (
     <div style={styles.page}>
@@ -39,9 +47,11 @@ function ConnectedDashboard() {
       {deriveStatus.status === 'pending' && (
         <p style={{ ...styles.muted, marginBottom: '1rem' }}>Deriving identity…</p>
       )}
-      {deriveStatus.status === 'error' && (
+      {needsSign && (
         <div style={{ marginBottom: '1rem' }}>
-          <div style={styles.statusBox('error')}>{deriveStatus.message}</div>
+          {deriveStatus.status === 'error' && (
+            <div style={styles.statusBox('error')}>{deriveStatus.message}</div>
+          )}
           <button
             onClick={() => void deriveIdentity()}
             style={{ ...styles.primaryBtn, marginTop: '0.5rem' }}

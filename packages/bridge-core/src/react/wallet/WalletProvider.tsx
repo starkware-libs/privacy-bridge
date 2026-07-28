@@ -12,6 +12,12 @@ import {
   type EIP6963ProviderInfo,
 } from './injectedProvider';
 import { clearDeviceIdentity } from './device-store';
+import {
+  addressesEqual,
+  clearWalletSession,
+  readWalletSession,
+  writeWalletSession,
+} from './session-store';
 import { WalletContext } from './context';
 import type { WalletContextValue } from './types';
 import { resetWalletConnectProvider, registerWalletConnect } from './getWalletConnectProvider';
@@ -37,8 +43,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   //     value downstream contexts rehydrate from + the private balance auto-loads
   //     against. So on load we render a signed-out / "resume" state and never
   //     silently surface a returning user's private dashboard.
+  //
+  // RESTORE (session-store.ts): "affirmative action THIS visit" made every page
+  // refresh a re-click. The affirmative action is now scoped to the DEVICE+ACCOUNT
+  // instead: a session the user entered here is recorded (public address + wallet
+  // rdns, TTL-bounded) and re-entered on load — but ONLY after the wallet itself
+  // re-confirms the SAME account through the SAME pinned wallet. A session we never
+  // entered (e.g. a WC session the SDK rehydrated on its own) still gets the
+  // strict gate: canResume, never auto-enter. `sessionRestored` tells consumers the
+  // entry came from storage rather than a click, so nothing that needs a user
+  // GESTURE (a `personal_sign` prompt) fires unsolicited on page load.
   const [authorizedAddress, setAuthorizedAddress] = useState<string | null>(null);
   const [sessionEntered, setSessionEntered] = useState(false);
+  const [sessionRestored, setSessionRestored] = useState(false);
   // Connect-attempt token: bumped on every close/disconnect so a still-in-flight
   // connect() whose awaits resume LATER can detect it was abandoned and bail
   // instead of silently flipping authorizedAddress / sessionEntered behind a
@@ -53,6 +70,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // lets the ambiguity guard apply ONLY pre-session without re-subscribing.
   const sessionEnteredRef = useRef(sessionEntered);
   sessionEnteredRef.current = sessionEntered;
+  // Once-per-mount guard for the restore effect below. Set SYNCHRONOUSLY before the
+  // `eth_accounts` await so a re-render (or StrictMode's double-invoke) can't issue a
+  // second read; the "still waiting for the wallet to announce" early-returns
+  // deliberately leave it unset so the effect can retry when discovery changes.
+  const restoreAttemptedRef = useRef(false);
   const [chainId, setChainId] = useState<number | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   // rdns of the provider connect() is currently in flight for — lets the picker
@@ -67,6 +89,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // live in the injectedProvider module; we keep only the serializable `info` here.
   const [providers, setProviders] = useState<EIP6963ProviderInfo[]>([]);
   const [selectedRdns, setSelectedRdns] = useState<string | null>(null);
+  // True once the announce window below has closed, i.e. every installed extension
+  // that was going to announce has. `injectedProviderCount()` is 0 at mount even
+  // with two wallets installed, so any decision that leans on it being ACCURATE
+  // (the restore effect's bare-global branch) must wait for this.
+  const [discoverySettled, setDiscoverySettled] = useState(false);
 
   // The downstream-visible address: gated behind an entered session. Until the
   // user explicitly enters, this is null, so the contexts treat the app as
@@ -111,13 +138,144 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     let passes = 0;
     const interval = setInterval(() => {
       refresh();
-      if (++passes >= 6) clearInterval(interval);
+      if (++passes >= 6) {
+        clearInterval(interval);
+        setDiscoverySettled(true);
+      }
     }, 250);
     return () => {
       clearInterval(interval);
       window.removeEventListener('eip6963:announceProvider', refresh as EventListener);
     };
   }, []);
+
+  // RESTORE the session this device explicitly entered, so a page refresh keeps the
+  // wallet connected instead of dropping to "Resume session". Keyed on discovery +
+  // the selection because EIP-6963 announcements (and WalletConnect's registration)
+  // land asynchronously AFTER mount: the effect re-runs as wallets appear and only
+  // proceeds once the recorded wallet is actually resolvable.
+  //
+  // The ORDER below is load-bearing; each step fails CLOSED:
+  //   1. no recorded session          → nothing to restore (the strict gate holds).
+  //   2. re-PIN the recorded wallet BEFORE touching any provider. Resolving
+  //      `getEthereumProvider()` first would fall back to the bare window.ethereum
+  //      global — whichever extension won the injection race — so a restore could
+  //      enter (and later SIGN) through a wallet the user never picked, the
+  //      wrong-wallet class PR #124 closed. If the recorded wallet hasn't announced
+  //      (or is uninstalled) we WAIT, never fall back.
+  //   3. the wallet re-confirms the account: `eth_accounts` must still answer the
+  //      SAME address. A locked wallet / revoked permission answers `[]`; a switched
+  //      account answers a different address. Neither restores — entering against
+  //      another account would rehydrate the wrong identity.
+  useEffect(() => {
+    if (restoreAttemptedRef.current || sessionEnteredRef.current) return;
+    const saved = readWalletSession();
+    if (!saved) {
+      restoreAttemptedRef.current = true;
+      return;
+    }
+    if (saved.rdns) {
+      if (selectedRdns !== saved.rdns) {
+        // Pin it if it has announced; otherwise wait for the next discovery change.
+        // Persist the registry's CANONICAL rdns, not the stored string — selectProvider
+        // also resolves a uuid, and holding a uuid in `selectedRdns` would miss the
+        // picker's highlight and re-persist the uuid on the next resume.
+        const pinned = selectProvider(saved.rdns);
+        if (pinned) setSelectedRdns(pinned.info.rdns);
+        return;
+      }
+    } else {
+      // Recorded against an unambiguous lone `window.ethereum`. `injectedProviderCount()`
+      // reads 0 until wallets announce, so deciding now would restore against whichever
+      // extension won the injection race — and once `sessionEntered` is true the silent
+      // read's ambiguity guard is a permanent no-op (see there), so a transient
+      // ambiguity would become a COMMITTED wrong-wallet session. Wait for the announce
+      // window, then refuse if the global turns out to be contended (mirrors the silent
+      // read and resumeSession). The record survives: a later visit where it is
+      // unambiguous again can still restore.
+      if (!discoverySettled) return;
+      if (injectedProviderCount() > 1) {
+        restoreAttemptedRef.current = true;
+        return;
+      }
+    }
+    const provider = getEthereumProvider();
+    // Nothing resolvable yet, or a WC provider whose session hasn't rehydrated (it
+    // throws on request() before connect()) — wait for discovery to change.
+    if (!provider || isSessionlessWalletConnect(provider)) return;
+    restoreAttemptedRef.current = true;
+    // Snapshot the connect-attempt token: disconnect()/closeLoginModal() bump it, and a
+    // restore resolving after either must not resurrect the session (the same
+    // invalidation connect() uses — the restore is the other async writer of
+    // sessionEntered, so it needs it too).
+    const attempt = connectAttemptRef.current;
+    void (async () => {
+      let accounts: string[];
+      try {
+        accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
+      } catch {
+        // Provider error (dead port, transient RPC): don't restore, and do NOT drop
+        // the record — a failed read is not evidence the wallet deauthorized us.
+        // Release the once-guard so a later discovery change can retry.
+        restoreAttemptedRef.current = false;
+        return;
+      }
+      // Validate against the PROVIDER, not against "did a dep change". A dep change is
+      // not staleness — `discoverySettled` flips at a fixed 1.5s and WalletConnect
+      // registers whenever its dynamic import lands, so a read merely slower than that
+      // (an MV3-suspended extension takes seconds) is still a perfectly good answer from
+      // the same wallet. Cancelling on the dep change instead lost the restore for the
+      // whole page load. What DOES invalidate the answer is the pin moving underneath it,
+      // so compare provider identity and release the once-guard so the re-run can retry
+      // against whatever is pinned now.
+      if (getEthereumProvider() !== provider) {
+        restoreAttemptedRef.current = false;
+        return;
+      }
+      // Re-check the session at RESOLVE time: entering one through the ALREADY-pinned
+      // wallet (connect('io.metamask'), or resumeSession()) changes none of this effect's
+      // deps, so nothing else would stop a late restore from overwriting the clicked
+      // session's address AND flipping sessionRestored true on it — which suppresses the
+      // consumer's auto-derive, i.e. connected-but-keyless with no prompt. The attempt
+      // token covers disconnect()/closeLoginModal() the same way it does for connect().
+      if (sessionEnteredRef.current || connectAttemptRef.current !== attempt) return;
+      const next = accounts?.[0] ?? null;
+      if (next === null) {
+        // Locked wallet / revoked permission — indistinguishable here, so don't restore.
+        // KEEP the record: this is a fresh load with no session, the gate re-runs from
+        // scratch next time, and a lock is transient. (Once a session IS live, an
+        // `accountsChanged → []` clears it — see the listener effect.)
+        return;
+      }
+      if (!addressesEqual(next, saved.address)) {
+        // The wallet moved to a different account: forget the session so it can't keep
+        // resurrecting, and fall back to the Connect/Resume gate. Entering here would
+        // rehydrate the wrong identity.
+        clearWalletSession();
+        return;
+      }
+      setAuthorizedAddress(next);
+      setSessionEntered(true);
+      setSessionRestored(true);
+      // UPGRADE a bare-global record to a pinned one when — and only when — the wallet we
+      // just read from IS a discovered provider (compare the provider OBJECT, never "the
+      // sole discovered entry": a wallet can announce while a different, non-announcing one
+      // owns the global, and recording that rdns would re-point the session at the wrong
+      // wallet). Without this, a record made through the no-picker resume stays on the
+      // weaker branch forever and pays the announce-window wait on every load.
+      const rdns =
+        saved.rdns ?? getDiscoveredProviders().find((d) => d.provider === provider)?.info.rdns ?? null;
+      // Pin the module too, not just the React state, so later requests route explicitly
+      // instead of via the global. Resolves to the same object we just read from.
+      if (rdns !== null && rdns !== selectedRdns) {
+        selectProvider(rdns);
+        setSelectedRdns(rdns);
+      }
+      // Slide the TTL: an actively-used device stays connected, an abandoned one ages out.
+      writeWalletSession({ address: next, rdns });
+      void readChainId(provider);
+    })();
+  }, [providers, selectedRdns, discoverySettled, readChainId]);
 
   // Silent read of the already-authorized account for the SELECTED provider, so a
   // returning user can one-click "Resume session" — without entering the session
@@ -162,12 +320,20 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // this effect re-runs and `cancelled` drops the now-ambiguous result instead
     // of letting it overwrite the guard's null.
     let cancelled = false;
+    // `cancelled` only covers a re-run/unmount; the pre-session check at the top of
+    // this effect was evaluated at RUN time, so a read still in flight when the
+    // session is entered (by connect() against a lone global, or by the restore
+    // effect — neither changes this effect's deps, so no cleanup runs) would resolve
+    // afterwards and clobber the entered address: to null → `address` null with
+    // canResume ALSO false, a dead state with neither dashboard nor Resume CTA; or to
+    // a different account → a silent identity re-key. Re-check at RESOLVE time.
+    const stillPreSession = () => !cancelled && !sessionEnteredRef.current;
     void (async () => {
       try {
         const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
-        if (!cancelled) setAuthorizedAddress(accounts[0] ?? null);
+        if (stillPreSession()) setAuthorizedAddress(accounts[0] ?? null);
       } catch {
-        if (!cancelled) setAuthorizedAddress(null);
+        if (stillPreSession()) setAuthorizedAddress(null);
       }
     })();
     return () => {
@@ -192,7 +358,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setAuthorizedAddress(next);
       // If the wallet drops all accounts (locked / disconnected in the wallet, or a
       // WC phone-side disconnect), end the session too — nothing left to sign in to.
-      if (next === null) setSessionEntered(false);
+      if (next === null) {
+        setSessionEntered(false);
+        // Forget the recorded session — a wallet-side revocation must not be resurrected
+        // by the next page load. A LOCK reports the same empty array, so this deliberately
+        // also forgets on a lock (one extra click) rather than guess: we fail closed on the
+        // case we can't distinguish. Only while a session is LIVE, though: pre-session this
+        // effect binds to the bare global, so a locked squatter extension must not wipe a
+        // record belonging to a different wallet.
+        if (sessionEnteredRef.current) clearWalletSession();
+        return;
+      }
+      // Switched account: re-point the record at it (else the next load finds a
+      // mismatch and drops the session), and stop reporting the session as restored —
+      // the switch is a fresh wallet-side action, so consumers may prompt again.
+      if (sessionEnteredRef.current) {
+        setSessionRestored(false);
+        writeWalletSession({ address: next, rdns: selectedRdns });
+      }
     };
     // The wallet reports chainChanged as the new hex chain id. Track it so the
     // fund-account orchestrator can verify the Polygon leg targets the expected chain.
@@ -205,7 +388,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const onSessionEnded = () => {
       setAuthorizedAddress(null);
       setSessionEntered(false);
+      setSessionRestored(false);
       setChainId(null);
+      clearWalletSession();
     };
     // EIP-1193 `disconnect` (#233): an injected provider becoming unavailable
     // (network disconnect, extension-side lock/reset) — without this listener
@@ -213,7 +398,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const onDisconnect = () => {
       setAuthorizedAddress(null);
       setSessionEntered(false);
+      setSessionRestored(false);
       setChainId(null);
+      clearWalletSession();
     };
 
     provider.on('accountsChanged', onAccountsChanged);
@@ -299,6 +486,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         if (!isCurrent()) return;
         setAuthorizedAddress(accounts[0] ?? null);
         setSessionEntered(accounts[0] != null);
+        setSessionRestored(false);
+        // Record the entered session so a refresh doesn't demand this click again.
+        // Inside the isCurrent() guard on purpose: an ABANDONED attempt (WM-1) must
+        // not persist a session the user cancelled.
+        if (accounts[0]) writeWalletSession({ address: accounts[0], rdns: resolvedRdns });
         await readChainId(provider);
         if (!isCurrent()) return;
         setIsModalOpen(false);
@@ -352,7 +544,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       return;
     }
     setSessionEntered(true);
+    setSessionRestored(false);
     setError(null);
+    // Same as connect(): record the entered session so the next load restores it.
+    writeWalletSession({ address: authorizedAddress, rdns: selectedRdns });
     const provider = getEthereumProvider();
     if (provider) void readChainId(provider);
   }, [authorizedAddress, selectedRdns, openLoginModal, readChainId]);
@@ -368,7 +563,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // resurrect the session after the user explicitly disconnected. (WM-1.)
     connectAttemptRef.current += 1;
     clearDeviceIdentity();
+    // Explicit as well as via clearDeviceIdentity's key list: leaving the recorded
+    // session behind would make "Forget this device" a no-op — the next load would
+    // silently re-enter the session the user just forgot.
+    clearWalletSession();
     setSessionEntered(false);
+    setSessionRestored(false);
     setAuthorizedAddress(null);
     setChainId(null);
     setError(null);
@@ -430,6 +630,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       // A returning user the wallet has already authorized, who has NOT yet
       // entered the session this visit — the app shows a "Resume session" CTA.
       canResume: !sessionEntered && authorizedAddress !== null,
+      sessionRestored,
       openLoginModal,
       closeLoginModal,
       connect,
@@ -450,6 +651,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       metaMaskAvailable,
       isModalOpen,
       sessionEntered,
+      sessionRestored,
       authorizedAddress,
       openLoginModal,
       closeLoginModal,
