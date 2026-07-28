@@ -23,6 +23,11 @@ import type { WalletContextValue } from './types';
 import { resetWalletConnectProvider, registerWalletConnect } from './getWalletConnectProvider';
 import { signMessage as ethSignMessage, type EthereumProvider } from './signMessage';
 
+// How many times the session restore may re-attempt after abandoning a read (a provider
+// error, or the pin moving underneath it). Bounded so a persistently failing provider can't
+// be spun on; the user still has Connect/Resume.
+const MAX_RESTORE_RETRIES = 2;
+
 // Parse an `eth_chainId` result (hex string like "0x89") to a decimal id.
 function parseChainId(raw: unknown): number | null {
   if (typeof raw === 'string') {
@@ -70,11 +75,32 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // lets the ambiguity guard apply ONLY pre-session without re-subscribing.
   const sessionEnteredRef = useRef(sessionEntered);
   sessionEnteredRef.current = sessionEntered;
+  // Mirror of authorizedAddress for the wallet-event listeners, which are NOT keyed on it
+  // (re-binding on every account change would churn the subscription). Lets
+  // `accountsChanged` tell a real account SWITCH from a permitted-set change that left
+  // `accounts[0]` alone.
+  const authorizedAddressRef = useRef(authorizedAddress);
+  authorizedAddressRef.current = authorizedAddress;
   // Once-per-mount guard for the restore effect below. Set SYNCHRONOUSLY before the
   // `eth_accounts` await so a re-render (or StrictMode's double-invoke) can't issue a
   // second read; the "still waiting for the wallet to announce" early-returns
   // deliberately leave it unset so the effect can retry when discovery changes.
   const restoreAttemptedRef = useRef(false);
+  // Releasing `restoreAttemptedRef` does not by itself retry: a ref write is not a dep
+  // change, and this effect's deps go quiet once the recorded wallet has announced
+  // (`discoverySettled` flips once; `providers` is compared by UUID, so a re-announce with a
+  // fresh provider object under the same info isn't a change at all). So the pin-moved path
+  // bumps this counter to DRIVE the re-run — otherwise the release lands in a vacuum and the
+  // restore is silently lost for the whole page load. Bounded: a pin that keeps moving must
+  // not spin, and after MAX_RESTORE_RETRIES the user still has Connect/Resume.
+  const [restoreRetry, setRestoreRetry] = useState(0);
+  const restoreRetriesRef = useRef(0);
+  const retryRestore = useCallback(() => {
+    restoreAttemptedRef.current = false;
+    if (restoreRetriesRef.current >= MAX_RESTORE_RETRIES) return;
+    restoreRetriesRef.current += 1;
+    setRestoreRetry((n) => n + 1);
+  }, []);
   const [chainId, setChainId] = useState<number | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   // rdns of the provider connect() is currently in flight for — lets the picker
@@ -216,7 +242,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       } catch {
         // Provider error (dead port, transient RPC): don't restore, and do NOT drop
         // the record — a failed read is not evidence the wallet deauthorized us.
-        // Release the once-guard so a later discovery change can retry.
+        // Release the guard so a LATER dep change can retry, but deliberately do NOT
+        // self-drive one: the read just failed against this provider, so an immediate
+        // re-read would fail the same way and only burn the retry budget. A page where
+        // nothing else changes therefore falls back to the Connect/Resume gate — which is
+        // correct, because `canResume` needs the silent read that just failed too.
         restoreAttemptedRef.current = false;
         return;
       }
@@ -226,10 +256,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       // (an MV3-suspended extension takes seconds) is still a perfectly good answer from
       // the same wallet. Cancelling on the dep change instead lost the restore for the
       // whole page load. What DOES invalidate the answer is the pin moving underneath it,
-      // so compare provider identity and release the once-guard so the re-run can retry
-      // against whatever is pinned now.
+      // so compare provider identity and drive a bounded retry against whatever is pinned now.
       if (getEthereumProvider() !== provider) {
-        restoreAttemptedRef.current = false;
+        retryRestore();
         return;
       }
       // …but for the bare-global branch, provider identity is NOT sufficient: it only
@@ -284,7 +313,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       writeWalletSession({ address: next, rdns });
       void readChainId(provider);
     })();
-  }, [providers, selectedRdns, discoverySettled, readChainId]);
+  }, [providers, selectedRdns, discoverySettled, restoreRetry, retryRestore, readChainId]);
 
   // Silent read of the already-authorized account for the SELECTED provider, so a
   // returning user can one-click "Resume session" — without entering the session
@@ -378,12 +407,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         if (sessionEnteredRef.current) clearWalletSession();
         return;
       }
-      // Switched account: re-point the record at it (else the next load finds a
-      // mismatch and drops the session), and stop reporting the session as restored —
-      // the switch is a fresh wallet-side action, so consumers may prompt again.
-      if (sessionEnteredRef.current) {
+      // Switched account: re-point the record at it (else the next load finds a mismatch
+      // and drops the session), and stop reporting the session as restored — the switch is
+      // a fresh wallet-side action, so consumers may prompt again.
+      //
+      // Only when the account ACTUALLY changed. Wallets also emit accountsChanged when the
+      // permitted-account SET changes with `accounts[0]` unchanged (e.g. the user grants
+      // another account for a different site), and clearing `sessionRestored` there would
+      // open the consumer's auto-derive gate on a session that still has no gesture behind
+      // it — an unbidden `personal_sign`, the exact thing the flag exists to prevent (the
+      // consumer's own per-address reset does NOT re-arm, because the address didn't move).
+      if (sessionEnteredRef.current && !addressesEqual(next, authorizedAddressRef.current)) {
         setSessionRestored(false);
-        writeWalletSession({ address: next, rdns: selectedRdns });
+        // Do NOT recreate a record another tab has deleted: localStorage is shared, so a
+        // "Forget this device" in one tab would otherwise be resurrected by any
+        // accountsChanged in another, re-arming silent restore for a forgotten device.
+        if (readWalletSession()) writeWalletSession({ address: next, rdns: selectedRdns });
       }
     };
     // The wallet reports chainChanged as the new hex chain id. Track it so the
@@ -555,8 +594,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setSessionEntered(true);
     setSessionRestored(false);
     setError(null);
-    // Same as connect(): record the entered session so the next load restores it.
-    writeWalletSession({ address: authorizedAddress, rdns: selectedRdns });
+    // Same as connect(): record the entered session so the next load restores it — but
+    // PRESERVE an existing record's wallet when nothing is pinned. `selectedRdns` is null
+    // on the no-picker path, and overwriting a PINNED record with null downgrades it to
+    // bare-global; the next load would then treat a single announced wallet as unambiguous
+    // and auto-enter through a wallet the user never picked. That would make the restore's
+    // wrong-wallet refusal a ONE-CLICK bypass, since Resume is the affordance it offers.
+    const recorded = readWalletSession();
+    writeWalletSession({ address: authorizedAddress, rdns: selectedRdns ?? recorded?.rdns ?? null });
     const provider = getEthereumProvider();
     if (provider) void readChainId(provider);
   }, [authorizedAddress, selectedRdns, openLoginModal, readChainId]);

@@ -4,7 +4,12 @@ import { WalletProvider } from './WalletProvider';
 import { useWallet } from './useWallet';
 import { resetProviderDiscovery, type EthereumProvider } from './injectedProvider';
 import { PMP_STORAGE_KEYS } from './device-store';
-import { WALLET_SESSION_KEY, WALLET_SESSION_TTL_MS, readWalletSession } from './session-store';
+import {
+  WALLET_SESSION_KEY,
+  WALLET_SESSION_TTL_MS,
+  clearWalletSession,
+  readWalletSession,
+} from './session-store';
 
 // SESSION RESTORE ACROSS A PAGE REFRESH.
 //
@@ -66,7 +71,7 @@ function recordSession(address: string, rdns: string | null, at: number = Date.n
 
 // The bare-global branch of the restore waits for the EIP-6963 announce window (the
 // discovery effect's 6 × 250ms poll) to close before trusting injectedProviderCount(), so
-// these cases let real time pass — ~1.6s each, in 4 of the 18 tests here.
+// these cases let real time pass — ~1.6s each, in several of the tests here.
 //
 // Deliberately NOT fake timers, despite the usual preference for advancing the clock: this
 // suite interleaves the faked discovery interval with REAL-timer promise resolution
@@ -139,7 +144,6 @@ describe('WalletProvider — restores an entered session across a refresh', () =
     });
 
     expect(readWalletSession()).toMatchObject({ address: MM_ADDR, rdns: 'io.metamask' });
-    // A clicked entry is NOT a restored one.
     expect(result.current.sessionRestored).toBe(false);
   });
 
@@ -541,6 +545,188 @@ describe('WalletProvider — the record is dropped on every exit', () => {
 
     // A cancelled connect must not leave a session the next load would auto-enter.
     expect(result.current.isConnected).toBe(false);
+    expect(localStorage.getItem(WALLET_SESSION_KEY)).toBeNull();
+  });
+});
+
+describe('WalletProvider — review round 2', () => {
+  function deferred(accounts: string[]) {
+    let release!: () => void;
+    let reject!: (e: unknown) => void;
+    const gate = new Promise<void>((res, rej) => {
+      release = res;
+      reject = rej;
+    });
+    const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
+    return {
+      release: () => release(),
+      fail: () => reject(new Error('chromePort disconnected')),
+      provider: {
+        isMetaMask: true,
+        request: vi.fn(async ({ method }: { method: string }) => {
+          if (method === 'eth_accounts') {
+            await gate;
+            return accounts;
+          }
+          if (method === 'eth_requestAccounts') return accounts;
+          if (method === 'eth_chainId') return '0x89';
+          return null;
+        }),
+        on: (event: string, handler: (...a: unknown[]) => void) => {
+          (handlers[event] ??= []).push(handler);
+        },
+        removeListener: () => {},
+        __emit: (event: string, ...args: unknown[]) => {
+          for (const h of handlers[event] ?? []) h(...args);
+        },
+      },
+    };
+  }
+
+  it('C1: retries when the pin moves under a parked read, instead of releasing into a vacuum', async () => {
+    // Releasing `restoreAttemptedRef` does not re-run the effect — a ref write is not a dep
+    // change. Note the re-announce below carries the SAME uuid, so `providers` does not
+    // change either (it is compared by uuid): there is no dep change available to drive the
+    // retry. RED before the retry counter: the parked read resolves, the identity check
+    // correctly rejects it, the guard is released into a vacuum, and the restore is silently
+    // lost for the whole page load even though the live wallet would answer immediately.
+    const parked = deferred([MM_ADDR]);
+    recordSession(MM_ADDR, 'io.metamask');
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    act(() => {
+      announce(MM_INFO, parked.provider as unknown as EthereumProvider);
+    });
+    await waitFor(() => expect(parked.provider.request).toHaveBeenCalled());
+
+    // The extension re-announces with a FRESH provider object (same info/uuid) — e.g. after
+    // its service worker restarted. The module pin now resolves the new object, so the
+    // parked read's answer belongs to a provider we no longer route through.
+    const healthy = makeProvider([MM_ADDR]);
+    act(() => {
+      announce(MM_INFO, healthy as unknown as EthereumProvider);
+    });
+    await act(async () => {
+      parked.release();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(result.current.isConnected).toBe(true));
+    expect(result.current.address).toBe(MM_ADDR);
+    // Restored through the wallet that actually answered.
+    expect(healthy.request).toHaveBeenCalledWith(expect.objectContaining({ method: 'eth_accounts' }));
+  });
+
+  it('C1b: a failed read fails closed and keeps the record (no self-driven retry)', async () => {
+    // The dead-port case. An immediate re-read would fail identically and only burn the
+    // retry budget, so this deliberately does NOT self-drive: no restore this load, record
+    // intact, and the user still has Connect. Documents the accepted degradation.
+    const parked = deferred([MM_ADDR]);
+    recordSession(MM_ADDR, 'io.metamask');
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    act(() => {
+      announce(MM_INFO, parked.provider as unknown as EthereumProvider);
+    });
+    await waitFor(() => expect(parked.provider.request).toHaveBeenCalled());
+
+    await act(async () => {
+      parked.fail();
+      await Promise.resolve();
+    });
+
+    expect(result.current.isConnected).toBe(false);
+    expect(readWalletSession()).not.toBeNull();
+  });
+
+  it('C2: Resume does NOT downgrade a pinned record to bare-global', async () => {
+    // The state the wrong-wallet refusal leaves behind: record pinned to io.metamask,
+    // Phantom owns the global, MetaMask never announced, same account in both. Resume is the
+    // only affordance — and RED before the fix it re-stamped the record with `rdns: null`,
+    // so the NEXT load called a lone Phantom "unambiguous" and auto-entered through it.
+    const phantom = makeProvider([MM_ADDR]);
+    (window as unknown as { ethereum: unknown }).ethereum = phantom;
+    recordSession(MM_ADDR, 'io.metamask');
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    act(() => {
+      announce(PH_INFO, phantom as unknown as EthereumProvider);
+    });
+    await waitFor(() => expect(result.current.canResume).toBe(true));
+    expect(result.current.isConnected).toBe(false);
+
+    act(() => {
+      result.current.resumeSession();
+    });
+    expect(result.current.isConnected).toBe(true);
+
+    // The recorded wallet must survive: still pinned, so a later load cannot silently
+    // auto-enter through the wallet the user never picked.
+    expect(readWalletSession()).toMatchObject({ address: MM_ADDR, rdns: 'io.metamask' });
+  });
+
+  it('C5: refuses a bare-global record while discovery is still settling', async () => {
+    // Extensions answer `eip6963:requestProvider` asynchronously, so the realistic timing is
+    // "announce shortly AFTER mount" — which the pre-read count check cannot see. RED with
+    // the `!discoverySettled` wait removed: the restore commits against the injection-race
+    // winner before either wallet has announced.
+    (window as unknown as { ethereum: unknown }).ethereum = makeProvider([MM_ADDR]);
+    recordSession(MM_ADDR, null);
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    await act(async () => {
+      await new Promise<void>((r) => setTimeout(r, 80));
+      announce(MM_INFO, makeProvider([MM_ADDR]) as unknown as EthereumProvider);
+      announce(PH_INFO, makeProvider([MM_ADDR]) as unknown as EthereumProvider);
+    });
+    await letAnnounceWindowClose();
+
+    expect(result.current.isConnected).toBe(false);
+    expect(result.current.address).toBeNull();
+  });
+
+  it('C9: an accountsChanged that did NOT change the account keeps sessionRestored', async () => {
+    // Wallets emit accountsChanged when the permitted-account SET changes with accounts[0]
+    // unchanged. RED before the fix: sessionRestored flipped false, which OPENS the
+    // consumer's auto-derive gate on a session that still has no gesture behind it — while
+    // the consumer's per-address reset does not re-arm, because the address never moved.
+    const mm = makeProvider([MM_ADDR]);
+    recordSession(MM_ADDR, 'io.metamask');
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    act(() => {
+      announce(MM_INFO, mm as unknown as EthereumProvider);
+    });
+    await waitFor(() => expect(result.current.sessionRestored).toBe(true));
+
+    act(() => {
+      mm.__emit('accountsChanged', [MM_ADDR, OTHER_ADDR]);
+    });
+
+    expect(result.current.address).toBe(MM_ADDR);
+    expect(result.current.sessionRestored).toBe(true);
+  });
+
+  it('C3: accountsChanged does NOT recreate a record another tab deleted', async () => {
+    // localStorage is shared across tabs. RED before the fix: a "Forget this device" in one
+    // tab was resurrected by any accountsChanged in another, re-arming silent restore for a
+    // device the user explicitly forgot.
+    const mm = makeProvider([MM_ADDR]);
+    recordSession(MM_ADDR, 'io.metamask');
+
+    const { result } = renderHook(() => useWallet(), { wrapper: WalletProvider });
+    act(() => {
+      announce(MM_INFO, mm as unknown as EthereumProvider);
+    });
+    await waitFor(() => expect(result.current.isConnected).toBe(true));
+
+    // Another tab forgets the device.
+    clearWalletSession();
+
+    act(() => {
+      mm.__emit('accountsChanged', [OTHER_ADDR]);
+    });
+
     expect(localStorage.getItem(WALLET_SESSION_KEY)).toBeNull();
   });
 });

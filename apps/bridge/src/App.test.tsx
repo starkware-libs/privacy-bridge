@@ -17,6 +17,7 @@ const walletState = {
   error: null,
   isModalOpen: false,
   canResume: false,
+  sessionRestored: false,
   closeLoginModal: vi.fn(),
   connect: vi.fn(),
   resumeSession: vi.fn(),
@@ -69,6 +70,7 @@ beforeEach(() => {
   walletState.address = null;
   identityState.snAddress = null;
   identityState.deriveStatus = { status: 'idle' };
+  walletState.sessionRestored = false;
 });
 
 describe('App shell', () => {
@@ -114,5 +116,41 @@ describe('App — derive identity on connect (SessionEffect, #433)', () => {
     renderApp();
 
     expect(identityState.deriveIdentity).not.toHaveBeenCalled();
+  });
+});
+
+describe('App — a RESTORED session must not prompt (SessionEffect gate)', () => {
+  it('does NOT auto-derive when the session was restored from storage', async () => {
+    // A session the SDK restored across a page refresh had no user gesture behind it, so
+    // deriving here would pop a `personal_sign` unbidden on EVERY page load — and leave the
+    // app connected-but-keyless if rejected. RED without the `sessionRestored` early-return.
+    walletState.isConnected = true;
+    walletState.address = '0xabc123';
+    walletState.sessionRestored = true;
+    renderApp();
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(identityState.deriveIdentity).not.toHaveBeenCalled();
+  });
+
+  it('offers "Sign to derive identity" for a restored (idle, keyless) session', () => {
+    // The gate above suppresses the automatic prompt, so the manual affordance is the ONLY
+    // way in. RED if `needsSign` is narrowed back to `status === 'error'`: the dashboard
+    // would render no way to sign, stranding a restored session.
+    walletState.isConnected = true;
+    walletState.address = '0xabc123';
+    walletState.sessionRestored = true;
+    renderApp();
+
+    expect(screen.getByRole('button', { name: /sign to derive identity/i })).toBeDefined();
+  });
+
+  it('still auto-derives when the session was entered by a click', async () => {
+    walletState.isConnected = true;
+    walletState.address = '0xabc123';
+    walletState.sessionRestored = false;
+    renderApp();
+
+    await waitFor(() => expect(identityState.deriveIdentity).toHaveBeenCalledTimes(1));
   });
 });

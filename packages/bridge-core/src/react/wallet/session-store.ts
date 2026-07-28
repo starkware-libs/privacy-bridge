@@ -17,9 +17,10 @@ import { getAddress, isAddressEqual } from 'viem';
 // "Disconnect / Forget this device" wipes it. Never rename.
 export const WALLET_SESSION_KEY = 'pmp.lastWallet';
 
-// How long an entered session may be restored for. Slid forward on every
-// successful restore, so an actively-used device stays connected while an abandoned
-// one ages out on its own — the only mitigation that covers "left the browser open".
+// How long an entered session may be restored for. Re-stamped on connect/resume, on a
+// wallet-side account switch, and on every successful restore — so a device that keeps
+// RELOADING stays connected while an abandoned one ages out. Note it does NOT slide for a
+// single long-lived tab that never reloads: that session ends on its next reload.
 export const WALLET_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export type WalletSession = {
@@ -60,12 +61,15 @@ export function readWalletSession(): WalletSession | null {
     if (typeof address !== 'string' || !ADDRESS_RE.test(address)) return null;
     if (rdns !== null && typeof rdns !== 'string') return null;
     if (typeof at !== 'number' || !Number.isFinite(at)) return null;
-    // Expired, or stamped in the future (clock change / tampering) — treat both as
-    // unusable and drop the record so it can't linger.
-    if (at > now || now - at > WALLET_SESSION_TTL_MS) {
+    // Expired — drop it so it can't linger.
+    if (now - at > WALLET_SESSION_TTL_MS) {
       clearWalletSession();
       return null;
     }
+    // Stamped in the FUTURE: ignore without deleting. `Date.now()` is not monotonic, so a
+    // backward clock/NTP step would otherwise permanently destroy a valid session; refusing
+    // this read is enough, and the record recovers once the clock does.
+    if (at > now) return null;
     return { address, rdns, at };
   } catch {
     // Disabled/quota-limited localStorage or unparseable JSON — no session.

@@ -26,12 +26,15 @@ function SessionEffect() {
 }
 
 function ConnectedDashboard() {
-  const { address } = useWallet();
+  const { address, sessionRestored } = useWallet();
   const { snAddress, deriveStatus, deriveIdentity } = useIdentity();
-  // Connected but keyless and nothing in flight — either a failed/rejected derive, or a
-  // session restored across a refresh (which deliberately does NOT auto-prompt). Both need
-  // the same explicit affordance, or a restored session strands with no way to sign in.
-  const needsSign = !snAddress && (deriveStatus.status === 'error' || deriveStatus.status === 'idle');
+  // Connected but keyless, and nobody is going to derive for us: either a failed/rejected
+  // attempt, or a session restored across a refresh (which deliberately does NOT
+  // auto-prompt) — without this a restored session strands with no way to sign in. An idle
+  // CLICK-entered session is excluded on purpose: SessionEffect is already deriving, so a
+  // button here would invite a second `personal_sign` for work already in flight.
+  const needsSign =
+    !snAddress && (deriveStatus.status === 'error' || (deriveStatus.status === 'idle' && sessionRestored));
 
   return (
     <div style={styles.page}>
@@ -47,15 +50,14 @@ function ConnectedDashboard() {
       {deriveStatus.status === 'pending' && (
         <p style={{ ...styles.muted, marginBottom: '1rem' }}>Deriving identity…</p>
       )}
+      {/* The error itself is shown whenever there is one — gating it on `needsSign` swallowed
+          the message entirely once an identity already existed. */}
+      {deriveStatus.status === 'error' && (
+        <div style={{ ...styles.statusBox('error'), marginBottom: '1rem' }}>{deriveStatus.message}</div>
+      )}
       {needsSign && (
         <div style={{ marginBottom: '1rem' }}>
-          {deriveStatus.status === 'error' && (
-            <div style={styles.statusBox('error')}>{deriveStatus.message}</div>
-          )}
-          <button
-            onClick={() => void deriveIdentity()}
-            style={{ ...styles.primaryBtn, marginTop: '0.5rem' }}
-          >
+          <button onClick={() => void deriveIdentity()} style={styles.primaryBtn}>
             Sign to derive identity
           </button>
         </div>
