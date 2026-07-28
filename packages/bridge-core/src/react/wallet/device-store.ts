@@ -34,7 +34,39 @@ export const PMP_STORAGE_KEYS = [
   'pmp.chainSync', // app-side: per-EVM-address chain-scan timestamps — chain-sync-store.ts
   'pmp.unclaimedReturns', // app-side: per-EVM-address unclaimed-return metadata (account indices + amounts) — unclaimed-store.ts
   'pmp.poolReturns', // app-side: per-EVM-address completed pool-return log (bid indices + Starknet claim tx hashes + amounts) — pool-returns-store.ts
+  'pmp.walletRdns', // the wallet the user picked last (EIP-6963 rdns, e.g. "io.metamask") — see walletPickStore
 ] as const;
+
+// The remembered wallet pick. Storing WHICH wallet the user chose (an EIP-6963 rdns —
+// a public vendor identifier like "io.metamask", never an address or key) is what lets
+// a returning visit resolve the same provider BEFORE any user interaction. Without it
+// `selectedRdns` starts null on every load, so with 2+ injected wallets the
+// ambiguous-multi guard refuses the silent `eth_accounts` read, `canResume` stays
+// false, and the user is sent back through the picker on every single reload.
+//
+// It rides in PMP_STORAGE_KEYS above, so "Disconnect / Forget this device" wipes it
+// like every other device-local trace.
+const WALLET_RDNS_KEY = 'pmp.walletRdns';
+
+/** The rdns of the wallet last connected on this device, or null. */
+export function readWalletPick(): string | null {
+  try {
+    const rdns = localStorage.getItem(WALLET_RDNS_KEY);
+    return rdns !== null && rdns !== '' ? rdns : null;
+  } catch {
+    // A disabled/partitioned localStorage just means no remembered pick.
+    return null;
+  }
+}
+
+/** Remember the wallet the user connected with. Best-effort — never throws. */
+export function writeWalletPick(rdns: string): void {
+  try {
+    localStorage.setItem(WALLET_RDNS_KEY, rdns);
+  } catch {
+    // ignore — remembering is an optimization, never a requirement.
+  }
+}
 
 // Remove all pmp.* state for this device. Used by disconnect()/"Forget this
 // device". Best-effort — a disabled/quota-limited localStorage must not throw
