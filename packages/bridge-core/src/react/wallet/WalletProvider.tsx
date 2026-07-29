@@ -58,8 +58,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // strict gate: canResume, never auto-enter. `sessionRestored` tells consumers the
   // entry came from storage rather than a click, so nothing that needs a user
   // GESTURE (a `personal_sign` prompt) fires unsolicited on page load.
-  const [authorizedAddress, setAuthorizedAddress] = useState<string | null>(null);
-  const [sessionEntered, setSessionEntered] = useState(false);
+  const [authorizedAddress, setAuthorizedAddressState] = useState<string | null>(null);
+  const [sessionEntered, setSessionEnteredState] = useState(false);
   const [sessionRestored, setSessionRestored] = useState(false);
   // Connect-attempt token: bumped on every close/disconnect so a still-in-flight
   // connect() whose awaits resume LATER can detect it was abandoned and bail
@@ -74,13 +74,25 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // could clobber the connect()-set address). Reading the latest value via a ref
   // lets the ambiguity guard apply ONLY pre-session without re-subscribing.
   const sessionEnteredRef = useRef(sessionEntered);
-  sessionEnteredRef.current = sessionEntered;
   // Mirror of authorizedAddress for the wallet-event listeners, which are NOT keyed on it
   // (re-binding on every account change would churn the subscription). Lets
   // `accountsChanged` tell a real account SWITCH from a permitted-set change that left
   // `accounts[0]` alone.
   const authorizedAddressRef = useRef(authorizedAddress);
-  authorizedAddressRef.current = authorizedAddress;
+  // Both refs are written EAGERLY here, not mirrored during render. Mirroring on render
+  // leaves them stale for the whole window between a mutation and React's re-render — and
+  // the async guards that read them (the silent read's `stillPreSession`, the restore's
+  // resolve-time check) can easily resolve inside that window, which is precisely the
+  // clobber they exist to prevent. Every mutation of these two values MUST go through these
+  // helpers; a bare setState would leave the ref permanently stale.
+  const commitSessionEntered = useCallback((next: boolean) => {
+    sessionEnteredRef.current = next;
+    setSessionEnteredState(next);
+  }, []);
+  const commitAuthorizedAddress = useCallback((next: string | null) => {
+    authorizedAddressRef.current = next;
+    setAuthorizedAddressState(next);
+  }, []);
   // Once-per-mount guard for the restore effect below. Set SYNCHRONOUSLY before the
   // `eth_accounts` await so a re-render (or StrictMode's double-invoke) can't issue a
   // second read; the "still waiting for the wallet to announce" early-returns
@@ -292,8 +304,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         clearWalletSession();
         return;
       }
-      setAuthorizedAddress(next);
-      setSessionEntered(true);
+      // Re-read the record at RESOLVE time. `saved` was read before the await, so another
+      // TAB may have run "Forget this device" (record gone) or re-pointed it at a different
+      // account meanwhile — committing our stale copy would resurrect a forgotten device or
+      // overwrite the newer decision. localStorage is shared; the pre-await read is not
+      // authoritative by the time we act on it.
+      const live = readWalletSession();
+      if (!live || !addressesEqual(live.address, saved.address)) return;
+      commitAuthorizedAddress(next);
+      commitSessionEntered(true);
       setSessionRestored(true);
       // UPGRADE a bare-global record to a pinned one when — and only when — the wallet we
       // just read from IS a discovered provider (compare the provider OBJECT, never "the
@@ -302,7 +321,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       // wallet). Without this, a record made through the no-picker resume stays on the
       // weaker branch forever and pays the announce-window wait on every load.
       const rdns =
-        saved.rdns ?? getDiscoveredProviders().find((d) => d.provider === provider)?.info.rdns ?? null;
+        live.rdns ?? getDiscoveredProviders().find((d) => d.provider === provider)?.info.rdns ?? null;
       // Pin the module too, not just the React state, so later requests route explicitly
       // instead of via the global. Resolves to the same object we just read from.
       if (rdns !== null && rdns !== selectedRdns) {
@@ -346,11 +365,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // contend for window.ethereum — synthetic entries (WalletConnect) don't inject
     // into the global, so WC + one injected wallet stays unambiguous.
     if (injectedProviderCount() > 1 && selectedRdns == null) {
-      setAuthorizedAddress(null);
+      commitAuthorizedAddress(null);
       return;
     }
     if (isSessionlessWalletConnect(provider)) {
-      setAuthorizedAddress(null);
+      commitAuthorizedAddress(null);
       return;
     }
     // Guard against a stale in-flight read: if more wallets announce (the count
@@ -369,9 +388,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
-        if (stillPreSession()) setAuthorizedAddress(accounts[0] ?? null);
+        if (stillPreSession()) commitAuthorizedAddress(accounts[0] ?? null);
       } catch {
-        if (stillPreSession()) setAuthorizedAddress(null);
+        if (stillPreSession()) commitAuthorizedAddress(null);
       }
     })();
     return () => {
@@ -393,18 +412,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const onAccountsChanged = (accounts: unknown) => {
       const list = accounts as string[];
       const next = list[0] ?? null;
-      setAuthorizedAddress(next);
+      // Snapshot BEFORE committing. The refs are written eagerly (see commitSessionEntered),
+      // so every guard below must read the pre-event values — otherwise "was a session live?"
+      // and "did the account actually change?" both compare against what we just wrote and
+      // are always false.
+      const wasEntered = sessionEnteredRef.current;
+      const previous = authorizedAddressRef.current;
+      commitAuthorizedAddress(next);
       // If the wallet drops all accounts (locked / disconnected in the wallet, or a
       // WC phone-side disconnect), end the session too — nothing left to sign in to.
       if (next === null) {
-        setSessionEntered(false);
+        commitSessionEntered(false);
         // Forget the recorded session — a wallet-side revocation must not be resurrected
         // by the next page load. A LOCK reports the same empty array, so this deliberately
         // also forgets on a lock (one extra click) rather than guess: we fail closed on the
         // case we can't distinguish. Only while a session is LIVE, though: pre-session this
         // effect binds to the bare global, so a locked squatter extension must not wipe a
         // record belonging to a different wallet.
-        if (sessionEnteredRef.current) clearWalletSession();
+        if (wasEntered) clearWalletSession();
         return;
       }
       // Switched account: re-point the record at it (else the next load finds a mismatch
@@ -417,12 +442,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       // open the consumer's auto-derive gate on a session that still has no gesture behind
       // it — an unbidden `personal_sign`, the exact thing the flag exists to prevent (the
       // consumer's own per-address reset does NOT re-arm, because the address didn't move).
-      if (sessionEnteredRef.current && !addressesEqual(next, authorizedAddressRef.current)) {
+      if (wasEntered && !addressesEqual(next, previous)) {
         setSessionRestored(false);
         // Do NOT recreate a record another tab has deleted: localStorage is shared, so a
         // "Forget this device" in one tab would otherwise be resurrected by any
         // accountsChanged in another, re-arming silent restore for a forgotten device.
-        if (readWalletSession()) writeWalletSession({ address: next, rdns: selectedRdns });
+        // And PRESERVE its wallet: `selectedRdns` is null on the no-picker path, so writing
+        // it blind would downgrade a pinned record to bare-global here exactly as it did in
+        // resumeSession — re-opening the wrong-wallet auto-restore that pin prevents.
+        const recorded = readWalletSession();
+        if (recorded) {
+          writeWalletSession({ address: next, rdns: selectedRdns ?? recorded.rdns });
+        }
       }
     };
     // The wallet reports chainChanged as the new hex chain id. Track it so the
@@ -433,23 +464,25 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // WC relay-side session termination (phone-side disconnect / TTL expiry). End
     // the session so the app drops back to signed-out instead of holding a dead
     // connection. (Injected providers don't emit these; a no-op listener is fine.)
-    const onSessionEnded = () => {
-      setAuthorizedAddress(null);
-      setSessionEntered(false);
+    const endSession = () => {
+      // Snapshot BEFORE committing — the refs are eager, so reading after the commit would
+      // always see false and the clear below would never fire (see onAccountsChanged).
+      const wasEntered = sessionEnteredRef.current;
+      commitAuthorizedAddress(null);
+      commitSessionEntered(false);
       setSessionRestored(false);
       setChainId(null);
-      clearWalletSession();
+      // Only forget the record for OUR session: pre-session these listeners bind to the bare
+      // global, so a squatter extension's teardown must not delete a record belonging to a
+      // different wallet (same reasoning as the accountsChanged → [] branch).
+      if (wasEntered) clearWalletSession();
     };
+    // WC relay-side termination and EIP-1193 `disconnect` are the same thing to us.
+    const onSessionEnded = endSession;
     // EIP-1193 `disconnect` (#233): an injected provider becoming unavailable
     // (network disconnect, extension-side lock/reset) — without this listener
     // the SPA keeps showing a live session against a dead provider.
-    const onDisconnect = () => {
-      setAuthorizedAddress(null);
-      setSessionEntered(false);
-      setSessionRestored(false);
-      setChainId(null);
-      clearWalletSession();
-    };
+    const onDisconnect = endSession;
 
     provider.on('accountsChanged', onAccountsChanged);
     provider.on('chainChanged', onChainChanged);
@@ -532,8 +565,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         // Abandoned mid-connect (modal closed / disconnect called): drop the late
         // result on the floor instead of silently entering the session.
         if (!isCurrent()) return;
-        setAuthorizedAddress(accounts[0] ?? null);
-        setSessionEntered(accounts[0] != null);
+        commitAuthorizedAddress(accounts[0] ?? null);
+        commitSessionEntered(accounts[0] != null);
         setSessionRestored(false);
         // Record the entered session so a refresh doesn't demand this click again.
         // Inside the isCurrent() guard on purpose: an ABANDONED attempt (WM-1) must
@@ -591,7 +624,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       openLoginModal();
       return;
     }
-    setSessionEntered(true);
+    commitSessionEntered(true);
     setSessionRestored(false);
     setError(null);
     // Same as connect(): record the entered session so the next load restores it — but
@@ -621,9 +654,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // session behind would make "Forget this device" a no-op — the next load would
     // silently re-enter the session the user just forgot.
     clearWalletSession();
-    setSessionEntered(false);
+    commitSessionEntered(false);
     setSessionRestored(false);
-    setAuthorizedAddress(null);
+    commitAuthorizedAddress(null);
     setChainId(null);
     setError(null);
     // Keep the discovered list (wallets are still installed) but drop the chosen
