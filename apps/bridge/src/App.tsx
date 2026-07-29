@@ -10,20 +10,31 @@ import { styles } from './components/styles';
 
 /** Auto-derive identity once per connected address (mirrors apps/web SessionEffect). */
 function SessionEffect() {
-  const { isConnected, address } = useWallet();
+  const { isConnected, address, sessionRestored } = useWallet();
   const { snAddress, deriveStatus, deriveIdentity } = useIdentity();
   // Trigger once when a new address connects and we don't yet have keys.
   useEffect(() => {
     if (!isConnected || !address) return;
     if (snAddress || deriveStatus.status !== 'idle') return;
+    // A session RESTORED across a page refresh had no user gesture behind it, so
+    // prompting here would open a personal_sign popup unbidden on every page load.
+    // The dashboard offers the sign button instead (see needsSign there).
+    if (sessionRestored) return;
     void deriveIdentity();
-  }, [isConnected, address, snAddress, deriveStatus.status, deriveIdentity]);
+  }, [isConnected, address, sessionRestored, snAddress, deriveStatus.status, deriveIdentity]);
   return null;
 }
 
 function ConnectedDashboard() {
-  const { address } = useWallet();
-  const { deriveStatus, deriveIdentity } = useIdentity();
+  const { address, sessionRestored } = useWallet();
+  const { snAddress, deriveStatus, deriveIdentity } = useIdentity();
+  // Connected but keyless, and nobody is going to derive for us: either a failed/rejected
+  // attempt, or a session restored across a refresh (which deliberately does NOT
+  // auto-prompt) — without this a restored session strands with no way to sign in. An idle
+  // CLICK-entered session is excluded on purpose: SessionEffect is already deriving, so a
+  // button here would invite a second `personal_sign` for work already in flight.
+  const needsSign =
+    !snAddress && (deriveStatus.status === 'error' || (deriveStatus.status === 'idle' && sessionRestored));
 
   return (
     <div style={styles.page}>
@@ -39,13 +50,14 @@ function ConnectedDashboard() {
       {deriveStatus.status === 'pending' && (
         <p style={{ ...styles.muted, marginBottom: '1rem' }}>Deriving identity…</p>
       )}
+      {/* The error itself is shown whenever there is one — gating it on `needsSign` swallowed
+          the message entirely once an identity already existed. */}
       {deriveStatus.status === 'error' && (
+        <div style={{ ...styles.statusBox('error'), marginBottom: '1rem' }}>{deriveStatus.message}</div>
+      )}
+      {needsSign && (
         <div style={{ marginBottom: '1rem' }}>
-          <div style={styles.statusBox('error')}>{deriveStatus.message}</div>
-          <button
-            onClick={() => void deriveIdentity()}
-            style={{ ...styles.primaryBtn, marginTop: '0.5rem' }}
-          >
+          <button onClick={() => void deriveIdentity()} style={styles.primaryBtn}>
             Sign to derive identity
           </button>
         </div>
