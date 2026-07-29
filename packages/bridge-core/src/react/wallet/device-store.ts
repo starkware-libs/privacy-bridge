@@ -22,6 +22,7 @@
 // wire values (bridge-sdk-refactor.md §1.1) — never rename them, only the
 // surrounding identifiers/comments.
 export const PMP_STORAGE_KEYS = [
+  'pmp.lastWallet', // entered-session marker (public EVM addr + wallet rdns) — session-store.ts
   'pmp.identity', // derived Starknet address + public key + viewing key
   'pmp.bids', // per-EVM-address derived-account history (non-secret metadata)
   'pmp.bidIndex', // next unused per-account index (non-secret counter)

@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WalletProvider } from './WalletProvider';
 import { useWallet } from './useWallet';
@@ -48,10 +48,17 @@ function controllableGlobal() {
 }
 
 beforeEach(() => {
+  // The abandoned connect() must not leave a recorded session behind (session-store.ts
+  // is unmocked here), and no leaked record may restore one.
+  localStorage.clear();
   resetProviderDiscovery();
   resolveRequestAccounts = null;
 });
 afterEach(() => {
+  // Unmount before clearing: no RTL auto-cleanup is configured in this repo, so a
+  // provider left mounted keeps its effects alive into the next test.
+  cleanup();
+  localStorage.clear();
   resetProviderDiscovery();
   delete (window as unknown as { ethereum?: unknown }).ethereum;
   vi.clearAllMocks();

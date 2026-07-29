@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WalletProvider } from './WalletProvider';
 import { useWallet } from './useWallet';
@@ -72,9 +72,17 @@ const PH_INFO = { uuid: 'uuid-ph', name: 'Phantom', rdns: 'app.phantom', icon: '
 const WC_INFO = { uuid: 'walletconnect', name: 'WalletConnect', rdns: 'walletconnect', icon: 'data:,wc' };
 
 beforeEach(() => {
+  // MUST clear: the connect()s below record a session (session-store.ts, unmocked
+  // here), and a leaked record would auto-restore in a later test that asserts the
+  // pre-click state (address null / canResume true) — an order-dependent flake.
+  localStorage.clear();
   resetProviderDiscovery();
 });
 afterEach(() => {
+  // Unmount before clearing: no RTL auto-cleanup is configured in this repo, so a
+  // provider left mounted keeps its effects alive into the next test.
+  cleanup();
+  localStorage.clear();
   resetProviderDiscovery();
   delete (window as unknown as { ethereum?: unknown }).ethereum;
   vi.clearAllMocks();

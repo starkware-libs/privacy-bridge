@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { WalletProvider } from './WalletProvider';
@@ -132,6 +132,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unmount before clearing: no RTL auto-cleanup is configured in this repo, so a
+  // provider left mounted keeps its effects alive into the next test.
+  cleanup();
   localStorage.clear();
   resetProviderDiscovery();
   resetWcMock();
@@ -244,7 +247,9 @@ describe('WalletProvider — disconnect / forget device', () => {
     const { resetWalletConnectProvider } = await import('./getWalletConnectProvider');
     expect(resetWalletConnectProvider).toHaveBeenCalled();
 
-    // No wallet-selection key written to localStorage.
+    // The entered session IS recorded (that is what survives a refresh — see
+    // session-restore.test.tsx), but disconnect must leave nothing behind: no session
+    // record and no wallet-selection key of any other shape.
     for (const key of Object.keys(localStorage)) {
       expect(key).not.toMatch(/walletconnect|selectedRdns|lastWallet/i);
     }
