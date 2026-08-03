@@ -597,9 +597,12 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   const defaultDest =
     evmCctpDestinations[defaultDestChainId] ?? evmCctpDestinations[IS_MAINNET ? 137 : 80002];
 
-  // Pool protocol fee in STRK (human units). Defaults to 4 STRK — the pool's
-  // get_fee_amount(). Override with the `DEPOSIT_FEE_ESTIMATE_STRK` env var.
-  const DEPOSIT_FEE_STRK = e.vars.DEPOSIT_FEE_ESTIMATE_STRK ?? '4';
+  // Pool protocol fee in STRK (human units) — the OFFLINE FALLBACK only. The pool
+  // itself is the source of truth: `fetchPoolFeeStrk()` (poolFee.ts) reads
+  // `get_fee_amount()` and consumers estimate from THAT, falling back here when the
+  // view is unreachable. Kept in step with the deployed pool (6 STRK) so the fallback
+  // can't under-reserve; override with the `DEPOSIT_FEE_ESTIMATE_STRK` env var.
+  const DEPOSIT_FEE_STRK = e.vars.DEPOSIT_FEE_ESTIMATE_STRK ?? '6';
   // STRK→USD price — only the OFFLINE FALLBACK for the deposit-fee display: the live
   // price is fetched at runtime (strkPrice.ts) and used when available. This static
   // value is a rough recent figure (STRK ≈ $0.05); override with `STRK_PRICE_USD`.
@@ -691,10 +694,11 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
     // Human-units cap on a single deposit; enforced in the UI (not on-chain).
     // Defaults to 100 USDC (#166). Fractions allowed down to the token's decimals.
     maxDeposit: e.vars.MAX_DEPOSIT || '100',
-    // Pool protocol fee in STRK (default 4 = the pool's get_fee_amount()).
+    // Pool protocol fee in STRK — the fallback for when `get_fee_amount()` can't be
+    // read (see DEPOSIT_FEE_STRK above).
     depositFeeStrk: DEPOSIT_FEE_STRK,
     // The STRK pool fee expressed in the deposit token (USDC) — STATIC fallback;
-    // IdentityContext recomputes it from the LIVE STRK price on mount.
+    // IdentityContext recomputes it from the LIVE pool fee + STRK price on mount.
     depositFeeEstimate: strkFeeToUsdc(DEPOSIT_FEE_STRK, Number(STRK_PRICE_USD)),
     // One-time account-DEPLOY fee mode (see DEPLOY_FEE_MODE above).
     deployFeeMode: DEPLOY_FEE_MODE,
