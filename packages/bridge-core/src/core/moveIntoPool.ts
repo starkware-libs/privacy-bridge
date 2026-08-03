@@ -134,8 +134,13 @@ async function waitForL2Commit(address: string, onStatus: (m: string) => void): 
 // that burns USDC + pays gas). The frozen MoveIntoPoolArgs deliberately omits an
 // explicit evmAddress — the provider is the single source of truth for the selected
 // account (matches the EIP-6963-pinned provider useWallet exposes). Prefers the
-// already-connected accounts (no prompt); falls back to a request if none.
-async function resolveFunder(provider: EthereumProvider): Promise<string | null> {
+// already-connected accounts (no prompt); falls back to a request if none — EXCEPT
+// under resume-only, where an unattended connect popup is the same defect class as an
+// unattended burn: the caller fails with "Connect a wallet…" instead.
+async function resolveFunder(
+  provider: EthereumProvider,
+  resumeOnly: boolean,
+): Promise<string | null> {
   const pick = (result: unknown): string | null =>
     Array.isArray(result) && typeof result[0] === 'string' ? result[0] : null;
   try {
@@ -144,6 +149,7 @@ async function resolveFunder(provider: EthereumProvider): Promise<string | null>
   } catch {
     // fall through to an explicit request
   }
+  if (resumeOnly) return null;
   try {
     return pick(await provider.request({ method: 'eth_requestAccounts' }));
   } catch {
@@ -158,6 +164,9 @@ interface FundDepositTokenArgs {
   amountWei: bigint;
   provider?: EthereumProvider;
   sourceChainId?: number;
+  // REQUIRED (not optional) so the compiler forces every call site to decide: a
+  // continuation must never start a burn.
+  resumeOnly: boolean;
   onStatus?: (s: string) => void;
   // Forwarded to fundFromMetaMask: surface the confirmed EVM burn (hash + explorer URL).
   onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
@@ -170,9 +179,10 @@ interface FundDepositTokenArgs {
     attestation: `0x${string}`;
     clearMintCursor: () => void;
   }) => void;
-  // FIX 1 (fold path): fired on RESUME when the CCTP nonce is already consumed ⟺ a prior
-  // atomic fold deposit already committed. The deposit step converges on completion.
-  onMintAlreadyConsumed?: () => void;
+  // Fired on RESUME when the CCTP nonce is already consumed: on a fold burn ⟺ the prior
+  // atomic deposit already committed; on a standalone burn only the mint landed. The
+  // deposit step converges on completion, or deposits what settled on the account.
+  onMintAlreadyConsumed?: (info: { foldBurn: boolean }) => void;
 }
 
 // Funds the derived account with the pool-deposit USDC per `funding`. Returns the
@@ -185,7 +195,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
     if (!args.provider) {
       throw new Error('No wallet connected — cannot fund the deposit from your own USDC.');
     }
-    const evmAddress = await resolveFunder(args.provider);
+    const evmAddress = await resolveFunder(args.provider, args.resumeOnly);
     if (!evmAddress) {
       throw new Error('Connect a wallet to fund the deposit from your own USDC.');
     }
@@ -197,6 +207,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
       amountWei: args.amountWei,
       onStatus: args.onStatus,
       sourceChainId: args.sourceChainId,
+      resumeOnly: args.resumeOnly,
       onBurned: args.onBurned,
       deferMint: args.deferMint,
       onMintFold: args.onMintFold,
@@ -236,6 +247,11 @@ export async function moveIntoPool(
   if (amountWei <= 0n) {
     throw new Error('Amount must be greater than zero.');
   }
+
+  // `resume` already means "this is a continuation" (the Continue button / the
+  // unattended watcher pass it; the Deposit button doesn't), so it is also the
+  // never-start-a-burn signal — `resume: false, resumeOnly: true` is not expressible.
+  const resumeOnly = resume === true;
 
   // De-dupe onBurned to at most once per burn hash (its documented once-per-burn contract).
   // fundFromMetaMask fires it on BOTH a fresh burn and a later RESUME of that same burn; a
@@ -326,10 +342,11 @@ export async function moveIntoPool(
   let mintFold:
     | { message: `0x${string}`; attestation: `0x${string}`; clearMintCursor: () => void }
     | undefined;
-  // Set (fold path only) when fundFromMetaMask's resume detects the CCTP nonce already
-  // consumed ⟺ a prior atomic fold deposit already committed. Drives the completion
-  // convergence below (no re-fold; balance cross-check).
+  // Set when fundFromMetaMask's resume detects the CCTP nonce already consumed. Drives
+  // the completion convergence below (no re-fold; balance cross-check); `…WasFold` carries
+  // the resumed burn's shape, which decides how much confirmation that check needs.
   let mintAlreadyConsumed = false;
+  let consumedBurnWasFold = false;
   let depositFundingBlock: number | undefined;
   let deployBlock: number | undefined;
   let accountDeployed = false;
@@ -379,6 +396,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
+        resumeOnly,
         onBurned: onBurnedOnce,
         onStatus: (m) => emit('deploy', 'running', m),
       });
@@ -616,6 +634,7 @@ export async function moveIntoPool(
         amountWei,
         provider,
         sourceChainId,
+        resumeOnly,
         onBurned: onBurnedOnce,
         onStatus: (m) => emit('deposit', 'running', m),
         // On the fold path defer the mint: fundFromMetaMask returns the attested bytes
@@ -628,8 +647,9 @@ export async function moveIntoPool(
         // FIX 1: fold-path resume where the CCTP nonce is already consumed (the prior
         // atomic fold deposit committed). fundFromMetaMask does NOT re-burn; we converge
         // on completion below via a balance cross-check instead of re-folding.
-        onMintAlreadyConsumed: () => {
+        onMintAlreadyConsumed: (info) => {
           mintAlreadyConsumed = true;
+          consumedBurnWasFold = info.foldBurn;
         },
       });
       funded = true;
@@ -678,31 +698,55 @@ export async function moveIntoPool(
       depositWei = liveBalance ?? fundedNetWei ?? amountWei;
     }
 
-    // FIX 1 — fold-path resume convergence. fundFromMetaMask fired onMintAlreadyConsumed
-    // because its resume detected the CCTP nonce already used on the SN MessageTransmitterV2.
-    // On the single-tx fold path the mint is folded INTO the atomic deposit tx, so a
-    // consumed nonce ⟺ that whole atomic deposit already committed (receive_message +
-    // approve + pool pull + apply_action succeed or revert together). Re-folding would
-    // re-submit receive_message with the spent nonce → the atomic multicall reverts
-    // ("Nonce already used") on every retry — the live-observed stuck resume with no
-    // Continue. Converge on completion, cross-checking the on-chain balance (defense in
-    // depth against a hypothetical mint-landed-but-not-deposited half state):
+    // FIX 1 — resume convergence. fundFromMetaMask fired onMintAlreadyConsumed because its
+    // resume detected the CCTP nonce already used on the SN MessageTransmitterV2. On the
+    // single-tx fold path the mint is folded INTO the atomic deposit tx, so a consumed
+    // nonce ⟺ that whole atomic deposit already committed (receive_message + approve +
+    // pool pull + apply_action succeed or revert together). Re-folding would re-submit
+    // receive_message with the spent nonce → the atomic multicall reverts ("Nonce already
+    // used") on every retry — the live-observed stuck resume with no Continue. A
+    // resume-only continue lands here on a STANDALONE burn too (it may never re-burn), so
+    // the balance cross-check below has to carry that weaker case as well:
     if (mintAlreadyConsumed) {
-      const settled = await readDepositTokenBalance(address);
-      if (settled <= 0n) {
-        // Funds already pulled into the pool by the prior atomic deposit → COMPLETE. The
-        // inflight BURN cursor was cleared inside fundFromMetaMask; drop any pool-deposit
-        // cursor too (the fold path records none, but a legacy one could linger) and emit
-        // the normal done terminal so the UI stops offering a doomed retry and shows
-        // completion (resolves the stuck-retry / missing-Continue UX).
+      // A consumed nonce proves the MINT landed; only fold ATOMICITY makes that proof of a
+      // completed DEPOSIT, so a standalone burn's swept-balance check gets the bounded
+      // re-poll (a mint that just landed can still read as swept, and converging then would
+      // report a false success on funds resting on the account). Fold keeps its single read
+      // (zero window). A residual exits at once; a read that throws never counts as swept,
+      // and a window with no successful read rethrows rather than claiming completion.
+      let settled: bigint | undefined;
+      let lastReadErr: unknown;
+      const settleDeadline = Date.now() + (consumedBurnWasFold ? 0 : FOLD_CONFIRM_TIMEOUT_MS);
+      for (let firstPoll = true; ; firstPoll = false) {
+        try {
+          settled = await readDepositTokenBalance(address);
+          if (settled > RESIDUAL_DUST_THRESHOLD_WEI) break;
+          if (consumedBurnWasFold) break;
+        } catch (err) {
+          lastReadErr = err;
+          settled = undefined;
+        }
+        if (Date.now() >= settleDeadline) break;
+        if (firstPoll) emit('deposit', 'running', 'Confirming your deposit landed…');
+        await sleep(FOLD_CONFIRM_POLL_MS);
+      }
+      if (settled === undefined) throw lastReadErr;
+      if (settled <= RESIDUAL_DUST_THRESHOLD_WEI) {
+        // Funds already pulled into the pool → COMPLETE. The inflight BURN cursor was
+        // cleared inside fundFromMetaMask; drop any pool-deposit cursor too and emit the
+        // normal done terminal so the UI shows completion, not a doomed retry. A fully
+        // successful deposit can leave dust behind, hence the threshold over a bare 0.
         clearPendingPoolDeposit(address);
         depositWei = fundedNetWei ?? amountWei;
         emit('deposit', 'done', 'Already deposited into pool.');
         return;
       }
-      // Nonce used but funds still sit on the account — shouldn't happen on a PURE atomic
-      // fold (mint+deposit are one tx), but if it does, deposit ONLY that balance with NO
-      // receive_message re-fold (mintFold stays undefined → the non-fold deposit below).
+      // Funds still rest on the account (the standalone half-state; an atomic fold never
+      // leaves them). Deposit ONLY that balance, with no receive_message re-fold (mintFold
+      // stays undefined). The cursor skipped above was justified by fold atomicity, which
+      // does not hold here — record it, else a depositToPool failure strands the funds
+      // with no cursor at all.
+      recordPendingPoolDeposit(address, settled);
       depositWei = settled;
     }
 

@@ -224,7 +224,9 @@ import {
   selectEip1559Fees,
   isNonceAlreadyUsedError,
 } from './depositIn';
-import { isTransientError } from './errors';
+import { isNonRetryable, isTransientError } from './errors';
+import { createWalletClient } from 'viem';
+import { sendCalls } from 'viem/actions';
 import { fetchForwardMaxFee, assertAboveForwardFloor } from './cctpFees';
 
 const mFetchForwardMaxFee = vi.mocked(fetchForwardMaxFee);
@@ -1905,5 +1907,147 @@ describe('isNonceAlreadyUsedError', () => {
     ]) {
       expect(isNonceAlreadyUsedError(new Error(msg))).toBe(false);
     }
+  });
+});
+
+// `resumeOnly` — a CONTINUE (watcher / Continue button) finishes an already-burned
+// deposit and may never start one. Enforced at the fresh-path entry, so approve,
+// depositForBurn, wallet_sendCalls and the resolveSource chain switch are all
+// unreachable under the flag.
+describe('fundFromMetaMask — resumeOnly continue', () => {
+  const usedNonce = (): void => {
+    callContract.mockImplementation(async (req) =>
+      req.entrypoint === 'is_nonce_used' ? ['0x1'] : ['0', '0'],
+    );
+  };
+
+  // The live cursor population: every cursor the app writes today is a FOLD cursor, so
+  // the primary regression risk is resumeOnly changing that path at all.
+  it('fold cursor + used nonce: resumeOnly behaves exactly like the fold path alone', async () => {
+    usedNonce();
+    const run = async (resumeOnly: boolean): Promise<Record<string, unknown>> => {
+      localStorage.clear();
+      vi.clearAllMocks();
+      seedInflightCursor({
+        burnTx: '0x0ab12cd34e',
+        sourceDomain: AMOY.domain,
+        amountWei: AMOUNT.toString(),
+        snRecipient: SN_RECIPIENT,
+        evmChainId: 80002,
+        fold: true,
+      });
+      const onMintFold = vi.fn();
+      const onMintAlreadyConsumed = vi.fn();
+      const net = await fundFromMetaMask({
+        evmAddress: EVM_ADDRESS,
+        snRecipient: SN_RECIPIENT,
+        provider: ethProvider,
+        amountWei: AMOUNT,
+        deferMint: true,
+        resumeOnly,
+        onMintFold,
+        onMintAlreadyConsumed,
+      });
+      return {
+        net,
+        consumed: onMintAlreadyConsumed.mock.calls,
+        folds: onMintFold.mock.calls.length,
+        writes: writeContract.mock.calls.length,
+        mints: managerExecute.mock.calls.length,
+        attests: waitForAttestation.mock.calls.length,
+        cursor: localStorage.getItem(INFLIGHT_DEPOSIT_KEY),
+      };
+    };
+
+    const foldAlone = await run(false);
+    expect(await run(true)).toEqual(foldAlone);
+    // …and that shared outcome is the convergence: no burn, no mint, cursor cleared.
+    expect(foldAlone).toMatchObject({
+      net: AMOUNT,
+      consumed: [[{ foldBurn: true }]],
+      folds: 0,
+      writes: 0,
+      mints: 0,
+      cursor: '{}',
+    });
+  });
+
+  // The upgrade-window population: a cursor with no `fold` field classifies standalone.
+  // Without resumeOnly that falls through to a fresh re-burn — which a continue may not do.
+  it('standalone cursor + used nonce: converges (foldBurn false) instead of re-burning', async () => {
+    usedNonce();
+    seedInflightCursor({
+      burnTx: '0x0ab12cd34e',
+      sourceDomain: AMOY.domain,
+      amountWei: AMOUNT.toString(),
+      snRecipient: SN_RECIPIENT,
+      evmChainId: 80002,
+    });
+
+    const onMintAlreadyConsumed = vi.fn();
+    const net = await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      resumeOnly: true,
+      onMintAlreadyConsumed,
+    });
+
+    // The caller is told the mint landed on a STANDALONE burn — funds may rest on the
+    // account, so it must confirm rather than assume the deposit completed.
+    expect(onMintAlreadyConsumed).toHaveBeenCalledWith({ foldBurn: false });
+    expect(net).toBe(AMOUNT);
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(managerExecute).not.toHaveBeenCalled();
+  });
+
+  it('no cursor: throws NOTHING_TO_RESUME without touching the wallet (the F1 regression)', async () => {
+    const err = await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      resumeOnly: true,
+    }).catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ code: 'NOTHING_TO_RESUME' });
+    // No EVM client, no chain switch, no writes, no batch — and no account prompt.
+    expect(createWalletClient).not.toHaveBeenCalled();
+    expect(switchChain).not.toHaveBeenCalled();
+    expect(writeContract).not.toHaveBeenCalled();
+    expect(sendCalls).not.toHaveBeenCalled();
+    expect(
+      ethProvider.request.mock.calls.some(
+        ([{ method }]: [{ method: string }]) => method === 'eth_requestAccounts',
+      ),
+    ).toBe(false);
+  });
+
+  it('NOTHING_TO_RESUME is non-retryable and non-transient (runStep must not spin on it)', async () => {
+    const err = (await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      resumeOnly: true,
+    }).catch((e: unknown) => e)) as Error;
+
+    expect(isNonRetryable(err)).toBe(true);
+    expect(isTransientError(err)).toBe(false);
+    // Independent of the brand: the message alone must not read as transient either.
+    expect(isTransientError(new Error(err.message))).toBe(false);
+  });
+
+  it('default args (no resumeOnly): a missing cursor still runs the fresh burn', async () => {
+    await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+    });
+
+    expect(writeContract.mock.calls.some((c) => c[0].functionName === 'approve')).toBe(true);
+    expect(writeContract.mock.calls.some((c) => c[0].functionName === 'depositForBurn')).toBe(true);
   });
 });
