@@ -621,3 +621,49 @@ describe('Bugbot round 4 — the recovery must not undo itself', () => {
     expect(fromBlock).toBeLessThan(4_000n);
   });
 });
+
+describe('the anchor read is bounded, silent, and never breaks the burn', () => {
+  it('survives a REJECTING head read on the happy path without an unhandled rejection', async () => {
+    // The anchor is read un-awaited before the submit, so on the happy path nothing ever
+    // looks at it — a rejection there must stay silent rather than surfacing as a console
+    // error. (This held for the previous Promise.race form too: a race attaches handlers to
+    // every racer, so a loser's rejection was already handled. Kept as a standing guard on
+    // the property, since it is easy to lose when this read is next touched.)
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // Reject on a LATER macrotask, so any timeout branch settles first — the exact
+      // ordering that leaves the loser unhandled.
+      getBlockNumber.mockImplementation(
+        () =>
+          new Promise((_resolve, reject) => {
+            setTimeout(() => reject(new Error('rpc down')), 0);
+          }),
+      );
+      const submit = vi.fn(async () => BURN_TX);
+
+      await expect(runReturn(submit)).resolves.toMatchObject({ amount: AMOUNT });
+
+      // Let the rejection land and the unhandled-rejection check run.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('records the anchor when the head read succeeds', async () => {
+    // The positive half: a healthy read is what makes a later no-match conclusive, so the
+    // burn path must actually persist it — and it must do so DETERMINISTICALLY, not by
+    // winning a microtask race against the mocked `sleep` this file installs.
+    getBlockNumber.mockResolvedValue(4_321n);
+    const submit = vi.fn(async () => {
+      throw new Error('relayer did not confirm an on-chain transaction');
+    });
+
+    await runReturn(submit).catch(() => undefined);
+
+    expect(readPendingReturnBurn(EVM_ADDRESS)?.fromBlock).toBe('4321');
+  });
+});

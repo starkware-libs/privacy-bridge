@@ -471,6 +471,30 @@ const AMBIGUOUS_RESOLVE_INTERVAL_MS = 5_000;
 // always lands and a hung one is dropped rather than believed.
 const ANCHOR_READ_TIMEOUT_MS = 5_000;
 
+// Read the chain head for the recovery scan's lower bound, bounded and NEVER rejecting.
+//
+// Written as one promise rather than `Promise.race([read, timer])` for two reasons, neither
+// of which is unhandled rejections — a race attaches handlers to EVERY racer, so a losing
+// racer's later rejection is already handled (verified empirically, not just from the spec):
+//   - the timer is CLEARED once the read wins, instead of leaving a 5s handle pending on
+//     every burn; and
+//   - which branch settles first is explicit, rather than depending on microtask ordering
+//     between two promise chains — under test, where the shared `sleep` is mocked to a
+//     no-op, a race would resolve by luck and the anchor would be captured only sometimes.
+function readAnchorBlock(client: PublicClient): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ANCHOR_READ_TIMEOUT_MS);
+    const settle = (value: string | undefined) => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    client
+      .getBlockNumber()
+      .then((b) => settle(b.toString()))
+      .catch(() => settle(undefined));
+  });
+}
+
 // Ask the chain what happened to a burn whose submitter threw, polling while the answer is
 // still "don't know". Returns the burn tx hash if it landed, 'never-landed' if the batch
 // can no longer execute (funds untouched — the original error stands and a retry is safe),
@@ -866,12 +890,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // costs only the ability to prove a NEGATIVE (the window becomes estimated) — a strictly
   // safer trade than a confident window in the wrong place. Timing out a read is also safe
   // in a way timing out the submit is not: nothing has moved yet.
-  const anchorBlock = Promise.race([
-    evmClientForSource(source)
-      .getBlockNumber()
-      .then((b) => b.toString()),
-    sleep(ANCHOR_READ_TIMEOUT_MS).then(() => undefined),
-  ]).catch(() => undefined);
+  const anchorBlock = readAnchorBlock(evmClientForSource(source));
 
   let burnTx: string;
   try {
