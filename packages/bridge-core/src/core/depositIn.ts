@@ -42,6 +42,7 @@ import type { Account } from 'starknet';
 
 import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
+import { markNonRetryable } from './errors';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
 import {
@@ -626,6 +627,10 @@ export interface FundFromMetaMaskArgs {
   // present in EVM_CCTP_SOURCES, MetaMask is switched to it before the burn.
   // Omitting preserves the existing auto-detect + default-fallback behavior.
   sourceChainId?: number;
+  // CONTINUE ONLY (unattended watcher / Continue button): finish an already-burned
+  // deposit, never start one. With nothing to resume this throws NOTHING_TO_RESUME
+  // instead of falling through to a fresh approve + depositForBurn.
+  resumeOnly?: boolean;
   // PART B (single-tx deposit-in fold): when true, the Starknet CCTP mint
   // (receive_message) is NOT submitted as its own tx here — instead the attested
   // {message, attestation} are handed back via onMintFold so the caller folds
@@ -645,14 +650,16 @@ export interface FundFromMetaMaskArgs {
     attestation: `0x${string}`;
     clearMintCursor: () => void;
   }) => void;
-  // FIX 1 (fold path only): fired on RESUME when the CCTP nonce is already consumed on
-  // the SN MessageTransmitterV2 ⟺ the prior atomic fold deposit already committed. When
-  // this fires, fundFromMetaMask does NOT re-burn and returns the already-landed net;
-  // the caller converges on completion (balance cross-check) instead of re-folding the
-  // spent nonce (which would revert "Nonce already used" every retry). Never fires on the
-  // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
-  // fresh-re-burn behavior.
-  onMintAlreadyConsumed?: () => void;
+  // FIX 1: fired on RESUME when the CCTP nonce is already consumed on the SN
+  // MessageTransmitterV2. When this fires, fundFromMetaMask does NOT re-burn and returns
+  // the already-landed net; the caller converges on completion (balance cross-check)
+  // instead of re-folding the spent nonce (which would revert "Nonce already used" every
+  // retry). Fires for a fold burn, or for ANY burn under resumeOnly; a standalone burn
+  // without resumeOnly keeps the historical fresh-re-burn behavior.
+  // `foldBurn` reports the shape of the burn being resumed (from the cursor): a fold
+  // deposit is atomic, so a swept balance proves completion in one read; a standalone
+  // mint can leave the funds resting on the account, which the caller must confirm.
+  onMintAlreadyConsumed?: (info: { foldBurn: boolean }) => void;
   // Fired when the source-chain CCTP burn is confirmed — on a FRESH burn (path 3) or when a
   // prior run's burn is RESUMED from the cursor (path 2) — with the burn tx hash + a
   // source-chain block-explorer URL for it (when the source config carries one). Lets the
@@ -894,7 +901,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     burnTx: string,
     sourceDomain: number,
     recipient: string,
-    opts?: { detectAlreadyMinted?: boolean; foldBurn?: boolean },
+    opts?: { detectAlreadyMinted?: boolean; foldBurn?: boolean; resumeOnly?: boolean },
   ): Promise<'minted' | 'already-minted' | 'already-deposited' | 'deferred'> => {
     try {
       const { message, attestation } = await waitForAttestation(burnTx, {
@@ -911,7 +918,8 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       // the derived account after that prior run, so the balance is back to zero —
       // but is_nonce_used is monotonic once receive_message lands, so a `true`
       // read PROVES the mint already happened. The cursor is provably dead: clear
-      // it and let the caller fall through to a FRESH burn for the CURRENT amount.
+      // it, then either converge (below) or — a standalone burn with no resumeOnly —
+      // fall through to a FRESH burn for the CURRENT amount.
       if (opts?.detectAlreadyMinted && (await isCctpMessageNonceUsed(message))) {
         clearInflightDeposit(evmAddress);
         // FIX 1 — FOLD path (deferMint): the mint rides INSIDE the atomic deposit tx, so a
@@ -933,8 +941,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         // value that ALREADY reached the pool — a double-spend (Bugbot HIGH). A legacy
         // cursor has no `fold` field ⟹ standalone (it predates the fold feature), which is
         // the correct historical classification.
-        if (opts?.foldBurn) {
-          args.onMintAlreadyConsumed?.();
+        //
+        // Resume-only converges too, on EITHER burn shape: it may never start a fresh
+        // burn, and a standalone mint can leave funds resting on the account, so the
+        // caller finishes with a deposit-only of whatever settled.
+        if (opts?.foldBurn || opts?.resumeOnly) {
+          if (!opts.foldBurn) onStatus?.('Prior deposit already minted — finishing it.');
+          args.onMintAlreadyConsumed?.({ foldBurn: opts.foldBurn === true });
           return 'already-deposited';
         }
         return 'already-minted';
@@ -1056,7 +1069,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       inflight.snRecipient,
       // foldBurn from the PERSISTED cursor (how the burn began), not live config —
       // a consumed nonce on a fold burn must converge, never re-burn (Bugbot HIGH).
-      { detectAlreadyMinted: true, foldBurn: inflight.fold === true },
+      { detectAlreadyMinted: true, foldBurn: inflight.fold === true, resumeOnly: args.resumeOnly },
     );
     if (result === 'minted' || result === 'deferred' || result === 'already-deposited') {
       // #229: the mint already landed (or, on the PART B fold, WILL land inside the
@@ -1077,6 +1090,18 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     }
     // 'already-minted' (non-fold): the dead cursor was cleared inside finishAttestAndMint.
     onStatus?.('Prior deposit already minted — starting a fresh deposit…');
+  }
+
+  // RESUME-ONLY STOP. Every EVM write and wallet prompt in this module lives past this
+  // line (approve/depositForBurn, wallet_sendCalls, the resolveSource chain switch), so
+  // one guard here makes "a continue can never start a burn" true by construction. A
+  // caller that continues unattended must fail here instead of prompting the wallet.
+  if (args.resumeOnly) {
+    const err = new Error('There is no in-flight deposit to continue for this wallet.') as Error & {
+      code: 'NOTHING_TO_RESUME';
+    };
+    err.code = 'NOTHING_TO_RESUME';
+    throw markNonRetryable(err);
   }
 
   // (3) FRESH PATH.
