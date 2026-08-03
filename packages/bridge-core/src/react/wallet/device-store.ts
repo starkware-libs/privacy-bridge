@@ -29,6 +29,7 @@ export const PMP_STORAGE_KEYS = [
   'pmp.inflightDeposit', // in-flight CCTP deposit-in resume cursor
   'pmp.inflightPoolDeposit', // in-flight pool-deposit resume cursor (poolDepositCursor; Row 1 double-burn guard)
   'pmp.inflightReturn', // in-flight return-funds resume cursor (returnIn.INFLIGHT_RETURN_KEY)
+  'pmp.pendingReturnBurn', // submitted-but-unconfirmed return burn (pendingReturnBurn.PENDING_RETURN_BURN_KEY)
   'pmp.inflightCashOut', // in-flight cash-out (Leg B) resume cursor (post-burn, pre-Polygon-mint)
   'pmp.closed', // app-side: per-EVM-address closed-position history cache (deposit wallets + P&L) — history-store.ts
   'pmp.chainSync', // app-side: per-EVM-address chain-scan timestamps — chain-sync-store.ts
