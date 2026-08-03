@@ -60,6 +60,7 @@ import {
 } from './cctpFees';
 import { switchChain, type EthereumProvider } from '../lib/ethereum';
 import { hasAnyInflightReturn } from './returnIn';
+import { hasAnyPendingReturnBurn } from './pendingReturnBurn';
 import { hasAnyInflightBurn } from './account-store';
 import { assertStorageWritable } from './storageProbe';
 
@@ -430,7 +431,17 @@ function hasResumableRecordGeneric(raw: string): boolean {
 // Cheap synchronous localStorage reads; safe to call from render / a switch guard.
 export function hasAnyInflightTransfer(): boolean {
   // Strict, known kinds first (unchanged semantics).
-  if (hasAnyInflightDeposit() || hasAnyInflightBurn() || hasAnyInflightReturn()) return true;
+  // hasAnyPendingReturnBurn covers the submitted-but-unconfirmed return burn, whose store
+  // is NOT named pmp.inflight* — so neither the strict readers nor the generic scan below
+  // would otherwise see it, and a switch could wipe the only handle on a live burn.
+  if (
+    hasAnyInflightDeposit() ||
+    hasAnyInflightBurn() ||
+    hasAnyInflightReturn() ||
+    hasAnyPendingReturnBurn()
+  ) {
+    return true;
+  }
 
   // Generic scan for ANY other inflight cursor key (forward-compat). The three
   // strictly-validated kinds are already handled above; skip them here so their

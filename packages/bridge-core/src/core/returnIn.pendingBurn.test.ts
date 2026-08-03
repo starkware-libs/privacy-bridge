@@ -68,6 +68,7 @@ vi.mock('./config', async (importOriginal) => {
 
 import { config } from './config';
 import { isNonRetryable } from './errors';
+import { hasAnyInflightTransfer } from './depositIn';
 import {
   returnBurnToPool,
   recoverPendingReturnBurn,
@@ -76,6 +77,7 @@ import {
 } from './returnIn';
 import {
   PENDING_RETURN_BURN_KEY,
+  hasAnyPendingReturnBurn,
   readPendingReturnBurn,
   writePendingReturnBurn,
   type PendingReturnBurn,
@@ -384,7 +386,10 @@ describe('recoverPendingReturnBurn (the sweep entry point)', () => {
     await recoverPendingReturnBurn(EVM_ADDRESS);
 
     const { fromBlock, toBlock } = getLogs.mock.calls[0][0] as { fromBlock: bigint; toBlock: bigint };
-    expect(fromBlock).toBe(41_000_000n);
+    // Starts just BELOW the anchor: the pre-submit head read races the submit, so the margin
+    // absorbs an answer that arrived after the burn's own block.
+    expect(fromBlock).toBeLessThan(41_000_000n);
+    expect(fromBlock).toBeGreaterThan(40_990_000n);
     // ~12 min at the fastest assumed block time, plus margin — thousands, not millions.
     expect(toBlock - fromBlock).toBeLessThan(10_000n);
   });
@@ -569,5 +574,50 @@ describe('Bugbot round 3 — three ways a guard could be wrongly released', () =
     spy.mockRestore();
     expect(readPendingReturnBurn(EVM_ADDRESS)).toBeNull();
     expect(readCursor()).toBeUndefined();
+  });
+});
+
+describe('Bugbot round 4 — the recovery must not undo itself', () => {
+  it('keeps the pending record until the return ENDS, not until the cursor is written', async () => {
+    // A cursor can still be dropped downstream (the stale-cursor re-validation nulls one
+    // whose wallet looks full — which a lagging RPC reports right after a burn mines).
+    // Retiring the only other handle at write time would make that drop unrecoverable.
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord());
+    getLogs.mockResolvedValue([burnLog()]);
+
+    const { resumable, stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(resumable).toMatchObject({ burnTx: BURN_TX });
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+    // ...but a resolved burn is NOT an open question — the sweep must not read it as one.
+    expect(stillPending).toBe(false);
+  });
+
+  it('is visible to the network-switch guard (its key is outside pmp.inflight*)', async () => {
+    // A switch disconnects and wipes pmp.* state. For an unresolved submission that means
+    // losing the only handle on a burn that may still be mining, so the guard has to see
+    // this store — nothing in the pmp.inflight* naming can infer it.
+    expect(hasAnyPendingReturnBurn()).toBe(false);
+    expect(hasAnyInflightTransfer()).toBe(false);
+
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord());
+
+    expect(hasAnyPendingReturnBurn()).toBe(true);
+    // The composed guard is what the switch actually consults — asserting only the helper
+    // would pass even with the store left unwired, which is exactly how this shipped.
+    expect(hasAnyInflightTransfer()).toBe(true);
+  });
+
+  it('scans BELOW the anchor so a late head read cannot skip past the burn', async () => {
+    // The anchor read races the submit: a slow answer reports a height already past the
+    // burn's block. Starting exactly at the anchor would scan above it, find nothing, and
+    // past the deadline call a landed burn never-landed.
+    getBlockNumber.mockResolvedValue(5_000n);
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ fromBlock: '4000' }));
+
+    await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    const { fromBlock } = getLogs.mock.calls[0][0] as { fromBlock: bigint };
+    expect(fromBlock).toBeLessThan(4_000n);
   });
 });

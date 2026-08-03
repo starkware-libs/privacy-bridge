@@ -229,6 +229,17 @@ export function clearPendingReturnBurn(evmAddress: string): void {
   }
 }
 
+// Does ANY address on this device hold an unresolved submission?
+//
+// FUND-SAFETY: this store sits OUTSIDE the `pmp.inflight*` naming the switch guard's generic
+// scan walks, and it is deliberately not a cursor — so nothing else can infer it. A network
+// switch disconnects and wipes pmp.* state, which for an unresolved submission means losing
+// the only handle on a burn that may be mining; the guard has to see this store to refuse
+// that switch. Cheap synchronous read; safe to call from render or a guard.
+export function hasAnyPendingReturnBurn(): boolean {
+  return listPendingReturnBurns().length > 0;
+}
+
 // All VALID pending records on this device, paired with the EVM address that keys each
 // (needed to clear/promote it) — the sweep entry point, mirroring listInflightReturns.
 export function listPendingReturnBurns(): Array<{
@@ -359,8 +370,13 @@ function scanWindow(
       // exact: a clean no-match here proves nothing and must never release the guard.
       return { fromBlock: head, toBlock: head, exact: false };
     }
+    // Margin on BOTH sides. The lower one matters most: the anchor read races the submit, so
+    // a slow response can report a height already PAST the burn's block. Starting exactly at
+    // the anchor would then scan above the burn, find nothing, and — past the deadline —
+    // call it never-landed. Backing off keeps the window over the burn.
+    const lower = anchor > SCAN_MARGIN_BLOCKS ? anchor - SCAN_MARGIN_BLOCKS : 0n;
     const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
-    return { fromBlock: anchor, toBlock: upper > head ? head : upper, exact: true };
+    return { fromBlock: lower, toBlock: upper > head ? head : upper, exact: true };
   }
 
   // Estimated: walk back far enough to plausibly cover the submit, bounded by the lookback.

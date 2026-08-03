@@ -421,9 +421,15 @@ async function promoteLandedPendingBurn(
   // that hash and leave the run stuck on the unresolved-submission guard, blocking the very
   // recovery this function just completed. The fresh path already takes the same line: it
   // warns and carries on when its post-burn cursor write misses.
-  const persisted = readInflightReturn(evmAddress) !== null;
-  if (persisted) clearPendingReturnBurn(evmAddress);
-  return { record, persisted };
+  //
+  // The pending record is deliberately NOT cleared here, even on a successful write. A
+  // cursor can still be dropped downstream — the stale-cursor re-validation nulls one whose
+  // wallet looks full, which a lagging RPC can report right after the burn mines. Retiring
+  // the only other handle at write time would make that drop unrecoverable: both records
+  // gone for a burn that did happen. It is retired instead when the burn's lifecycle ENDS
+  // (clearReturnRecords), and the next call's cursor-already-exists branch above sweeps up
+  // the ordinary case.
+  return { record, persisted: readInflightReturn(evmAddress) !== null };
 }
 
 // Public recovery entry point: resolve any submitted-but-unconfirmed return burn on this
@@ -440,7 +446,11 @@ export async function recoverPendingReturnBurn(
   const promoted = await promoteLandedPendingBurn(evmAddress, opts);
   return {
     resumable: promoted?.record ?? null,
-    stillPending: readPendingReturnBurn(evmAddress) !== null,
+    // A record that outlives a successful PROMOTION is bookkeeping, not an open question:
+    // that burn is resolved and resumable, and the record is only held until the return
+    // completes. Reporting it as pending would tell the sweep "we still can't tell" about a
+    // burn we just proved — so only an UNRESOLVED record counts.
+    stillPending: promoted === null && readPendingReturnBurn(evmAddress) !== null,
   };
 }
 
@@ -455,6 +465,11 @@ const DEFAULT_BATCH_DEADLINE_MS = 600_000;
 // runs out stays in the pending record for the app's sweep / the next return attempt.
 const AMBIGUOUS_RESOLVE_ATTEMPTS = 12;
 const AMBIGUOUS_RESOLVE_INTERVAL_MS = 5_000;
+
+// How long the pre-submit chain-head read may take before its answer is discarded. Comfortably
+// above a healthy RPC round-trip and far below the time a burn needs to mine, so a normal read
+// always lands and a hung one is dropped rather than believed.
+const ANCHOR_READ_TIMEOUT_MS = 5_000;
 
 // Ask the chain what happened to a burn whose submitter threw, polling while the answer is
 // still "don't know". Returns the burn tx hash if it landed, 'never-landed' if the batch
@@ -844,10 +859,19 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // burn, it just can't prove the absence of one.
   // Anchored on the BURN chain (source), not Polygon: the scan queries that chain, so a
   // height from a different one would be meaningless.
-  const anchorBlock = evmClientForSource(source)
-    .getBlockNumber()
-    .then((b) => b.toString())
-    .catch(() => undefined);
+  //
+  // BOUNDED, because a LATE answer is worse than none: this read races the submit, so a
+  // response that arrives long after the burn mined reports a height past it, and an anchor
+  // above the burn makes the window miss it. Dropping a slow read leaves no anchor, which
+  // costs only the ability to prove a NEGATIVE (the window becomes estimated) — a strictly
+  // safer trade than a confident window in the wrong place. Timing out a read is also safe
+  // in a way timing out the submit is not: nothing has moved yet.
+  const anchorBlock = Promise.race([
+    evmClientForSource(source)
+      .getBlockNumber()
+      .then((b) => b.toString()),
+    sleep(ANCHOR_READ_TIMEOUT_MS).then(() => undefined),
+  ]).catch(() => undefined);
 
   let burnTx: string;
   try {
@@ -1166,7 +1190,13 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // amount, not an absolute read: dust (remaining < frozen) means the burn landed → trust
   // the cursor and resume; only "funds still fully present" (remaining ≈ the frozen amount,
   // within a small dust tolerance) proves a never-committed burn worth resetting.
-  if (cursor && readReturnableBalance) {
+  //
+  // SKIPPED for a cursor promoted THIS run: that one carries an on-chain DepositForBurn we
+  // just matched on our own commitment, which is direct proof the burn committed. This check
+  // is a balance HEURISTIC, and its input is exactly the read most likely to lag moments
+  // after a burn mines — so letting it overrule the proof would drop a cursor we know is
+  // good and send the run to the fresh path against a stale balance.
+  if (cursor && readReturnableBalance && !promoted) {
     const remaining = await readReturnableBalance();
     const frozen = BigInt(cursor.amount);
     if (remaining + STALE_RETURN_DUST_TOLERANCE >= frozen) {
