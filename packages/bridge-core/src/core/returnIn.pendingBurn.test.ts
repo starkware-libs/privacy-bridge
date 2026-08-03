@@ -9,10 +9,12 @@
 // record that a burn had ever happened: a retry read an empty wallet ("nothing to return"),
 // a reload found no cursor ("nothing to recover"), and the funds stayed burned-but-unclaimed.
 //
-// The fix records the submission at the moment the relayer accepts it, then asks the CHAIN
-// what happened (our own DepositForBurn, matched on the commitment we put in hookData).
-// These tests pin all four outcomes — landed / never-landed / undecidable / unreadable —
-// and, just as importantly, that an UNRESOLVED submission BLOCKS a second burn.
+// The fix asks the CHAIN what happened instead of guessing: on a submitter throw it scans
+// for our own DepositForBurn, matched on the commitment we put in hookData. Everything the
+// scan needs is already in returnBurnToPool's own arguments, so no transport change is
+// involved and an unmodified submitter is fully covered. These tests pin all four outcomes
+// — landed / never-landed / undecidable / unreadable — and, just as importantly, that an
+// UNRESOLVED submission BLOCKS a second burn.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -59,7 +61,6 @@ import {
   recoverPendingReturnBurn,
   INFLIGHT_RETURN_KEY,
   type ReturnBurnCall,
-  type GaslessBatchSubmission,
 } from './returnIn';
 import {
   PENDING_RETURN_BURN_KEY,
@@ -124,14 +125,11 @@ function pendingRecord(overrides: Partial<PendingReturnBurn> = {}): PendingRetur
     inboundAnonymizer: config.inboundAnonymizerAddress,
     submittedAtMs: Date.now(),
     deadlineMs: Date.now() + 600_000,
-    transactionID: 'relayer-tx-1',
     ...overrides,
   };
 }
 
-function runReturn(submit: (calls: ReturnBurnCall[], hooks?: {
-  onSubmitted?: (s: GaslessBatchSubmission) => void;
-}) => Promise<string>) {
+function runReturn(submit: (calls: ReturnBurnCall[]) => Promise<string>) {
   return returnBurnToPool({
     accountIndex: ACCOUNT_INDEX,
     amount: AMOUNT,
@@ -159,11 +157,10 @@ afterEach(() => localStorage.clear());
 
 describe('a submitted return burn whose outcome the client never observed', () => {
   it('RECOVERS the burn from chain when the submitter throws AFTER the relayer accepted it', async () => {
-    // The exact incident: the relayer took the batch (so onSubmitted fires), the status
-    // poll then gave up, and the batch mined anyway.
+    // The exact incident: the relayer took the batch, its status poll then gave up, and the
+    // batch mined anyway.
     getLogs.mockResolvedValue([burnLog()]);
-    const submit = vi.fn(async (_calls, hooks) => {
-      hooks?.onSubmitted?.({ transactionID: 'relayer-tx-1', deadlineMs: Date.now() + 600_000 });
+    const submit = vi.fn(async () => {
       throw new Error('relayer did not confirm an on-chain transaction');
     });
 
@@ -180,25 +177,10 @@ describe('a submitted return burn whose outcome the client never observed', () =
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
-  it('rethrows the ORIGINAL error and clears the record once the batch deadline has passed', async () => {
-    // No matching burn and the batch can no longer execute ⇒ the funds never moved, so the
-    // honest answer is the submitter's own error and a retry is safe.
-    const original = new Error('relayer did not confirm an on-chain transaction');
-    const submit = vi.fn(async (_calls, hooks) => {
-      hooks?.onSubmitted?.({ transactionID: 'relayer-tx-1', deadlineMs: Date.now() - 600_000 });
-      throw original;
-    });
-
-    await expect(runReturn(submit)).rejects.toThrow(original);
-    expect(readPendingReturnBurn(EVM_ADDRESS)).toBeNull();
-    expect(readCursor()).toBeUndefined();
-  });
-
   it('reports an auto-recovering, NON-auto-retryable error while the outcome is undecidable', async () => {
     // Not on chain yet, deadline not passed: the batch may still mine. Nothing may
     // automatically re-submit, but the record must survive so a later attempt resolves it.
-    const submit = vi.fn(async (_calls, hooks) => {
-      hooks?.onSubmitted?.({ transactionID: 'relayer-tx-1', deadlineMs: Date.now() + 600_000 });
+    const submit = vi.fn(async () => {
       throw new Error('relayer did not confirm an on-chain transaction');
     });
 
@@ -214,8 +196,7 @@ describe('a submitted return burn whose outcome the client never observed', () =
     // An RPC outage is not evidence. Even past the deadline, a failed scan must not clear
     // the record — clearing it would invite a second burn on the strength of a 429.
     getLogs.mockRejectedValue(new Error('HTTP 429 rate limited'));
-    const submit = vi.fn(async (_calls, hooks) => {
-      hooks?.onSubmitted?.({ transactionID: 'relayer-tx-1', deadlineMs: Date.now() - 600_000 });
+    const submit = vi.fn(async () => {
       throw new Error('relayer did not confirm an on-chain transaction');
     });
 
@@ -223,15 +204,50 @@ describe('a submitted return burn whose outcome the client never observed', () =
     expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
   });
 
-  it('leaves a PRE-submit throw exactly as it was (no record, original error)', async () => {
-    // onSubmitted never fired ⇒ the relayer never took the batch ⇒ there is no burn to find.
-    const original = new Error('builder credentials rejected');
+  it('ACCEPTED COST: a submit the relayer never took is also held until the deadline', async () => {
+    // The transport reports "rejected before broadcast" and "accepted, then unobservable"
+    // identically — as a throw — so a credentials failure is guarded like a real submission.
+    // The funds are untouched and visible in the wallet; the wait is bounded and self-
+    // clearing (see the deadline test below). Wrong in the safe direction, and pinned here
+    // so the cost is visible rather than a surprise.
     const submit = vi.fn(async () => {
-      throw original;
+      throw new Error('builder credentials rejected');
     });
 
-    await expect(runReturn(submit)).rejects.toThrow(original);
-    expect(localStorage.getItem(PENDING_RETURN_BURN_KEY)).toBeNull();
+    await expect(runReturn(submit)).rejects.toThrow(/finish the return automatically/i);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+  });
+});
+
+describe('the guard releases itself once the batch can no longer run', () => {
+  it('clears a past-deadline record with no matching burn, and lets the next return proceed', async () => {
+    // Past the deadline the batch is dead, so a clean scan PROVES the funds never moved.
+    // This is what turns "never retry" into a bounded wait.
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ deadlineMs: Date.now() - 600_000 }));
+
+    const { resumable, stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+    expect(resumable).toBeNull();
+    expect(stillPending).toBe(false);
+    expect(localStorage.getItem(PENDING_RETURN_BURN_KEY)).toBe('{}');
+
+    // ...and a fresh return is now unblocked.
+    const submit = vi.fn(async () => BURN_TX);
+    await expect(runReturn(submit)).resolves.toMatchObject({ amount: AMOUNT });
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT clear a past-deadline record when the scan itself failed', async () => {
+    // Same deadline, but the chain is unreadable — so we learned nothing and must not
+    // release the guard on the strength of an RPC error.
+    getLogs.mockRejectedValue(new Error('HTTP 429 rate limited'));
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ deadlineMs: Date.now() - 600_000 }));
+
+    const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(stillPending).toBe(true);
+    const submit = vi.fn(async () => BURN_TX);
+    await expect(runReturn(submit)).rejects.toThrow(/submitted from this device/i);
+    expect(submit).not.toHaveBeenCalled();
   });
 });
 
@@ -242,7 +258,7 @@ describe('an unresolved submission blocks a second burn', () => {
     writePendingReturnBurn(EVM_ADDRESS, pendingRecord());
     const submit = vi.fn(async () => BURN_TX);
 
-    await expect(runReturn(submit)).rejects.toThrow(/already submitted from this device/i);
+    await expect(runReturn(submit)).rejects.toThrow(/submitted from this device/i);
     expect(submit).not.toHaveBeenCalled();
   });
 
@@ -266,15 +282,14 @@ describe('an unresolved submission blocks a second burn', () => {
     getLogs.mockResolvedValue([burnLog({ hookData: `0x${'11'.repeat(32)}` })]);
     const submit = vi.fn(async () => BURN_TX);
 
-    await expect(runReturn(submit)).rejects.toThrow(/already submitted from this device/i);
+    await expect(runReturn(submit)).rejects.toThrow(/submitted from this device/i);
     expect(submit).not.toHaveBeenCalled();
   });
 });
 
 describe('the happy path is unchanged', () => {
   it('burns once, writes the cursor, and leaves no pending record behind', async () => {
-    const submit = vi.fn(async (_calls, hooks) => {
-      hooks?.onSubmitted?.({ transactionID: 'relayer-tx-1', deadlineMs: Date.now() + 600_000 });
+    const submit = vi.fn(async () => {
       return BURN_TX;
     });
 
@@ -288,7 +303,7 @@ describe('the happy path is unchanged', () => {
     expect(getLogs).not.toHaveBeenCalled();
   });
 
-  it('still works with a submitter that ignores the onSubmitted hook (older consumers)', async () => {
+  it('needs no cooperation from the submitter (an unmodified transport works)', async () => {
     const submit = vi.fn(async () => BURN_TX);
 
     await expect(runReturn(submit)).resolves.toMatchObject({ amount: AMOUNT });

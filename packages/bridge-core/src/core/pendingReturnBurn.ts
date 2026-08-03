@@ -1,20 +1,20 @@
 // Pending return-burn record — the SUBMITTED-but-unconfirmed half of the return leg.
 //
 // WHY THIS EXISTS. The return burn is a gasless relayer batch (returnIn.ts's injected
-// submitGaslessBatch). The relayer accepts the submit (2xx, handing back a transactionID)
-// and only LATER reports the mined tx hash. If the client stops observing before that hash
-// arrives — the relayer's status poll times out, its status GET throws, the tab closes —
-// the submitter throws and returnIn's post-burn cursor (written only once a hash exists)
-// is NEVER WRITTEN. The batch then mines anyway: the USDC leaves the deposit wallet into
-// CCTP, and because the fold-only recovery model is entirely CURSOR-DRIVEN
-// (unclaimedReturns.ts), there is nothing left on the device that knows a burn happened.
-// A retry reads an empty wallet ("nothing to return"), a reload finds no cursor
-// ("nothing to recover"), and the funds sit burned-but-unclaimed forever.
+// submitGaslessBatch). The relayer accepts the submit and only LATER reports the mined tx
+// hash. If the client stops observing before that hash arrives — the relayer's status poll
+// times out, its status GET throws, the tab closes — the submitter throws and returnIn's
+// post-burn cursor (written only once a hash exists) is NEVER WRITTEN. The batch then mines
+// anyway: the USDC leaves the deposit wallet into CCTP, and because the fold-only recovery
+// model is entirely CURSOR-DRIVEN (unclaimedReturns.ts), there is nothing left on the device
+// that knows a burn happened. A retry reads an empty wallet ("nothing to return"), a reload
+// finds no cursor ("nothing to recover"), and the funds sit burned-but-unclaimed forever.
 //
-// So: persist what we know BEFORE the outcome is observable, and resolve it from chain
-// afterwards. A landed burn is discoverable — the burn emits DepositForBurn on the source
-// TokenMessengerV2, and its hookData carries our own commitment, which binds the event to
-// THIS identity + account index unambiguously.
+// So: on a throw, record what we already know and resolve it from chain. A landed burn is
+// discoverable — it emits DepositForBurn on the source TokenMessengerV2, and its hookData
+// carries our own commitment, which binds the event to THIS identity + account index
+// unambiguously. Everything that lookup needs is in returnBurnToPool's own arguments, so
+// this needs no cooperation from the transport.
 //
 // WHY A SEPARATE STORE (not a widened InflightReturn). The cursor's invariant — it exists
 // ⟺ the burn LANDED, so resume from attest and never re-burn — is load-bearing for the
@@ -25,12 +25,13 @@
 // resolver PROMOTES a pending record into a real cursor only once the burn is PROVEN
 // on-chain, at which point the existing resume path takes over unchanged.
 //
-// BOTH FAILURE DIRECTIONS ARE BENIGN (the bar this repo sets for persisting a fact):
+// BOTH FAILURE DIRECTIONS ARE BOUNDED (the bar this repo sets for persisting a fact):
 //   - LOSS of a pending record ⇒ exactly today's behavior (a stranded burn). Never worse.
-//   - STALENESS (a record whose batch never landed) ⇒ the scan finds no match and, past the
-//     batch deadline, resolves 'never-landed' and clears it. A pending record is NOT a
-//     cursor, so a stale one never blocks or redirects a fresh return — it only ever
-//     produces copy, never a value.
+//   - STALENESS (a record whose batch never ran) ⇒ the scan finds no match and, past the
+//     deadline, resolves 'never-landed' and clears it. Until then the record DOES hold up a
+//     fresh return — deliberately, since that is the double-burn window — so staleness costs
+//     a bounded wait, never a wrong value. A record never redirects funds: it can only be
+//     promoted to a cursor by a burn PROVEN on-chain.
 //
 // THE DEADLINE IS WHAT MAKES 'never-landed' DEFINITIVE. The relayer batch is an EIP-712
 // struct whose `deadline` field the deposit wallet enforces on-chain, so past that
@@ -111,10 +112,13 @@ export interface PendingReturnBurn {
   submittedAtMs: number;
   // Unix ms after which the batch can no longer execute (its EIP-712 deadline). Past this
   // (plus grace) a no-match scan is DEFINITIVE, not merely inconclusive.
+  //
+  // The submitter owns the real deadline, so callers assume a conservative default. That
+  // erring-long is deliberate: too long only delays a safe retry, too short would call a
+  // still-mineable batch dead and invite the double-burn. It is also what bounds how long a
+  // submit that never reached the relayer at all can hold up a retry — see the
+  // unresolved-submission guard in returnIn.ts.
   deadlineMs: number;
-  // The relayer's durable handle for the submission. Best-effort/opaque — retained for
-  // support and for a future direct status re-read; the chain scan never needs it.
-  transactionID?: string;
 }
 
 type PendingReturnBurnMap = Record<string, PendingReturnBurn>;
@@ -159,8 +163,7 @@ export function isValidPendingReturnBurn(value: unknown): value is PendingReturn
     typeof r.submittedAtMs === 'number' &&
     Number.isFinite(r.submittedAtMs) &&
     typeof r.deadlineMs === 'number' &&
-    Number.isFinite(r.deadlineMs) &&
-    (r.transactionID === undefined || typeof r.transactionID === 'string')
+    Number.isFinite(r.deadlineMs)
   );
 }
 
@@ -176,7 +179,8 @@ export function writePendingReturnBurn(evmAddress: string, record: PendingReturn
   } catch {
     return false;
   }
-  return readPendingReturnBurn(evmAddress)?.transactionID === record.transactionID;
+  const persisted = readPendingReturnBurn(evmAddress);
+  return persisted?.commitment === record.commitment && persisted.submittedAtMs === record.submittedAtMs;
 }
 
 // Read the pending record for an EVM address, dropping a corrupt one.

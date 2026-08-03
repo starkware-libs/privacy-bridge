@@ -420,8 +420,9 @@ export async function recoverPendingReturnBurn(
   return { resumable: promoted, stillPending: readPendingReturnBurn(evmAddress) !== null };
 }
 
-// The relayer batch is signed with a 10-minute EIP-712 deadline. Used only when a
-// submitter doesn't report its own — see GaslessBatchSubmission.deadlineMs.
+// The relayer batch is signed with a 10-minute EIP-712 deadline. The transport owns the
+// real value and doesn't report it, so this is the conservative assumption — see
+// PendingReturnBurn.deadlineMs for why erring long is the safe direction.
 const DEFAULT_BATCH_DEADLINE_MS = 600_000;
 
 // Inline budget for resolving a burn whose submitter threw. Generous enough to cover the
@@ -495,33 +496,16 @@ export interface ReturnBurnCall {
   data: `0x${string}`;
 }
 
-// What the submitter reports the INSTANT the relayer accepts the batch — before any
-// tx hash exists. Fired synchronously from inside the submit, mirroring the AVNU
-// `onRelayStart` boundary: everything after it is post-broadcast and AMBIGUOUS, so this
-// is the last moment at which we are guaranteed to be able to record that a burn may
-// now be in flight. `transactionID` is the relayer's own durable handle (opaque to us).
-export interface GaslessBatchSubmission {
-  transactionID?: string;
-  // Unix ms after which the signed batch can no longer execute on-chain (its EIP-712
-  // deadline). This is what later makes "not on chain" a VERDICT rather than a shrug —
-  // see pendingReturnBurn.ts. Omitted ⇒ the caller assumes a conservative default.
-  deadlineMs?: number;
-}
-
 // Injected gasless transport: submit the burn calls FROM the deposit wallet via the
 // relayer (signed by the EOA owner, relayer pays Polygon gas) and return the
 // on-chain Polygon tx hash of the executed batch (the one Iris indexes for the
 // MessageSent). Owned by relayer.ts; injected so returnIn needs no relayer import.
 //
-// `hooks.onSubmitted` MUST be invoked as soon as the relayer accepts the submit, even
-// though the hash is not known yet — that call is what lets a burn survive a submitter
-// that later throws (see pendingReturnBurn.ts). It is OPTIONAL on the type so an older
-// consuming app keeps compiling; a submitter that never calls it simply falls back to
-// today's behavior (a throw after acceptance strands the burn).
-export type SubmitGaslessBatch = (
-  calls: ReturnBurnCall[],
-  hooks?: { onSubmitted?: (submission: GaslessBatchSubmission) => void },
-) => Promise<string>;
+// A THROW from this is AMBIGUOUS, not a failure: the relayer may already have broadcast
+// the batch (its status poll gives up well before the signed batch's own deadline). The
+// caller must therefore never treat a throw as proof the burn didn't happen — see the
+// recovery in returnBurnToPool and pendingReturnBurn.ts.
+export type SubmitGaslessBatch = (calls: ReturnBurnCall[]) => Promise<string>;
 
 export interface ReturnBurnToPoolArgs {
   // The account whose per-account deposit wallet holds the USDC to return (cross-account guard).
@@ -686,15 +670,26 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // whether the deposit wallet's USDC has already gone into CCTP. Falling through to a
   // fresh burn there is precisely the double-burn the pending record exists to prevent
   // (and the wallet often still reads funded, because the first burn hasn't mined yet).
-  // Refuse, and say so in words that classify TRANSIENT so the flow ends RESUMABLE
-  // rather than as a red terminal card.
+  // Refuse, and say so in words that classify TRANSIENT so the flow ends RESUMABLE rather
+  // than as a red terminal card.
+  //
+  // ACCEPTED COST: a submit the relayer never actually took (rejected credentials, a
+  // rate limit) is indistinguishable from one it took and broadcast — the transport reports
+  // both as a throw — so it lands here too and holds up a retry until the assumed deadline
+  // expires and the scan can clear it (bounded by DEFAULT_BATCH_DEADLINE_MS + the scan's
+  // grace). The funds are untouched and visible in the wallet throughout. That is the right
+  // direction to be wrong in: the alternative is re-burning funds that were already
+  // committed, which is what stranded a user's return in the first place. A submitter that
+  // reported whether the relayer accepted the batch (and its real deadline) would remove
+  // this wait entirely.
   const unresolved = readPendingReturnBurn(evmAddress);
   if (unresolved) {
     throw new Error(
-      `A return burn for account #${unresolved.accountIndex} was already submitted from this ` +
-        `device and hasn't been confirmed on-chain yet, so starting another one could burn the ` +
-        `same funds twice. Retry in a few minutes — network error or node lag aside, we check ` +
-        `Polygon each time and will resume the original burn as soon as it appears.`,
+      `A return burn for account #${unresolved.accountIndex} was submitted from this device ` +
+        `and hasn't been confirmed on-chain yet, so starting another one could burn the same ` +
+        `funds twice. Your USDC is safe in the deposit wallet either way. Retry in a few ` +
+        `minutes — network error or node lag aside, we re-check Polygon every time and will ` +
+        `either resume the original burn or release this once it's certain it never ran.`,
     );
   }
 
@@ -776,17 +771,27 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   //
   // AMBIGUITY WINDOW: the relayer accepts the submit and broadcasts asynchronously, so a
   // throw from here does NOT mean the burn didn't happen — the status poll may simply have
-  // given up first. Historically that threw with nothing persisted, and since the fold-only
-  // recovery model is entirely cursor-driven, the burn (which then landed) became invisible:
-  // the wallet read empty on retry and there was no cursor to recover. So we record the
-  // submission the instant the relayer accepts it, and on a throw we ASK THE CHAIN instead
-  // of guessing.
+  // given up first (it polls for a fraction of the signed batch's own deadline). Historically
+  // that threw with nothing persisted, and since fold-only recovery is entirely cursor-driven,
+  // the burn (which then landed) became invisible: the wallet read empty on retry and there
+  // was no cursor to recover. So on a throw we ASK THE CHAIN instead of guessing.
+  //
+  // Everything the chain scan needs is already in scope — the deposit wallet that burns, the
+  // commitment we wrote into hookData, the amount and the chain — so the pending record is
+  // DERIVED here rather than reported by the submitter. That keeps the recovery entirely
+  // inside this package: no transport change, and it works with a submitter written before
+  // any of this existed.
   onStatus?.('Burning USDC on Polygon (gasless return CCTP)…');
-  // Holder rather than a bare `let`: the assignment happens inside a callback, which TS's
-  // control-flow analysis can't see, so a plain local would stay narrowed to `null`.
-  const submitted: { record: PendingReturnBurn | null } = { record: null };
-  const onSubmitted = (submission: GaslessBatchSubmission): void => {
-    const record: PendingReturnBurn = {
+  const submittedAtMs = Date.now();
+
+  let burnTx: string;
+  try {
+    burnTx = await submitGaslessBatch(calls);
+  } catch (err) {
+    // The batch's real deadline is the submitter's business, so assume the conservative
+    // default: too LONG merely delays a safe retry, while too short would declare a
+    // still-mineable batch dead and invite the double-burn.
+    const pending: PendingReturnBurn = {
       accountIndex,
       channel,
       depositWallet,
@@ -795,25 +800,12 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
       sourceDomain,
       evmChainId: burnChain.chainId,
       inboundAnonymizer: inbound,
-      submittedAtMs: Date.now(),
-      // A submitter that can't report its batch deadline gets a conservative default: too
-      // LONG only delays a safe retry, while too short would call a still-mineable batch
-      // dead and invite the double-burn.
-      deadlineMs: submission.deadlineMs ?? Date.now() + DEFAULT_BATCH_DEADLINE_MS,
-      transactionID: submission.transactionID,
+      submittedAtMs,
+      deadlineMs: submittedAtMs + DEFAULT_BATCH_DEADLINE_MS,
     };
-    submitted.record = record;
-    writePendingReturnBurn(evmAddress, record);
-  };
-
-  let burnTx: string;
-  try {
-    burnTx = await submitGaslessBatch(calls, { onSubmitted });
-  } catch (err) {
-    // Nothing was ever accepted by the relayer (a pre-submit throw), so there is no burn to
-    // find and the original error stands — retrying is safe and correct.
-    const pending = submitted.record;
-    if (!pending) throw err;
+    // Persist BEFORE scanning: the scan below can take a while, and a tab closed during it
+    // must still leave something a later sweep can resolve.
+    writePendingReturnBurn(evmAddress, pending);
     const recovered = await resolveAmbiguousReturnBurn(evmAddress, pending, onStatus);
     if (recovered === null) throw ambiguousBurnError(err, evmAddress);
     if (recovered === 'never-landed') throw err;
