@@ -261,14 +261,26 @@ describe('the guard releases itself once the batch can no longer run', () => {
   });
 
   it('does NOT clear a past-deadline record when the scan itself failed', async () => {
-    // Same deadline, but the chain is unreadable — so we learned nothing and must not
-    // release the guard on the strength of an RPC error.
+    // Same deadline, but the chain is unreadable — so we learned nothing, and the record
+    // must survive as the only handle on a burn that may have landed. (The BLOCKING role
+    // expires with the deadline regardless; only the record's recovery role is at stake
+    // here. Asserting a refusal too would just re-encode the scan-gated guard that
+    // permanently bricked returns.)
     getLogs.mockRejectedValue(new Error('HTTP 429 rate limited'));
     writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ deadlineMs: Date.now() - 600_000 }));
 
     const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
 
     expect(stillPending).toBe(true);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+  });
+
+  it('DOES block on an unreadable scan while the batch can still run', async () => {
+    // The refusal that matters: inside the executable window an unreadable chain is not
+    // permission to burn again.
+    getLogs.mockRejectedValue(new Error('HTTP 429 rate limited'));
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ deadlineMs: Date.now() + 600_000 }));
+
     const submit = vi.fn(async () => BURN_TX);
     await expect(runReturn(submit)).rejects.toThrow(/submitted from this device/i);
     expect(submit).not.toHaveBeenCalled();
@@ -665,5 +677,53 @@ describe('the anchor read is bounded, silent, and never breaks the burn', () => 
     await runReturn(submit).catch(() => undefined);
 
     expect(readPendingReturnBurn(EVM_ADDRESS)?.fromBlock).toBe('4321');
+  });
+});
+
+describe('Bugbot round 6 — the guard is bounded by the DEADLINE, not by the scan', () => {
+  it('releases an anchorless record once the batch can no longer run', async () => {
+    // THE BRICK. Without an anchor the window is estimated, so a clean no-match can only
+    // ever be 'unknown' — never 'never-landed'. Gating the guard on that verdict meant a
+    // submit the relayer REFUSED blocked every future return for this wallet, permanently,
+    // despite being documented as a bounded wait.
+    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 3_600_000 });
+    delete noAnchor.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+
+    // Still unresolvable — the scan cannot prove absence here, and must not pretend to.
+    const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+    expect(stillPending).toBe(true);
+
+    // ...yet a fresh return proceeds, because the old batch is past its deadline and can no
+    // longer spend the wallet. Whatever the scan concluded, a second burn cannot collide.
+    const submit = vi.fn(async () => BURN_TX);
+    await expect(runReturn(submit)).resolves.toMatchObject({ amount: AMOUNT });
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('still blocks while the batch CAN run', async () => {
+    // The guard's actual job, unchanged: inside the executable window a second burn could
+    // collide with the first, so it is refused.
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ deadlineMs: Date.now() + 600_000 }));
+    const submit = vi.fn(async () => BURN_TX);
+
+    await expect(runReturn(submit)).rejects.toThrow(/submitted from this device/i);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the record past the deadline so a landed burn is still recoverable', async () => {
+    // Expiring the BLOCKING role must not discard the record: it is the only handle on a
+    // burn that may have landed, and losing it is the strand this PR exists to remove.
+    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 3_600_000 });
+    delete noAnchor.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+
+    await recoverPendingReturnBurn(EVM_ADDRESS);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+
+    // And it is still promotable the moment the chain does show the burn.
+    getLogs.mockResolvedValue([burnLog()]);
+    const { resumable } = await recoverPendingReturnBurn(EVM_ADDRESS);
+    expect(resumable).toMatchObject({ burnTx: BURN_TX });
   });
 });

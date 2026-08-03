@@ -229,6 +229,30 @@ export function clearPendingReturnBurn(evmAddress: string): void {
   }
 }
 
+// Can this submission still execute on-chain?
+//
+// This — not our ability to prove where the burn went — is what the double-burn guard
+// actually depends on. The batch is an EIP-712 struct whose deadline the deposit wallet
+// enforces, so past it the batch is rejected on-chain and CANNOT spend the wallet again.
+// A fresh return after that point is safe whatever the scan concluded: if the earlier burn
+// landed the wallet is empty and sizing fails harmlessly, and if it never ran the wallet is
+// still funded and the fresh burn is exactly right.
+//
+// Keeping the guard tied to the SCAN instead was a permanent brick: a record with no block
+// anchor can only ever resolve 'unknown' on a clean no-match (an estimated window cannot
+// prove absence), so it never cleared, and a submit the relayer refused could block every
+// future return for that wallet — the opposite of the bounded wait this is documented as.
+//
+// The RECORD still outlives this: it is what recovers a burn that did land. Only the
+// blocking role expires here.
+//
+// Note the deadline is the assumed default when the transport doesn't report its own, so
+// this releases at that assumption plus the grace. A transport whose real batch lifetime is
+// LONGER would need to report it (GaslessBatchSubmission-style) rather than be guessed at.
+export function isPendingBurnExecutable(record: PendingReturnBurn, now = Date.now()): boolean {
+  return now <= record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS;
+}
+
 // Does ANY address on this device hold an unresolved submission?
 //
 // FUND-SAFETY: this store sits OUTSIDE the `pmp.inflight*` naming the switch guard's generic

@@ -66,6 +66,7 @@ import { sleep } from './proving';
 import {
   clearPendingReturnBurn,
   evmClientForSource,
+  isPendingBurnExecutable,
   readPendingReturnBurn,
   resolvePendingReturnBurn,
   writePendingReturnBurn,
@@ -532,8 +533,8 @@ function unresolvedSubmissionError(record: PendingReturnBurn): Error {
     `A return burn for account #${record.accountIndex} was submitted from this device ` +
       `and hasn't been confirmed on-chain yet, so starting another one could burn the same ` +
       `funds twice. Your USDC is safe in the deposit wallet either way. Retry in a few ` +
-      `minutes — network error or node lag aside, we re-check the chain every time and will ` +
-      `either resume the original burn or release this once it's certain it never ran.`,
+      `minutes — we re-check the chain every time, and either resume the original burn or ` +
+      `let you start a new one once the first can no longer run.`,
   );
 }
 
@@ -775,15 +776,18 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   //
   // ACCEPTED COST: a submit the relayer never actually took (rejected credentials, a
   // rate limit) is indistinguishable from one it took and broadcast — the transport reports
-  // both as a throw — so it lands here too and holds up a retry until the assumed deadline
-  // expires and the scan can clear it (bounded by DEFAULT_BATCH_DEADLINE_MS + the scan's
-  // grace). The funds are untouched and visible in the wallet throughout. That is the right
-  // direction to be wrong in: the alternative is re-burning funds that were already
-  // committed, which is what stranded a user's return in the first place. A submitter that
-  // reported whether the relayer accepted the batch (and its real deadline) would remove
-  // this wait entirely.
+  // both as a throw — so it lands here too and holds up a retry. The funds are untouched and
+  // visible in the wallet throughout. That is the right direction to be wrong in: the
+  // alternative is re-burning funds already committed, which is what stranded a user's
+  // return in the first place. A submitter that reported whether the relayer accepted the
+  // batch (and its real deadline) would remove this wait entirely.
+  //
+  // The wait is bounded by isPendingBurnExecutable — the batch's own deadline — NOT by the
+  // scan reaching a verdict. That distinction is load-bearing: a record with no block anchor
+  // can only ever resolve 'unknown' on a clean no-match, so gating on the scan meant a
+  // refused submit blocked every future return for this wallet forever.
   const unresolved = readPendingReturnBurn(evmAddress);
-  if (unresolved) throw unresolvedSubmissionError(unresolved);
+  if (unresolved && isPendingBurnExecutable(unresolved)) throw unresolvedSubmissionError(unresolved);
 
   // (2) FRESH PATH. The burn runs GASLESSLY from the deposit wallet via the
   // injected submitter — both it and the deposit wallet are required here.
@@ -1256,7 +1260,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     // and marks the account as returning, which is misleading work to do for a burn we may
     // be about to refuse anyway (returnBurnToPool guards again, but only after all of it).
     const unresolved = readPendingReturnBurn(evmAddress);
-    if (unresolved) {
+    if (unresolved && isPendingBurnExecutable(unresolved)) {
       const err = unresolvedSubmissionError(unresolved);
       emit('cctp', 'error', err.message);
       throw err;
