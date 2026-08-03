@@ -367,11 +367,12 @@ function writeInflightReturnVerified(evmAddress: string, record: InflightReturn)
 // so it can never execute — and clears the record, which is what lets the user simply
 // return again instead of being told forever not to retry.
 //
-// Returns the promoted cursor (so a caller can resume from it immediately), else null.
+// Returns the promoted cursor (so a caller can resume from it immediately) plus whether it
+// actually reached storage, else null.
 async function promoteLandedPendingBurn(
   evmAddress: string,
   opts?: { client?: PublicClient; now?: number },
-): Promise<InflightReturn | null> {
+): Promise<{ record: InflightReturn; persisted: boolean } | null> {
   const pending = readPendingReturnBurn(evmAddress);
   if (!pending) return null;
   // A cursor already exists for this address ⇒ the burn was observed the normal way and the
@@ -401,8 +402,16 @@ async function promoteLandedPendingBurn(
   // Clear only AFTER the cursor write is attempted: if that write is what fails (quota), the
   // pending record is the last thing standing between the user and a stranded burn, so it
   // must outlive a failed promotion and be retried on the next sweep.
-  if (readInflightReturn(evmAddress)) clearPendingReturnBurn(evmAddress);
-  return record;
+  //
+  // The RETURN VALUE is what callers must resume from, not a re-read of storage. The burn is
+  // PROVEN on-chain at this point and we are holding its hash, so a failed cursor write is a
+  // persistence problem, not an evidence problem — falling back to "no cursor" would drop
+  // that hash and leave the run stuck on the unresolved-submission guard, blocking the very
+  // recovery this function just completed. The fresh path already takes the same line: it
+  // warns and carries on when its post-burn cursor write misses.
+  const persisted = readInflightReturn(evmAddress) !== null;
+  if (persisted) clearPendingReturnBurn(evmAddress);
+  return { record, persisted };
 }
 
 // Public recovery entry point: resolve any submitted-but-unconfirmed return burn on this
@@ -417,7 +426,10 @@ export async function recoverPendingReturnBurn(
   opts?: { client?: PublicClient; now?: number },
 ): Promise<{ resumable: InflightReturn | null; stillPending: boolean }> {
   const promoted = await promoteLandedPendingBurn(evmAddress, opts);
-  return { resumable: promoted, stillPending: readPendingReturnBurn(evmAddress) !== null };
+  return {
+    resumable: promoted?.record ?? null,
+    stillPending: readPendingReturnBurn(evmAddress) !== null,
+  };
 }
 
 // The relayer batch is signed with a 10-minute EIP-712 deadline. The transport owns the
@@ -474,26 +486,30 @@ function unresolvedSubmissionError(record: PendingReturnBurn): Error {
   );
 }
 
-// The honest error for a burn we still can't place. Two things it must do that the old
-// "do NOT retry blindly — check Polygonscan" copy did not: tell the user their funds are
-// accounted for (a pending record now exists, so the next attempt resolves it rather than
-// re-burning), and stay NON_RETRYABLE so nothing AUTOMATICALLY re-submits while the
-// original batch may still mine. The user-driven retry is safe by construction — it
-// re-enters through the pending-recovery gate below, which refuses to burn twice.
-function ambiguousBurnError(cause: unknown, evmAddress: string): Error {
+// The honest error for a burn we still can't place. Always NON_RETRYABLE so nothing
+// AUTOMATICALLY re-submits while the original batch may still mine.
+//
+// `tracked` says whether the pending record actually persisted, and the two messages differ
+// because the user's safe next action differs. Tracked: the retry is safe by construction —
+// it re-enters through the pending-recovery gate, which resolves the burn or refuses to
+// start a second one. Untracked: there is no gate, so a retry WOULD take the fresh path
+// while this batch may still be mining, and the only safe advice is to check the chain
+// first. Promising the tracked story in the untracked case is how a recoverable strand
+// becomes a double-burn.
+function ambiguousBurnError(cause: unknown, evmAddress: string, tracked: boolean): Error {
   const detail = cause instanceof Error ? cause.message : String(cause);
-  return markNonRetryable(
-    Object.assign(
-      new Error(
-        `The return burn was submitted but we couldn't confirm it on-chain yet (${detail}). ` +
-          `Your funds are tracked: we saved this submission and will finish the return ` +
-          `automatically once the burn appears on Polygon — reopen or retry the return in a few ` +
-          `minutes and it will resume. Do not send a second return; the retry checks the chain ` +
-          `first and will never burn twice.`,
-      ),
-      { cause, evmAddress },
-    ),
-  );
+  const message = tracked
+    ? `The return burn was submitted but we couldn't confirm it on-chain yet (${detail}). ` +
+      `Your funds are tracked: we saved this submission and will finish the return ` +
+      `automatically once the burn appears on-chain — reopen or retry the return in a few ` +
+      `minutes and it will resume. Do not send a second return; the retry checks the chain ` +
+      `first and will never burn twice.`
+    : `The return burn was submitted but we couldn't confirm it on-chain (${detail}), AND ` +
+      `browser storage rejected the record we use to track it — so a retry cannot be ` +
+      `protected from burning the same funds twice. Do NOT retry yet: check the deposit ` +
+      `wallet ${evmAddress} on a block explorer first. If the burn is there your funds are ` +
+      `in transit and will need recovery; if it is not, free up browser storage and retry.`;
+  return markNonRetryable(Object.assign(new Error(message), { cause, evmAddress }));
 }
 
 // PRE-FLIGHT, FRESH-burn path only: prove localStorage accepts a write + read-back
@@ -654,13 +670,23 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // the return and re-burning an already-empty wallet. Deliberately runs for ANY account
   // index: a landed burn belonging to a DIFFERENT account must reach the cross-account
   // guard below and BLOCK this return, not be skipped so this one can burn over it.
-  await promoteLandedPendingBurn(evmAddress);
+  const promoted = await promoteLandedPendingBurn(evmAddress);
+  if (promoted && !promoted.persisted) {
+    onStatus?.(
+      'WARNING: recovered your in-flight return but could not save the resume point — ' +
+        'do NOT reload this tab until it completes.',
+    );
+  }
 
   // (1) RESUME PATH: a prior run already burned for this EVM address but didn't
   // finish attest/claim. Resume from attest off the persisted cursor — skip
   // approve+burn entirely (re-burning would double-spend the EOA's USDC). The burn
   // tx AND source domain come from the CURSOR (authoritative on resume).
-  const inflight = readInflightReturn(evmAddress);
+  //
+  // Fall back to the JUST-PROMOTED record when the cursor write missed: the burn is proven
+  // and we hold its hash, so re-reading empty storage would throw that away and drop the run
+  // onto the unresolved guard — blocking the recovery that just succeeded.
+  const inflight = readInflightReturn(evmAddress) ?? promoted?.record ?? null;
   if (inflight) {
     // CROSS-ACCOUNT GUARD (fund-safety): the cursor is keyed by EVM address ONLY,
     // so a resume must verify it belongs to THIS account. Returning account B
@@ -824,9 +850,17 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     };
     // Persist BEFORE scanning: the scan below can take a while, and a tab closed during it
     // must still leave something a later sweep can resolve.
-    writePendingReturnBurn(evmAddress, pending);
+    //
+    // Whether that write LANDED changes what we are able to promise. A stored record both
+    // resumes the burn later and blocks a second one; without it the next attempt has no
+    // guard at all and would take the fresh path while this batch may still be mining. So
+    // the outcome is threaded into the error rather than assumed — telling a user "we saved
+    // this, just retry" when nothing was saved is what turns a recoverable strand into a
+    // double-burn. (The fresh path pre-flights storage before burning, so this is the narrow
+    // case of quota being hit between that probe and here.)
+    const tracked = writePendingReturnBurn(evmAddress, pending);
     const recovered = await resolveAmbiguousReturnBurn(evmAddress, pending, onStatus);
-    if (recovered === null) throw ambiguousBurnError(err, evmAddress);
+    if (recovered === null) throw ambiguousBurnError(err, evmAddress, tracked);
     if (recovered === 'never-landed') throw err;
     burnTx = recovered;
     onStatus?.('Found the return burn on-chain — continuing.');
@@ -1065,11 +1099,21 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // would die before reaching returnBurnToPool's own recovery, and the retry the user is
   // told to make would strand the funds exactly as before. Promoting here turns a proven
   // burn into a cursor, so the resume branch takes it.
-  await promoteLandedPendingBurn(evmAddress);
+  const promoted = await promoteLandedPendingBurn(evmAddress);
+  if (promoted && !promoted.persisted) {
+    emit(
+      'cctp',
+      'running',
+      'WARNING: recovered your in-flight return but could not save the resume point — ' +
+        'do NOT reload this tab until it completes.',
+    );
+  }
 
   // 1. CCTP stage (reverse-CCTP burn → attest). The cursor (migrate-on-read +
-  // corrupt-drop via readInflightReturn) is the source of truth.
-  let cursor = readInflightReturn(evmAddress);
+  // corrupt-drop via readInflightReturn) is the source of truth — falling back to the
+  // just-promoted record when its write missed, so a storage failure can't discard a burn
+  // we have already PROVEN on-chain and push the run onto the fresh path's guard.
+  let cursor = readInflightReturn(evmAddress) ?? promoted?.record ?? null;
 
   // CROSS-ACCOUNT GUARD (fund-safety): the cursor is keyed by EVM address only. If a
   // return for a DIFFERENT account is already in flight, refuse — resuming it under this

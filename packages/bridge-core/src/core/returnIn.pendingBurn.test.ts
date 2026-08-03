@@ -434,3 +434,69 @@ describe('recoverPendingReturnBurn (the sweep entry point)', () => {
     expect(transports.at(-1)).not.toBe(config.polygon.rpcUrl);
   });
 });
+
+describe('a storage write that fails must not discard proven evidence', () => {
+  // Reject writes to ONE key while leaving the rest of localStorage working — the realistic
+  // quota failure, and the only way to separate "the burn is unknown" from "we merely
+  // couldn't write it down".
+  function failWritesTo(key: string) {
+    const real = Storage.prototype.setItem;
+    return vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      k: string,
+      v: string,
+    ) {
+      if (k === key) throw new DOMException('QuotaExceededError');
+      real.call(this, k, v);
+    });
+  }
+
+  it('still resumes a PROVEN burn when the cursor write fails', async () => {
+    // The burn is on chain and we are holding its hash. A failed cursor write is a
+    // persistence problem, not an evidence problem — re-reading empty storage would drop
+    // the hash and strand the run on the unresolved-submission guard, blocking the exact
+    // recovery that just succeeded.
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord());
+    getLogs.mockResolvedValue([burnLog()]);
+    const spy = failWritesTo(INFLIGHT_RETURN_KEY);
+    const submit = vi.fn(async () => '0xshouldNotBeCalled');
+
+    const result = await runReturn(submit);
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(waitForAttestation).toHaveBeenCalledWith(BURN_TX, expect.anything());
+    expect(result.amount).toBe(AMOUNT);
+    // The cursor genuinely did not persist — the resume came from the in-memory record.
+    expect(readCursor()).toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it('tells the user to check the chain when the pending record could NOT be saved', async () => {
+    // Without a stored record the next attempt has no guard and would take the fresh path
+    // while this batch may still mine, so the usual "we saved this, just retry" copy would
+    // be actively dangerous. The message has to say so.
+    const spy = failWritesTo(PENDING_RETURN_BURN_KEY);
+    const submit = vi.fn(async () => {
+      throw new Error('relayer did not confirm an on-chain transaction');
+    });
+
+    const err = await runReturn(submit).catch((e: unknown) => e);
+
+    expect((err as Error).message).toMatch(/could not be|couldn't confirm/i);
+    expect((err as Error).message).toMatch(/block explorer/i);
+    expect((err as Error).message).not.toMatch(/we saved this submission/i);
+    expect(isNonRetryable(err)).toBe(true);
+    spy.mockRestore();
+  });
+
+  it('keeps the tracked copy when the record DID save', async () => {
+    const submit = vi.fn(async () => {
+      throw new Error('relayer did not confirm an on-chain transaction');
+    });
+
+    const err = await runReturn(submit).catch((e: unknown) => e);
+
+    expect((err as Error).message).toMatch(/we saved this submission/i);
+    expect((err as Error).message).not.toMatch(/block explorer/i);
+  });
+});
