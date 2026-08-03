@@ -45,7 +45,7 @@
 // attestation source domain, the folded-claim wiring) against an injected submitter +
 // mocked Iris/proving/submit.
 
-import { encodeFunctionData, type Abi } from 'viem';
+import { encodeFunctionData, type Abi, type PublicClient } from 'viem';
 
 import { config, getEvmCctpSource, resolveEvmCctpDestination } from './config';
 import { isTerminalAttestFailure, waitForAttestation } from './polygonMint';
@@ -65,12 +65,12 @@ import { markNonRetryable } from './errors';
 import { sleep } from './proving';
 import {
   clearPendingReturnBurn,
+  evmClientForSource,
   readPendingReturnBurn,
   resolvePendingReturnBurn,
   writePendingReturnBurn,
   type PendingReturnBurn,
 } from './pendingReturnBurn';
-import { getPolygonPublicClient } from './polygonClient';
 
 // CCTP Standard finality (free, finalized) — the default for testing. 1000 = Fast.
 const STANDARD_FINALITY = 2000;
@@ -370,7 +370,7 @@ function writeInflightReturnVerified(evmAddress: string, record: InflightReturn)
 // Returns the promoted cursor (so a caller can resume from it immediately), else null.
 async function promoteLandedPendingBurn(
   evmAddress: string,
-  opts?: { client?: ReturnType<typeof getPolygonPublicClient>; now?: number },
+  opts?: { client?: PublicClient; now?: number },
 ): Promise<InflightReturn | null> {
   const pending = readPendingReturnBurn(evmAddress);
   if (!pending) return null;
@@ -414,7 +414,7 @@ async function promoteLandedPendingBurn(
 // and whether the funds are confirmed untouched (so offering a fresh return is safe).
 export async function recoverPendingReturnBurn(
   evmAddress: string,
-  opts?: { client?: ReturnType<typeof getPolygonPublicClient>; now?: number },
+  opts?: { client?: PublicClient; now?: number },
 ): Promise<{ resumable: InflightReturn | null; stillPending: boolean }> {
   const promoted = await promoteLandedPendingBurn(evmAddress, opts);
   return { resumable: promoted, stillPending: readPendingReturnBurn(evmAddress) !== null };
@@ -458,6 +458,20 @@ async function resolveAmbiguousReturnBurn(
     }
   }
   return null;
+}
+
+// Refusal for a fresh burn while an earlier submission is unresolved. Worded to classify
+// TRANSIENT so the flow ends RESUMABLE rather than as a red terminal card, and shared by
+// both entry points (returnToPool guards before its prep runs; returnBurnToPool guards
+// again right before the burn) so the two can never drift apart.
+function unresolvedSubmissionError(record: PendingReturnBurn): Error {
+  return new Error(
+    `A return burn for account #${record.accountIndex} was submitted from this device ` +
+      `and hasn't been confirmed on-chain yet, so starting another one could burn the same ` +
+      `funds twice. Your USDC is safe in the deposit wallet either way. Retry in a few ` +
+      `minutes — network error or node lag aside, we re-check the chain every time and will ` +
+      `either resume the original burn or release this once it's certain it never ran.`,
+  );
 }
 
 // The honest error for a burn we still can't place. Two things it must do that the old
@@ -683,15 +697,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // reported whether the relayer accepted the batch (and its real deadline) would remove
   // this wait entirely.
   const unresolved = readPendingReturnBurn(evmAddress);
-  if (unresolved) {
-    throw new Error(
-      `A return burn for account #${unresolved.accountIndex} was submitted from this device ` +
-        `and hasn't been confirmed on-chain yet, so starting another one could burn the same ` +
-        `funds twice. Your USDC is safe in the deposit wallet either way. Retry in a few ` +
-        `minutes — network error or node lag aside, we re-check Polygon every time and will ` +
-        `either resume the original burn or release this once it's certain it never ran.`,
-    );
-  }
+  if (unresolved) throw unresolvedSubmissionError(unresolved);
 
   // (2) FRESH PATH. The burn runs GASLESSLY from the deposit wallet via the
   // injected submitter — both it and the deposit wallet are required here.
@@ -783,6 +789,18 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // any of this existed.
   onStatus?.('Burning USDC on Polygon (gasless return CCTP)…');
   const submittedAtMs = Date.now();
+  // Kick off a chain-head read WITHOUT awaiting it: an exact lower bound for the recovery
+  // scan at zero cost on the burn's critical path. Only collected if the submit throws, by
+  // which point it resolved long ago. The .catch is attached here (not at the await) so a
+  // failure on the happy path can never surface as an unhandled rejection — and a failed
+  // read is survivable: the scan falls back to an estimated window that can still PROVE a
+  // burn, it just can't prove the absence of one.
+  // Anchored on the BURN chain (source), not Polygon: the scan queries that chain, so a
+  // height from a different one would be meaningless.
+  const anchorBlock = evmClientForSource(source)
+    .getBlockNumber()
+    .then((b) => b.toString())
+    .catch(() => undefined);
 
   let burnTx: string;
   try {
@@ -801,6 +819,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
       evmChainId: burnChain.chainId,
       inboundAnonymizer: inbound,
       submittedAtMs,
+      fromBlock: await anchorBlock,
       deadlineMs: submittedAtMs + DEFAULT_BATCH_DEADLINE_MS,
     };
     // Persist BEFORE scanning: the scan below can take a while, and a tab closed during it
@@ -1038,6 +1057,16 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     nonce: accountNonce,
   });
 
+  // 0. PENDING-BURN RECOVERY, before the fresh-vs-resume decision is made.
+  //
+  // This MUST run here and not only inside returnBurnToPool. The fresh branch below calls
+  // prepareFreshReturn FIRST, and after the incident this fixes (the burn mined, the wallet
+  // is empty, no cursor was ever written) that prep throws "nothing to return" — so the run
+  // would die before reaching returnBurnToPool's own recovery, and the retry the user is
+  // told to make would strand the funds exactly as before. Promoting here turns a proven
+  // burn into a cursor, so the resume branch takes it.
+  await promoteLandedPendingBurn(evmAddress);
+
   // 1. CCTP stage (reverse-CCTP burn → attest). The cursor (migrate-on-read +
   // corrupt-drop via readInflightReturn) is the source of truth.
   let cursor = readInflightReturn(evmAddress);
@@ -1108,6 +1137,17 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     }
     emit('cctp', 'done', 'USDC returned to the pool.');
   } else {
+    // A submission that step 0 could NOT resolve means we still don't know whether the
+    // wallet's USDC is already in CCTP. Refuse before the prep runs: it converts balances
+    // and marks the account as returning, which is misleading work to do for a burn we may
+    // be about to refuse anyway (returnBurnToPool guards again, but only after all of it).
+    const unresolved = readPendingReturnBurn(evmAddress);
+    if (unresolved) {
+      const err = unresolvedSubmissionError(unresolved);
+      emit('cctp', 'error', err.message);
+      throw err;
+    }
+
     // FRESH PATH: the app-injected prep converts proceeds → native USDC, sizes the
     // burn to the actual balance, and builds the gasless submitter. It may throw
     // (e.g. "nothing to return") to abort before any burn.

@@ -37,11 +37,10 @@
 // struct whose `deadline` field the deposit wallet enforces on-chain, so past that
 // timestamp the batch can never execute. That converts the permanently-unsafe "do NOT
 // retry, we can't tell" into a bounded question with a real answer.
-import { type PublicClient, type Abi } from 'viem';
+import { createPublicClient, http, type PublicClient, type Abi } from 'viem';
 
-import { config, getEvmCctpSource } from './config';
+import { config, getEvmCctpSource, type EvmCctpSource } from './config';
 import { encodeCommitmentHookData } from '../derivation/index';
-import { getPolygonPublicClient } from './polygonClient';
 
 // TokenMessengerV2 DepositForBurn — the on-chain proof that a submitted batch executed.
 // Mirrors depositIn.ts's copy (same event, same indexing: burnToken, depositor,
@@ -73,14 +72,31 @@ const TOKEN_MESSENGER_EVENT_ABI = [
 // here to prevent.
 export const PENDING_BURN_DEADLINE_GRACE_MS = 120_000;
 
-// Polygon's ~2s block time, used only to turn "submitted N ms ago" into a getLogs lower
-// bound. Deliberately UNDER-estimated (real blocks are ≥2s), so the derived span errs
-// LONG — scanning extra blocks costs a little RPC, scanning too few would miss the burn
-// and report a landed burn as missing, which is the one wrong answer that matters.
-const POLYGON_BLOCK_TIME_MS = 2_000;
+// The burn can only execute between the submit and the batch deadline, so the scan window
+// is that span — NOT "everything since the submit". This is what keeps a single getLogs
+// call bounded no matter how old the record is: a week-old record scans the same ~10-minute
+// window, just further back. An elapsed-time span would grow past every provider's
+// eth_getLogs range cap and fail as 'unknown' forever.
+//
+// Sized against the FASTEST plausible EVM block time rather than a per-chain table: over-
+// estimating the block count only widens a window that is already bounded, whereas
+// under-estimating would cut the window short and miss the burn — the one wrong answer that
+// actually loses money. 0.25s covers Arbitrum; Polygon/Base (~2s) land well inside it.
+const FASTEST_BLOCK_TIME_MS = 250;
 
-// Extra blocks below the derived lower bound, absorbing clock skew and a slow first block.
+// Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
+
+// Lookback for the fallback window used when no exact block anchor was captured. Bounded so
+// the call still succeeds; a no-match under this window is never conclusive (see below).
+const FALLBACK_LOOKBACK_BLOCKS = 10_000n;
+
+// Ceiling on the submit→deadline span the window is sized from. That span comes off a
+// PERSISTED record, and the whole point of the window is that it stays inside a provider's
+// eth_getLogs range cap — so a record carrying an implausible deadline (corrupted, or
+// written by a future version with a different batch lifetime) must not be able to widen it
+// into a call that always fails. Comfortably above any real relayer batch deadline.
+const MAX_DEADLINE_SPAN_MS = 30 * 60_000;
 
 // SELF-CONTAINED like INFLIGHT_RETURN_KEY: device-store (T5) references only the KEY.
 export const PENDING_RETURN_BURN_KEY = 'pmp.pendingReturnBurn';
@@ -103,13 +119,19 @@ export interface PendingReturnBurn {
   // The InboundAnonymizer the burn was BUILT AGAINST — promoted verbatim into the cursor
   // so a claim after a config redeploy still targets the burn-time contract.
   inboundAnonymizer: string;
-  // When the relayer accepted the submit (unix ms). The scan window is derived FROM this
-  // at resolve time rather than snapshotting a block height at submit time: the burn is on
-  // the hot path and must not wait on an extra RPC round-trip, and a height read then would
-  // go stale anyway if recovery happens a day later. Elapsed time converts to a block span
-  // (see resolvePendingReturnBurn), so a resolve seconds later scans a handful of blocks
-  // and one next week scans back far enough to still find the burn.
+  // When the batch was submitted (unix ms). Bounds the scan window together with
+  // deadlineMs, and drives the fallback window when fromBlock is absent.
   submittedAtMs: number;
+  // Chain head just before the submit — the EXACT lower bound for the scan, read off the
+  // hot path (kicked off un-awaited before submitting, collected only if the submit throws).
+  // Decimal-encoded bigint.
+  //
+  // OPTIONAL because that read can fail. Its presence is what makes a no-match CONCLUSIVE:
+  // with an exact anchor we know we looked in the right place, so past the deadline a clean
+  // scan proves the funds never moved. Without one the window is estimated, so a match still
+  // proves a burn but a NO-match proves nothing and must resolve 'unknown' — never
+  // 'never-landed', which would release the double-burn guard on a guess.
+  fromBlock?: string;
   // Unix ms after which the batch can no longer execute (its EIP-712 deadline). Past this
   // (plus grace) a no-match scan is DEFINITIVE, not merely inconclusive.
   //
@@ -162,6 +184,9 @@ export function isValidPendingReturnBurn(value: unknown): value is PendingReturn
     /^0x[0-9a-fA-F]+$/.test(r.inboundAnonymizer) &&
     typeof r.submittedAtMs === 'number' &&
     Number.isFinite(r.submittedAtMs) &&
+    // OPTIONAL: absent when the pre-submit head read failed. "0" is a real anchor.
+    (r.fromBlock === undefined ||
+      (typeof r.fromBlock === 'string' && r.fromBlock.length <= 80 && /^[0-9]+$/.test(r.fromBlock))) &&
     typeof r.deadlineMs === 'number' &&
     Number.isFinite(r.deadlineMs)
   );
@@ -251,25 +276,24 @@ export async function resolvePendingReturnBurn(
     // Misconfiguration, not evidence about the burn — never report 'never-landed' from it.
     return { kind: 'unknown', error: new Error(`no EVM CCTP source for chain ${record.evmChainId}`) };
   }
-  const client = opts?.client ?? getPolygonPublicClient();
+  // The burn executes on the chain the record names, so the scan MUST run against that
+  // chain's RPC — resolving the TokenMessenger for one chain and querying another returns
+  // an empty log set, which past the deadline would read as "the burn never happened" and
+  // release the double-burn guard. Built from the source registry's own rpcUrl, exactly as
+  // depositIn.ts builds its per-source client.
+  const client = opts?.client ?? evmClientForSource(source);
   const wantHookData = encodeCommitmentHookData(BigInt(record.commitment)).toLowerCase();
   const wantAmount = BigInt(record.amount);
 
   try {
-    // Derive the scan window from how long ago the batch was submitted. `head` is read
-    // here (recovery path only — never on the burn's hot path); a span floor of 0 keeps a
-    // clock that jumped backwards from producing a negative, and the max() keeps the bound
-    // at genesis rather than underflowing bigint.
     const head = await client.getBlockNumber();
-    const elapsedMs = Math.max(0, (opts?.now ?? Date.now()) - record.submittedAtMs);
-    const spanBlocks = BigInt(Math.ceil(elapsedMs / POLYGON_BLOCK_TIME_MS)) + SCAN_MARGIN_BLOCKS;
-    const fromBlock = head > spanBlocks ? head - spanBlocks : 0n;
+    const window = scanWindow(record, head, now);
     const logs = await client.getLogs({
       address: source.tokenMessenger as `0x${string}`,
       event: TOKEN_MESSENGER_EVENT_ABI[0],
       args: { depositor: record.depositWallet as `0x${string}` },
-      fromBlock,
-      toBlock: 'latest',
+      fromBlock: window.fromBlock,
+      toBlock: window.toBlock,
     });
     const match = logs.find(
       (log) =>
@@ -279,12 +303,65 @@ export async function resolvePendingReturnBurn(
         log.transactionHash !== null,
     );
     if (match?.transactionHash) return { kind: 'landed', burnTx: match.transactionHash };
+    // A clean scan with no match. Two things must BOTH hold before that becomes a verdict:
+    //   - the deadline has passed, so the batch can no longer execute; and
+    //   - the window was EXACT, so we know we looked in the right place. An estimated
+    //     window that happened to be positioned wrong would otherwise read as proof the
+    //     funds never moved and release the guard — on a guess.
+    if (window.exact && now > record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS) {
+      return { kind: 'never-landed' };
+    }
+    if (window.exact) return { kind: 'pending' };
+    return {
+      kind: 'unknown',
+      error: new Error('no block anchor for this submission — the scan window is an estimate'),
+    };
   } catch (error) {
     return { kind: 'unknown', error };
   }
+}
 
-  // A clean scan with no match. Only the DEADLINE can turn that into a verdict: before it,
-  // the batch is still mineable and absence is not evidence.
-  if (now > record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS) return { kind: 'never-landed' };
-  return { kind: 'pending' };
+// A read-only client for the chain a burn executes on. Exported so the burn path anchors
+// its block read to the SAME chain the recovery scan will query — a Polygon-pinned client
+// on either side reintroduces the cross-chain mismatch this exists to avoid.
+export function evmClientForSource(source: EvmCctpSource): PublicClient {
+  return createPublicClient({ transport: http(source.rpcUrl) }) as PublicClient;
+}
+
+// The block range to search, and whether it is trustworthy enough for a NEGATIVE result.
+//
+// EXACT: the record captured the chain head just before submitting, so the burn — which can
+// only execute between the submit and the deadline — must lie in
+// [fromBlock, fromBlock + deadline-span]. That span is a constant ~10 minutes of blocks
+// however old the record is, which is what keeps one getLogs call inside every provider's
+// range cap. Clamped to the head so we never ask for unmined blocks.
+//
+// ESTIMATED: no anchor (the pre-submit read failed), so fall back to a bounded lookback from
+// the head. A match here is still proof (the commitment identifies it), but a no-match is
+// not — the window may simply be in the wrong place.
+function scanWindow(
+  record: PendingReturnBurn,
+  head: bigint,
+  now: number,
+): { fromBlock: bigint; toBlock: bigint; exact: boolean } {
+  const deadlineSpanMs = Math.min(
+    MAX_DEADLINE_SPAN_MS,
+    Math.max(0, record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS - record.submittedAtMs),
+  );
+  const deadlineSpanBlocks = BigInt(Math.ceil(deadlineSpanMs / FASTEST_BLOCK_TIME_MS));
+
+  if (record.fromBlock !== undefined) {
+    const anchor = BigInt(record.fromBlock);
+    // An anchor above the head means a chain reorg or a record from another chain; treat the
+    // head as the bound rather than producing an inverted range.
+    const fromBlock = anchor > head ? head : anchor;
+    const upper = fromBlock + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
+    return { fromBlock, toBlock: upper > head ? head : upper, exact: true };
+  }
+
+  // Estimated: walk back far enough to plausibly cover the submit, bounded by the lookback.
+  const elapsedMs = Math.max(0, now - record.submittedAtMs);
+  const back = BigInt(Math.ceil(elapsedMs / FASTEST_BLOCK_TIME_MS)) + SCAN_MARGIN_BLOCKS;
+  const capped = back > FALLBACK_LOOKBACK_BLOCKS ? FALLBACK_LOOKBACK_BLOCKS : back;
+  return { fromBlock: head > capped ? head - capped : 0n, toBlock: head, exact: false };
 }

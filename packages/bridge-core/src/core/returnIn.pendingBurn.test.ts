@@ -18,7 +18,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { waitForAttestation, callContract, getLogs, getBlockNumber } = vi.hoisted(() => ({
+const { waitForAttestation, callContract, getLogs, getBlockNumber, transports } = vi.hoisted(() => ({
   waitForAttestation: vi.fn<
     (
       burnTx: string,
@@ -28,6 +28,7 @@ const { waitForAttestation, callContract, getLogs, getBlockNumber } = vi.hoisted
   callContract: vi.fn(async () => ['0x0'] as string[]),
   getLogs: vi.fn(async () => [] as unknown[]),
   getBlockNumber: vi.fn(async () => 1_000n),
+  transports: [] as Array<string | undefined>,
 }));
 
 vi.mock('./polygonMint', async (importOriginal) => {
@@ -45,9 +46,20 @@ vi.mock('./proving', async (importOriginal) => {
   const mod = await importOriginal<typeof import('./proving')>();
   return { ...mod, sleep: vi.fn(async () => {}) };
 });
-vi.mock('./polygonClient', async (importOriginal) => {
-  const mod = await importOriginal<typeof import('./polygonClient')>();
-  return { ...mod, getPolygonPublicClient: vi.fn(() => ({ getLogs, getBlockNumber })) };
+// The burn/scan client is built per-chain from the source registry's rpcUrl. Intercept BOTH
+// halves: `http` records the URL at the call site (the viem transport object doesn't expose
+// it before instantiation), and `createPublicClient` returns the fake chain. `transports` is
+// how the cross-chain test proves the scan queries the burn's OWN chain.
+vi.mock('viem', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('viem')>();
+  return {
+    ...mod,
+    http: vi.fn((url?: string) => {
+      transports.push(url);
+      return mod.http(url);
+    }),
+    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber })),
+  };
 });
 vi.mock('./config', async (importOriginal) => {
   const mod = await importOriginal<typeof import('./config')>();
@@ -115,7 +127,7 @@ function burnLog(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 function pendingRecord(overrides: Partial<PendingReturnBurn> = {}): PendingReturnBurn {
-  return {
+  const base: PendingReturnBurn = {
     accountIndex: ACCOUNT_INDEX,
     depositWallet: DEPOSIT_WALLET,
     amount: AMOUNT.toString(),
@@ -124,9 +136,18 @@ function pendingRecord(overrides: Partial<PendingReturnBurn> = {}): PendingRetur
     evmChainId: config.polygon.chainId,
     inboundAnonymizer: config.inboundAnonymizerAddress,
     submittedAtMs: Date.now(),
+    // The normal case: the pre-submit head read landed, so the window is EXACT and a
+    // no-match past the deadline is conclusive. Tests that need the fallback drop it.
+    fromBlock: '900',
     deadlineMs: Date.now() + 600_000,
     ...overrides,
   };
+  // A real record's deadline is always its own submit + the batch lifetime, so keep the two
+  // consistent when a test moves only one of them.
+  if (overrides.deadlineMs === undefined && overrides.submittedAtMs !== undefined) {
+    base.deadlineMs = overrides.submittedAtMs + 600_000;
+  }
+  return base;
 }
 
 function runReturn(submit: (calls: ReturnBurnCall[]) => Promise<string>) {
@@ -150,6 +171,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   getLogs.mockResolvedValue([]);
   getBlockNumber.mockResolvedValue(1_000n);
+  transports.length = 0;
   callContract.mockResolvedValue(['0x0']);
   waitForAttestation.mockResolvedValue({ message: attestedMessage(), attestation: ATTESTATION });
 });
@@ -348,17 +370,67 @@ describe('recoverPendingReturnBurn (the sweep entry point)', () => {
     expect(readPendingReturnBurn(EVM_ADDRESS)).toMatchObject({ accountIndex: 0, submittedAtMs: 0 });
   });
 
-  it('scans further back the longer ago the burn was submitted', async () => {
-    // The window is derived from elapsed time, so recovery still works after the tab was
-    // closed for hours — a fixed lookback would quietly stop finding old burns.
-    getBlockNumber.mockResolvedValue(5_000_000n);
-    writePendingReturnBurn(EVM_ADDRESS, pendingRecord({ submittedAtMs: Date.now() - 3_600_000 }));
+  it('keeps the scan window BOUNDED however old the record is', async () => {
+    // The burn can only run between the submit and the deadline, so the window is that
+    // span — not "everything since the submit". A week-old record must still be one
+    // reasonably-sized getLogs call, or it exceeds the provider's range cap and fails as
+    // 'unknown' forever, which would strand the funds it is meant to recover.
+    getBlockNumber.mockResolvedValue(50_000_000n);
+    writePendingReturnBurn(
+      EVM_ADDRESS,
+      pendingRecord({ submittedAtMs: Date.now() - 7 * 86_400_000, fromBlock: '41_000_000'.replace(/_/g, '') }),
+    );
 
     await recoverPendingReturnBurn(EVM_ADDRESS);
 
-    const { fromBlock } = getLogs.mock.calls[0][0] as { fromBlock: bigint };
-    // ~1h at 2s blocks ≈ 1800 blocks, plus the margin — and never past the head.
-    expect(fromBlock).toBeLessThan(5_000_000n - 1_800n);
-    expect(fromBlock).toBeGreaterThan(4_990_000n);
+    const { fromBlock, toBlock } = getLogs.mock.calls[0][0] as { fromBlock: bigint; toBlock: bigint };
+    expect(fromBlock).toBe(41_000_000n);
+    // ~12 min at the fastest assumed block time, plus margin — thousands, not millions.
+    expect(toBlock - fromBlock).toBeLessThan(10_000n);
+  });
+
+  it('never reports never-landed from an ESTIMATED window (no block anchor)', async () => {
+    // Without an anchor we cannot prove we looked in the right place, so a clean scan past
+    // the deadline is 'unknown' — releasing the double-burn guard on a guess is exactly the
+    // failure this whole mechanism exists to avoid.
+    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 600_000 });
+    delete noAnchor.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+
+    const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(stillPending).toBe(true);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+  });
+
+  it('still PROVES a landed burn from an estimated window (a match needs no anchor)', async () => {
+    // The commitment identifies the event, so a hit is conclusive either way — only the
+    // negative result depends on the window being exact.
+    const noAnchor = pendingRecord();
+    delete noAnchor.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+    getLogs.mockResolvedValue([burnLog()]);
+
+    const { resumable } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(resumable).toMatchObject({ burnTx: BURN_TX });
+  });
+
+  it('scans the chain the burn ran on, not always Polygon', async () => {
+    // The record names its own chain; resolving that chain's TokenMessenger but querying
+    // Polygon returns an empty log set, which past the deadline reads as "never happened".
+    const other = Object.values(config.evmCctpSources).find(
+      (s) => s.chainId !== config.polygon.chainId && s.rpcUrl !== config.polygon.rpcUrl,
+    );
+    if (!other) throw new Error('test config has no second EVM CCTP source to check against');
+    writePendingReturnBurn(
+      EVM_ADDRESS,
+      pendingRecord({ evmChainId: other.chainId, sourceDomain: other.domain }),
+    );
+
+    await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(transports.at(-1)).toBe(other.rpcUrl);
+    expect(transports.at(-1)).not.toBe(config.polygon.rpcUrl);
   });
 });

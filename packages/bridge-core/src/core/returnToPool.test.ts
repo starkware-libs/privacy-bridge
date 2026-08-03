@@ -36,6 +36,8 @@ const {
   buildAndProveClaim,
   submitProvenClaim,
   PROVEN,
+  getLogs,
+  getBlockNumber,
 } = vi.hoisted(() => {
   // Opaque proven-claim artifact buildAndProveClaim hands submitProvenClaim — the
   // orchestrator treats it as a black box, so a sentinel is enough to assert it is
@@ -54,6 +56,8 @@ const {
     // claimToPool is only used by recoverBridgeIn now — returnToPool never calls it. Kept
     // as a stub so returnIn's import resolves; asserted NEVER called.
     claimToPool: vi.fn(async () => ({ claimTxHash: '0xc1a1m' })),
+    getLogs: vi.fn(async () => [] as unknown[]),
+    getBlockNumber: vi.fn(async () => 1_000n),
     // The folded claim: build the proof (commits the CCTP message) then submit it.
     buildAndProveClaim: vi.fn(async () => PROVEN),
     submitProvenClaim: vi.fn(async () => '0xc1a1m'),
@@ -104,6 +108,16 @@ vi.mock('./provider', () => ({
 // The folded claim is mocked at the module boundary (bridgeBack), so REAL returnToPool
 // + REAL returnBurnToPool run but the proof build + submit are spies we can inspect.
 vi.mock('./bridgeBack', () => ({ claimToPool, buildAndProveClaim, submitProvenClaim }));
+// The pending-burn recovery scan builds its own per-chain client, so stub the viem seam.
+// Defaults to an empty log set: with no pending record the scan never runs at all, so every
+// pre-existing test is unaffected.
+vi.mock('viem', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('viem')>();
+  return {
+    ...mod,
+    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber })),
+  };
+});
 vi.mock('./config', async (importOriginal) => {
   const mod = await importOriginal<typeof import('./config')>();
   return { ...mod, config: { ...mod.config, inboundAnonymizerAddress: '0x49abc' } };
@@ -527,5 +541,82 @@ describe('returnToPool — secret hygiene (spyOnSecretSinks)', () => {
       sinks.restore();
     }
     sinks.assertNeverLeaked(SIGNATURE, SN_PRIVATE_KEY, VIEWING_KEY.toString());
+  });
+});
+
+describe('returnToPool — pending-burn recovery (the stranded-return incident)', () => {
+  // A burn the relayer accepted but the client never saw confirmed. The batch mined, so the
+  // deposit wallet is EMPTY and no cursor was ever written.
+  const PENDING_KEY = 'pmp.pendingReturnBurn';
+  function seedPending(overrides: Record<string, unknown> = {}): void {
+    localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({
+        [EVM_ADDRESS.toLowerCase()]: {
+          accountIndex: ACCOUNT_INDEX,
+          depositWallet: DEPOSIT_WALLET,
+          amount: FRESH_AMOUNT.toString(),
+          commitment: EXPECTED_COMMITMENT.toString(),
+          sourceDomain: POLYGON_DOMAIN,
+          evmChainId: config.polygon.chainId,
+          inboundAnonymizer: INBOUND,
+          submittedAtMs: Date.now(),
+          fromBlock: '900',
+          deadlineMs: Date.now() + 600_000,
+          ...overrides,
+        },
+      }),
+    );
+  }
+  function landedBurnLog() {
+    return {
+      transactionHash: BURN_TX,
+      args: {
+        burnToken: '0xUSDC',
+        amount: FRESH_AMOUNT,
+        depositor: DEPOSIT_WALLET,
+        mintRecipient: `0x${INBOUND_FIELD64}`,
+        destinationDomain: config.cctp.starknetDomain,
+        hookData: `0x${EXPECTED_COMMITMENT.toString(16).padStart(64, '0')}`,
+      },
+    };
+  }
+
+  it('RESUMES a landed-but-unconfirmed burn instead of dying in the fresh prep', async () => {
+    // THE REGRESSION. returnToPool picks fresh-vs-resume from the cursor alone and runs
+    // prepareFreshReturn first — which, after this incident, throws "nothing to return"
+    // because the burn already drained the wallet. If recovery only lived inside
+    // returnBurnToPool the run would never reach it, and the retry the user is told to make
+    // would strand the funds exactly as before.
+    seedPending();
+    getLogs.mockResolvedValue([landedBurnLog()]);
+    prepareFreshReturn.mockRejectedValue(
+      new Error("No returnable USDC on this account's deposit wallet — nothing to return."),
+    );
+
+    const result = await run();
+
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(submitGaslessBatch).not.toHaveBeenCalled();
+    // It resumed off the burn the scan proved, and the folded claim landed.
+    expect(waitForAttestation).toHaveBeenCalledWith(BURN_TX, expect.anything());
+    expect(submitProvenClaim).toHaveBeenCalledTimes(1);
+    expect(result.claimTxHash).toBe('0xc1a1m');
+  });
+
+  it('REFUSES a fresh return before the prep runs while a submission is unresolved', async () => {
+    // Not on chain yet: the prep converts balances and marks the account as returning, so
+    // the refusal has to come first — and above all no second burn may be built.
+    seedPending();
+
+    await expect(run()).rejects.toThrow(/submitted from this device/i);
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(submitGaslessBatch).not.toHaveBeenCalled();
+  });
+
+  it('leaves the ordinary fresh path untouched when nothing is pending', async () => {
+    await expect(run()).resolves.toMatchObject({ claimTxHash: '0xc1a1m' });
+    expect(prepareFreshReturn).toHaveBeenCalledTimes(1);
+    expect(getLogs).not.toHaveBeenCalled();
   });
 });
