@@ -61,6 +61,16 @@ import {
 } from '../derivation/index';
 import { claimToPool, buildAndProveClaim, submitProvenClaim } from './bridgeBack';
 import { assertStorageWritable } from './storageProbe';
+import { markNonRetryable } from './errors';
+import { sleep } from './proving';
+import {
+  clearPendingReturnBurn,
+  readPendingReturnBurn,
+  resolvePendingReturnBurn,
+  writePendingReturnBurn,
+  type PendingReturnBurn,
+} from './pendingReturnBurn';
+import { getPolygonPublicClient } from './polygonClient';
 
 // CCTP Standard finality (free, finalized) — the default for testing. 1000 = Fast.
 const STANDARD_FINALITY = 2000;
@@ -344,6 +354,133 @@ function writeInflightReturnVerified(evmAddress: string, record: InflightReturn)
   return !!persisted && persisted.burnTx === record.burnTx && persisted.phase === record.phase;
 }
 
+// Turn a PENDING (submitted, outcome unobserved) return burn into a real post-burn
+// cursor, once — and only once — the chain proves the burn actually landed.
+//
+// This is the recovery half of the pending-record scheme (see pendingReturnBurn.ts). It is
+// the ONLY writer that can mint a cursor without having watched the burn happen, so the
+// promotion gate is the chain scan's `landed` verdict and nothing weaker: 'pending' and
+// 'unknown' both leave the record untouched for a later attempt, because a cursor written
+// on a guess would send the resume path off to attest a tx hash that does not exist.
+//
+// A 'never-landed' verdict is the other definitive answer — the batch's deadline has passed
+// so it can never execute — and clears the record, which is what lets the user simply
+// return again instead of being told forever not to retry.
+//
+// Returns the promoted cursor (so a caller can resume from it immediately), else null.
+async function promoteLandedPendingBurn(
+  evmAddress: string,
+  opts?: { client?: ReturnType<typeof getPolygonPublicClient>; now?: number },
+): Promise<InflightReturn | null> {
+  const pending = readPendingReturnBurn(evmAddress);
+  if (!pending) return null;
+  // A cursor already exists for this address ⇒ the burn was observed the normal way and the
+  // pending record is spent bookkeeping. Drop it rather than racing the real cursor.
+  if (readInflightReturn(evmAddress)) {
+    clearPendingReturnBurn(evmAddress);
+    return null;
+  }
+  const resolution = await resolvePendingReturnBurn(pending, opts);
+  if (resolution.kind === 'never-landed') {
+    clearPendingReturnBurn(evmAddress);
+    return null;
+  }
+  if (resolution.kind !== 'landed') return null;
+
+  const record: InflightReturn = {
+    accountIndex: pending.accountIndex,
+    burnTx: resolution.burnTx,
+    sourceDomain: pending.sourceDomain,
+    amount: pending.amount,
+    commitment: pending.commitment,
+    evmChainId: pending.evmChainId,
+    inboundAnonymizer: pending.inboundAnonymizer,
+    channel: pending.channel,
+  };
+  writeInflightReturnVerified(evmAddress, record);
+  // Clear only AFTER the cursor write is attempted: if that write is what fails (quota), the
+  // pending record is the last thing standing between the user and a stranded burn, so it
+  // must outlive a failed promotion and be retried on the next sweep.
+  if (readInflightReturn(evmAddress)) clearPendingReturnBurn(evmAddress);
+  return record;
+}
+
+// Public recovery entry point: resolve any submitted-but-unconfirmed return burn on this
+// device for `evmAddress` and promote it to a resumable cursor if it landed. Safe to call
+// on app load / from a periodic sweep — it is a no-op when there is nothing pending, never
+// throws (a scan failure resolves 'unknown' and simply leaves the record), and never burns.
+//
+// Returns what the caller needs to decide what to say: whether a return is now resumable,
+// and whether the funds are confirmed untouched (so offering a fresh return is safe).
+export async function recoverPendingReturnBurn(
+  evmAddress: string,
+  opts?: { client?: ReturnType<typeof getPolygonPublicClient>; now?: number },
+): Promise<{ resumable: InflightReturn | null; stillPending: boolean }> {
+  const promoted = await promoteLandedPendingBurn(evmAddress, opts);
+  return { resumable: promoted, stillPending: readPendingReturnBurn(evmAddress) !== null };
+}
+
+// The relayer batch is signed with a 10-minute EIP-712 deadline. Used only when a
+// submitter doesn't report its own — see GaslessBatchSubmission.deadlineMs.
+const DEFAULT_BATCH_DEADLINE_MS = 600_000;
+
+// Inline budget for resolving a burn whose submitter threw. Generous enough to cover the
+// usual case (the relayer's status poll gave up moments before the batch mined) without
+// holding the UI to the batch's full 10-minute deadline: whatever is unresolved when this
+// runs out stays in the pending record for the app's sweep / the next return attempt.
+const AMBIGUOUS_RESOLVE_ATTEMPTS = 12;
+const AMBIGUOUS_RESOLVE_INTERVAL_MS = 5_000;
+
+// Ask the chain what happened to a burn whose submitter threw, polling while the answer is
+// still "don't know". Returns the burn tx hash if it landed, 'never-landed' if the batch
+// can no longer execute (funds untouched — the original error stands and a retry is safe),
+// or null while it remains genuinely undecidable.
+//
+// Never clears the pending record on 'landed': the cursor is written by the caller a few
+// lines later, and until it is, the pending record is the only thing that can recover this
+// burn. Only a verdict that the funds NEVER MOVED is safe to clear here.
+async function resolveAmbiguousReturnBurn(
+  evmAddress: string,
+  pending: PendingReturnBurn,
+  onStatus?: (s: string) => void,
+): Promise<string | 'never-landed' | null> {
+  for (let attempt = 0; attempt < AMBIGUOUS_RESOLVE_ATTEMPTS; attempt++) {
+    const resolution = await resolvePendingReturnBurn(pending);
+    if (resolution.kind === 'landed') return resolution.burnTx;
+    if (resolution.kind === 'never-landed') {
+      clearPendingReturnBurn(evmAddress);
+      return 'never-landed';
+    }
+    if (attempt < AMBIGUOUS_RESOLVE_ATTEMPTS - 1) {
+      onStatus?.("Checking whether the return burn reached the chain — don't close this tab…");
+      await sleep(AMBIGUOUS_RESOLVE_INTERVAL_MS);
+    }
+  }
+  return null;
+}
+
+// The honest error for a burn we still can't place. Two things it must do that the old
+// "do NOT retry blindly — check Polygonscan" copy did not: tell the user their funds are
+// accounted for (a pending record now exists, so the next attempt resolves it rather than
+// re-burning), and stay NON_RETRYABLE so nothing AUTOMATICALLY re-submits while the
+// original batch may still mine. The user-driven retry is safe by construction — it
+// re-enters through the pending-recovery gate below, which refuses to burn twice.
+function ambiguousBurnError(cause: unknown, evmAddress: string): Error {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return markNonRetryable(
+    Object.assign(
+      new Error(
+        `The return burn was submitted but we couldn't confirm it on-chain yet (${detail}). ` +
+          `Your funds are tracked: we saved this submission and will finish the return ` +
+          `automatically once the burn appears on Polygon — reopen or retry the return in a few ` +
+          `minutes and it will resume. Do not send a second return; the retry checks the chain ` +
+          `first and will never burn twice.`,
+      ),
+      { cause, evmAddress },
+    ),
+  );
+}
+
 // PRE-FLIGHT, FRESH-burn path only: prove localStorage accepts a write + read-back
 // BEFORE we burn. If it can't (private-browsing, disabled storage, quota), the
 // resume cursor we'd write AFTER the burn would silently vanish — a reload then
@@ -358,11 +495,33 @@ export interface ReturnBurnCall {
   data: `0x${string}`;
 }
 
+// What the submitter reports the INSTANT the relayer accepts the batch — before any
+// tx hash exists. Fired synchronously from inside the submit, mirroring the AVNU
+// `onRelayStart` boundary: everything after it is post-broadcast and AMBIGUOUS, so this
+// is the last moment at which we are guaranteed to be able to record that a burn may
+// now be in flight. `transactionID` is the relayer's own durable handle (opaque to us).
+export interface GaslessBatchSubmission {
+  transactionID?: string;
+  // Unix ms after which the signed batch can no longer execute on-chain (its EIP-712
+  // deadline). This is what later makes "not on chain" a VERDICT rather than a shrug —
+  // see pendingReturnBurn.ts. Omitted ⇒ the caller assumes a conservative default.
+  deadlineMs?: number;
+}
+
 // Injected gasless transport: submit the burn calls FROM the deposit wallet via the
 // relayer (signed by the EOA owner, relayer pays Polygon gas) and return the
 // on-chain Polygon tx hash of the executed batch (the one Iris indexes for the
 // MessageSent). Owned by relayer.ts; injected so returnIn needs no relayer import.
-export type SubmitGaslessBatch = (calls: ReturnBurnCall[]) => Promise<string>;
+//
+// `hooks.onSubmitted` MUST be invoked as soon as the relayer accepts the submit, even
+// though the hash is not known yet — that call is what lets a burn survive a submitter
+// that later throws (see pendingReturnBurn.ts). It is OPTIONAL on the type so an older
+// consuming app keeps compiling; a submitter that never calls it simply falls back to
+// today's behavior (a throw after acceptance strands the burn).
+export type SubmitGaslessBatch = (
+  calls: ReturnBurnCall[],
+  hooks?: { onSubmitted?: (submission: GaslessBatchSubmission) => void },
+) => Promise<string>;
 
 export interface ReturnBurnToPoolArgs {
   // The account whose per-account deposit wallet holds the USDC to return (cross-account guard).
@@ -489,6 +648,16 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     }
   };
 
+  // (0) PENDING-BURN RECOVERY, before anything reads the cursor. A prior run may have
+  // SUBMITTED a burn and never learned its outcome (the relayer's status poll timed out /
+  // the tab closed), leaving a pending record but no cursor. Resolve it from chain first:
+  // if that burn landed it becomes a cursor here and the resume path below picks it up
+  // exactly as though we had watched it happen — which is the difference between finishing
+  // the return and re-burning an already-empty wallet. Deliberately runs for ANY account
+  // index: a landed burn belonging to a DIFFERENT account must reach the cross-account
+  // guard below and BLOCK this return, not be skipped so this one can burn over it.
+  await promoteLandedPendingBurn(evmAddress);
+
   // (1) RESUME PATH: a prior run already burned for this EVM address but didn't
   // finish attest/claim. Resume from attest off the persisted cursor — skip
   // approve+burn entirely (re-burning would double-spend the EOA's USDC). The burn
@@ -510,6 +679,23 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     }
     onStatus?.('Resuming an in-flight return (already burned)…');
     return finishAttest(inflight.burnTx, inflight, { detectAlreadyClaimed: true });
+  }
+
+  // (1b) UNRESOLVED-SUBMISSION GUARD. Step (0) promotes a pending burn once the chain
+  // PROVES it landed; a record that survives means the opposite — we still cannot tell
+  // whether the deposit wallet's USDC has already gone into CCTP. Falling through to a
+  // fresh burn there is precisely the double-burn the pending record exists to prevent
+  // (and the wallet often still reads funded, because the first burn hasn't mined yet).
+  // Refuse, and say so in words that classify TRANSIENT so the flow ends RESUMABLE
+  // rather than as a red terminal card.
+  const unresolved = readPendingReturnBurn(evmAddress);
+  if (unresolved) {
+    throw new Error(
+      `A return burn for account #${unresolved.accountIndex} was already submitted from this ` +
+        `device and hasn't been confirmed on-chain yet, so starting another one could burn the ` +
+        `same funds twice. Retry in a few minutes — network error or node lag aside, we check ` +
+        `Polygon each time and will resume the original burn as soon as it appears.`,
+    );
   }
 
   // (2) FRESH PATH. The burn runs GASLESSLY from the deposit wallet via the
@@ -587,8 +773,53 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
 
   // Submit the batch gaslessly — this IS the burn. The returned hash is the on-chain
   // Polygon tx carrying the CCTP MessageSent (fed to waitForAttestation below).
+  //
+  // AMBIGUITY WINDOW: the relayer accepts the submit and broadcasts asynchronously, so a
+  // throw from here does NOT mean the burn didn't happen — the status poll may simply have
+  // given up first. Historically that threw with nothing persisted, and since the fold-only
+  // recovery model is entirely cursor-driven, the burn (which then landed) became invisible:
+  // the wallet read empty on retry and there was no cursor to recover. So we record the
+  // submission the instant the relayer accepts it, and on a throw we ASK THE CHAIN instead
+  // of guessing.
   onStatus?.('Burning USDC on Polygon (gasless return CCTP)…');
-  const burnTx = await submitGaslessBatch(calls);
+  // Holder rather than a bare `let`: the assignment happens inside a callback, which TS's
+  // control-flow analysis can't see, so a plain local would stay narrowed to `null`.
+  const submitted: { record: PendingReturnBurn | null } = { record: null };
+  const onSubmitted = (submission: GaslessBatchSubmission): void => {
+    const record: PendingReturnBurn = {
+      accountIndex,
+      channel,
+      depositWallet,
+      amount: amount.toString(),
+      commitment: commitment.toString(),
+      sourceDomain,
+      evmChainId: burnChain.chainId,
+      inboundAnonymizer: inbound,
+      submittedAtMs: Date.now(),
+      // A submitter that can't report its batch deadline gets a conservative default: too
+      // LONG only delays a safe retry, while too short would call a still-mineable batch
+      // dead and invite the double-burn.
+      deadlineMs: submission.deadlineMs ?? Date.now() + DEFAULT_BATCH_DEADLINE_MS,
+      transactionID: submission.transactionID,
+    };
+    submitted.record = record;
+    writePendingReturnBurn(evmAddress, record);
+  };
+
+  let burnTx: string;
+  try {
+    burnTx = await submitGaslessBatch(calls, { onSubmitted });
+  } catch (err) {
+    // Nothing was ever accepted by the relayer (a pre-submit throw), so there is no burn to
+    // find and the original error stands — retrying is safe and correct.
+    const pending = submitted.record;
+    if (!pending) throw err;
+    const recovered = await resolveAmbiguousReturnBurn(evmAddress, pending, onStatus);
+    if (recovered === null) throw ambiguousBurnError(err, evmAddress);
+    if (recovered === 'never-landed') throw err;
+    burnTx = recovered;
+    onStatus?.('Found the return burn on-chain — continuing.');
+  }
 
   // FAIL CLOSED on a malformed submitter return (empty/non-0x-hex). The value is
   // persisted VERBATIM into the resume cursor below, and readInflightReturn uses
@@ -633,6 +864,12 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     onStatus?.(
       'WARNING: could not save the return resume point — do NOT reload this tab until the return completes.',
     );
+  } else {
+    // The cursor now carries everything the pending record was insuring against, so retire
+    // it. Only on a VERIFIED cursor write: if that write was the thing that failed, the
+    // pending record is the sole remaining handle on an already-committed burn, and dropping
+    // it here would recreate exactly the strand this whole mechanism exists to prevent.
+    clearPendingReturnBurn(evmAddress);
   }
 
   // Attest (Iris is keyed by the Polygon SOURCE domain) and return the {message,
