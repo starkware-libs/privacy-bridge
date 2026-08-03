@@ -261,6 +261,18 @@ export function isValidInflightReturn(value: unknown): value is InflightReturn {
   );
 }
 
+// End of life for ONE return burn: drop the resume cursor AND the pending-submission
+// record together. They are separate stores with separate jobs, but they describe the SAME
+// burn, so every terminal outcome has to retire both. A pending record that outlives its
+// burn keeps re-promoting it from chain, and the user's NEXT return is then swallowed as
+// "already claimed" instead of returning their new funds — and the deadline path can never
+// clear it, because that burn genuinely did land. Used at the folded claim landing, the
+// already-claimed short-circuit, and a demonstrably-terminal attestation failure.
+function clearReturnRecords(evmAddress: string): void {
+  clearInflightReturn(evmAddress);
+  clearPendingReturnBurn(evmAddress);
+}
+
 function clearInflightReturn(evmAddress: string): void {
   try {
     const map = readInflightReturnMap();
@@ -496,7 +508,16 @@ function unresolvedSubmissionError(record: PendingReturnBurn): Error {
 // while this batch may still be mining, and the only safe advice is to check the chain
 // first. Promising the tracked story in the untracked case is how a recoverable strand
 // becomes a double-burn.
-function ambiguousBurnError(cause: unknown, evmAddress: string, tracked: boolean): Error {
+function ambiguousBurnError(
+  cause: unknown,
+  evmAddress: string,
+  // The wallet that actually BURNS, which is what a user must look up. NOT evmAddress:
+  // that is the connected wallet used to key the record, and it never executes the burn —
+  // pointing a user there means they see nothing, conclude it never happened, and retry
+  // into the double-burn this message exists to prevent.
+  depositWallet: string,
+  tracked: boolean,
+): Error {
   const detail = cause instanceof Error ? cause.message : String(cause);
   const message = tracked
     ? `The return burn was submitted but we couldn't confirm it on-chain yet (${detail}). ` +
@@ -507,9 +528,9 @@ function ambiguousBurnError(cause: unknown, evmAddress: string, tracked: boolean
     : `The return burn was submitted but we couldn't confirm it on-chain (${detail}), AND ` +
       `browser storage rejected the record we use to track it — so a retry cannot be ` +
       `protected from burning the same funds twice. Do NOT retry yet: check the deposit ` +
-      `wallet ${evmAddress} on a block explorer first. If the burn is there your funds are ` +
-      `in transit and will need recovery; if it is not, free up browser storage and retry.`;
-  return markNonRetryable(Object.assign(new Error(message), { cause, evmAddress }));
+      `wallet ${depositWallet} on a block explorer first. If the burn is there your funds ` +
+      `are in transit and will need recovery; if it is not, free up browser storage and retry.`;
+  return markNonRetryable(Object.assign(new Error(message), { cause, evmAddress, depositWallet }));
 }
 
 // PRE-FLIGHT, FRESH-burn path only: prove localStorage accepts a write + read-back
@@ -653,7 +674,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
       };
     } catch (err) {
       if (isTerminalAttestFailure(err)) {
-        clearInflightReturn(evmAddress);
+        clearReturnRecords(evmAddress);
       }
       // Fail-closed: an is_nonce_used RPC failure throws here too, but matches
       // neither TERMINAL regex above, so the cursor is PRESERVED — a read failure
@@ -860,7 +881,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     // case of quota being hit between that probe and here.)
     const tracked = writePendingReturnBurn(evmAddress, pending);
     const recovered = await resolveAmbiguousReturnBurn(evmAddress, pending, onStatus);
-    if (recovered === null) throw ambiguousBurnError(err, evmAddress, tracked);
+    if (recovered === null) throw ambiguousBurnError(err, evmAddress, depositWallet, tracked);
     if (recovered === 'never-landed') throw err;
     burnTx = recovered;
     onStatus?.('Found the return burn on-chain — continuing.');
@@ -1237,7 +1258,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // clear the cursor and finish without a claim (amount 0 / empty tx signals "no new
   // value moved this run" to ReturnContext, which gates its History write on > 0).
   if (burnResult.alreadyClaimed) {
-    clearInflightReturn(evmAddress);
+    clearReturnRecords(evmAddress);
     emit('claim', 'done', 'Already claimed into the pool (from another run/device).');
     return { amountReturned: 0n, claimTxHash: '', ranFreshBurn, alreadyClaimed: true };
   }
@@ -1274,8 +1295,8 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   }
   emit('claim', 'done', 'Claimed back into the pool.');
 
-  // Success: the claim landed. Clear the cursor (the claim stage is its owner).
-  clearInflightReturn(evmAddress);
+  // Success: the claim landed. Retire both records (the claim stage owns their lifetime).
+  clearReturnRecords(evmAddress);
   return { amountReturned: amount, claimTxHash, ranFreshBurn, alreadyClaimed: false };
 }
 
@@ -1381,7 +1402,7 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
       onStatus,
     }));
   } catch (err) {
-    if (isTerminalAttestFailure(err)) clearInflightReturn(evmAddress);
+    if (isTerminalAttestFailure(err)) clearReturnRecords(evmAddress);
     throw err;
   }
 
@@ -1389,7 +1410,7 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
   // landed — clear the stale cursor and no-op (a read FAILURE throws above and preserves
   // the cursor, so it is never mistaken for already-claimed).
   if (await isCctpMessageNonceUsed(message)) {
-    clearInflightReturn(evmAddress);
+    clearReturnRecords(evmAddress);
     onStatus?.('Nothing stuck — already claimed.');
     return { stuck: 0n };
   }
@@ -1409,6 +1430,6 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
     inbound: record.inboundAnonymizer ?? inbound,
     onStatus,
   });
-  clearInflightReturn(evmAddress);
+  clearReturnRecords(evmAddress);
   return { stuck: amount, claimTxHash };
 }

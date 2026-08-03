@@ -500,3 +500,74 @@ describe('a storage write that fails must not discard proven evidence', () => {
     expect((err as Error).message).not.toMatch(/block explorer/i);
   });
 });
+
+describe('Bugbot round 3 — three ways a guard could be wrongly released', () => {
+  it('names the DEPOSIT WALLET in the untracked error, not the connected wallet', async () => {
+    // The connected wallet only keys the record; the deposit wallet is what burns. Sending a
+    // user to the wrong address means they see nothing, conclude it never happened, and
+    // retry into the double-burn this message exists to prevent.
+    const real = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      k: string,
+      v: string,
+    ) {
+      if (k === PENDING_RETURN_BURN_KEY) throw new DOMException('QuotaExceededError');
+      real.call(this, k, v);
+    });
+    const submit = vi.fn(async () => {
+      throw new Error('relayer did not confirm an on-chain transaction');
+    });
+
+    const err = await runReturn(submit).catch((e: unknown) => e);
+
+    expect((err as Error).message).toContain(DEPOSIT_WALLET);
+    expect((err as Error).message).not.toContain(EVM_ADDRESS);
+    spy.mockRestore();
+  });
+
+  it('does NOT call a tip-only scan exact when the anchor sits above the head', async () => {
+    // A reorg or a stale node can put the anchor past the head. Clamping keeps the range
+    // from inverting, but the scan then covers only the tip — not the submit window — so a
+    // clean no-match proves nothing and must not resolve never-landed.
+    getBlockNumber.mockResolvedValue(500n);
+    writePendingReturnBurn(
+      EVM_ADDRESS,
+      pendingRecord({ fromBlock: '9000', deadlineMs: Date.now() - 600_000 }),
+    );
+
+    const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(stillPending).toBe(true);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
+  });
+
+  it('retires the pending record on a terminal attestation failure', async () => {
+    // The burn landed but its message will never mint. Both records describe that same dead
+    // burn — leaving the pending one behind would re-promote it forever and swallow the
+    // user's next return as "already claimed", and the deadline can never clear it because
+    // the burn genuinely did land.
+    //
+    // The cursor write is failed on purpose: a successful promotion already retires the
+    // pending record on its own, so only this path actually exercises the terminal clear.
+    writePendingReturnBurn(EVM_ADDRESS, pendingRecord());
+    getLogs.mockResolvedValue([burnLog()]);
+    waitForAttestation.mockRejectedValue(new Error('attestation failed'));
+    const real = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      k: string,
+      v: string,
+    ) {
+      if (k === INFLIGHT_RETURN_KEY) throw new DOMException('QuotaExceededError');
+      real.call(this, k, v);
+    });
+    const submit = vi.fn(async () => BURN_TX);
+
+    await expect(runReturn(submit)).rejects.toThrow(/attestation failed/i);
+
+    spy.mockRestore();
+    expect(readPendingReturnBurn(EVM_ADDRESS)).toBeNull();
+    expect(readCursor()).toBeUndefined();
+  });
+});

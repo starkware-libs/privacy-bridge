@@ -352,11 +352,15 @@ function scanWindow(
 
   if (record.fromBlock !== undefined) {
     const anchor = BigInt(record.fromBlock);
-    // An anchor above the head means a chain reorg or a record from another chain; treat the
-    // head as the bound rather than producing an inverted range.
-    const fromBlock = anchor > head ? head : anchor;
-    const upper = fromBlock + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
-    return { fromBlock, toBlock: upper > head ? head : upper, exact: true };
+    if (anchor > head) {
+      // The anchor sits ABOVE the head — a reorg, a node serving a stale height, or a record
+      // from a different chain. Clamping keeps the range from inverting, but the resulting
+      // scan covers only the tip and NOT the submit window it was supposed to, so it is not
+      // exact: a clean no-match here proves nothing and must never release the guard.
+      return { fromBlock: head, toBlock: head, exact: false };
+    }
+    const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
+    return { fromBlock: anchor, toBlock: upper > head ? head : upper, exact: true };
   }
 
   // Estimated: walk back far enough to plausibly cover the submit, bounded by the lookback.

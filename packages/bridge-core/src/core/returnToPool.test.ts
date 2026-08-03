@@ -614,6 +614,32 @@ describe('returnToPool — pending-burn recovery (the stranded-return incident)'
     expect(submitGaslessBatch).not.toHaveBeenCalled();
   });
 
+  it('retires the pending record when the run COMPLETES from an in-memory hash', async () => {
+    // The failed-cursor-write path: recovery resumes off the returned record, so the claim
+    // lands even though nothing persisted. The pending record must still be retired — left
+    // behind it re-promotes the same on-chain burn forever, and the user's NEXT return gets
+    // swallowed as "already claimed" instead of returning their new funds. The deadline can
+    // never clear it either, because that burn genuinely did land.
+    seedPending();
+    getLogs.mockResolvedValue([landedBurnLog()]);
+    const real = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      k: string,
+      v: string,
+    ) {
+      if (k === INFLIGHT_RETURN_KEY) throw new DOMException('QuotaExceededError');
+      real.call(this, k, v);
+    });
+
+    const result = await run();
+
+    expect(result.claimTxHash).toBe('0xc1a1m');
+    expect(submitProvenClaim).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+    expect(localStorage.getItem(PENDING_KEY)).toBe('{}');
+  });
+
   it('leaves the ordinary fresh path untouched when nothing is pending', async () => {
     await expect(run()).resolves.toMatchObject({ claimTxHash: '0xc1a1m' });
     expect(prepareFreshReturn).toHaveBeenCalledTimes(1);
