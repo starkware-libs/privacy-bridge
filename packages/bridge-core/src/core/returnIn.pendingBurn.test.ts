@@ -18,7 +18,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { waitForAttestation, callContract, getLogs, getBlockNumber, transports } = vi.hoisted(() => ({
+const { waitForAttestation, callContract, getLogs, getBlockNumber, getBlock, transports } = vi.hoisted(() => ({
   waitForAttestation: vi.fn<
     (
       burnTx: string,
@@ -28,6 +28,9 @@ const { waitForAttestation, callContract, getLogs, getBlockNumber, transports } 
   callContract: vi.fn(async () => ['0x0'] as string[]),
   getLogs: vi.fn(async () => [] as unknown[]),
   getBlockNumber: vi.fn(async () => 1_000n),
+  // Anchorless walks read block timestamps to decide when they've reached back past the
+  // submit. Default: a RECENT block, so a walk cannot establish absence unless a test says so.
+  getBlock: vi.fn(async () => ({ timestamp: BigInt(Math.floor(Date.now() / 1000)) })),
   transports: [] as Array<string | undefined>,
 }));
 
@@ -58,7 +61,7 @@ vi.mock('viem', async (importOriginal) => {
       transports.push(url);
       return mod.http(url);
     }),
-    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber })),
+    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber, getBlock })),
   };
 });
 vi.mock('./config', async (importOriginal) => {
@@ -163,6 +166,20 @@ function runReturn(submit: (calls: ReturnBurnCall[]) => Promise<string>) {
   });
 }
 
+// An anchorless record on a chain deep enough that the walk cannot reach genesis, with
+// block timestamps too RECENT to prove it got back past the submit — so absence stays
+// unestablished. This is the genuinely-inconclusive shape.
+function seedInconclusiveAnchorless(overrides: Partial<PendingReturnBurn> = {}) {
+  getBlockNumber.mockResolvedValue(50_000_000n);
+  // Every block the walk can reach is far NEWER than the submit, so it never establishes
+  // that it got back past it — and the chain is deep enough that it cannot hit genesis.
+  getBlock.mockResolvedValue({ timestamp: BigInt(Math.floor(Date.now() / 1000)) });
+  const record = pendingRecord({ submittedAtMs: Date.now() - 86_400_000, ...overrides });
+  delete record.fromBlock;
+  writePendingReturnBurn(EVM_ADDRESS, record);
+  return record;
+}
+
 function readCursor() {
   const raw = localStorage.getItem(INFLIGHT_RETURN_KEY);
   return raw ? JSON.parse(raw)[EVM_ADDRESS.toLowerCase()] : undefined;
@@ -173,6 +190,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   getLogs.mockResolvedValue([]);
   getBlockNumber.mockResolvedValue(1_000n);
+  getBlock.mockResolvedValue({ timestamp: BigInt(Math.floor(Date.now() / 1000)) });
   transports.length = 0;
   callContract.mockResolvedValue(['0x0']);
   waitForAttestation.mockResolvedValue({ message: attestedMessage(), attestation: ATTESTATION });
@@ -406,13 +424,11 @@ describe('recoverPendingReturnBurn (the sweep entry point)', () => {
     expect(toBlock - fromBlock).toBeLessThan(10_000n);
   });
 
-  it('never reports never-landed from an ESTIMATED window (no block anchor)', async () => {
-    // Without an anchor we cannot prove we looked in the right place, so a clean scan past
-    // the deadline is 'unknown' — releasing the double-burn guard on a guess is exactly the
-    // failure this whole mechanism exists to avoid.
-    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 600_000 });
-    delete noAnchor.fromBlock;
-    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+  it('never reports never-landed until the walk reaches back past the submit', async () => {
+    // Absence has to be EARNED. While the walk has not yet covered where the burn could be,
+    // a clean scan past the deadline is 'unknown' — concluding otherwise would release the
+    // double-burn guard on a guess.
+    seedInconclusiveAnchorless({ deadlineMs: Date.now() - 600_000 });
 
     const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
 
@@ -686,11 +702,9 @@ describe('Bugbot round 6 — the guard is bounded by the DEADLINE, not by the sc
     // ever be 'unknown' — never 'never-landed'. Gating the guard on that verdict meant a
     // submit the relayer REFUSED blocked every future return for this wallet, permanently,
     // despite being documented as a bounded wait.
-    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 3_600_000 });
-    delete noAnchor.fromBlock;
-    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+    seedInconclusiveAnchorless({ deadlineMs: Date.now() - 3_600_000 });
 
-    // Still unresolvable — the scan cannot prove absence here, and must not pretend to.
+    // Still unresolvable — the walk cannot prove absence here, and must not pretend to.
     const { stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
     expect(stillPending).toBe(true);
 
@@ -714,9 +728,7 @@ describe('Bugbot round 6 — the guard is bounded by the DEADLINE, not by the sc
   it('keeps the record past the deadline so a landed burn is still recoverable', async () => {
     // Expiring the BLOCKING role must not discard the record: it is the only handle on a
     // burn that may have landed, and losing it is the strand this PR exists to remove.
-    const noAnchor = pendingRecord({ deadlineMs: Date.now() - 3_600_000 });
-    delete noAnchor.fromBlock;
-    writePendingReturnBurn(EVM_ADDRESS, noAnchor);
+    seedInconclusiveAnchorless({ deadlineMs: Date.now() - 3_600_000 });
 
     await recoverPendingReturnBurn(EVM_ADDRESS);
     expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
@@ -725,5 +737,56 @@ describe('Bugbot round 6 — the guard is bounded by the DEADLINE, not by the sc
     getLogs.mockResolvedValue([burnLog()]);
     const { resumable } = await recoverPendingReturnBurn(EVM_ADDRESS);
     expect(resumable).toMatchObject({ burnTx: BURN_TX });
+  });
+});
+
+describe('Bugbot round 7 — an anchorless walk must reach an OLD burn', () => {
+  it('FINDS a burn that sits below the first chunk from the head', async () => {
+    // THE GAP. The anchorless window used to be pinned to the head, capped at one lookback,
+    // so a delayed retry searched recent blocks instead of the submit→deadline span and a
+    // landed burn was never matched — stranding funds an anchored scan would have found.
+    getBlockNumber.mockResolvedValue(50_000_000n);
+    getBlock.mockResolvedValue({ timestamp: BigInt(Math.floor(Date.now() / 1000)) });
+    // The burn is ~35k blocks down: past the first chunk, well within the walk's budget.
+    getLogs.mockImplementation(async (args: { fromBlock: bigint; toBlock: bigint }) =>
+      args.fromBlock <= 49_965_000n && args.toBlock >= 49_965_000n ? [burnLog()] : [],
+    );
+    const record = pendingRecord({ submittedAtMs: Date.now() - 86_400_000 });
+    delete record.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, record);
+
+    const { resumable } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(resumable).toMatchObject({ burnTx: BURN_TX });
+    // Several chunks were walked to get there — not one window at the tip.
+    expect(getLogs.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('CAN conclude never-landed once the walk passes the submit', async () => {
+    // The other half of earning a negative: reaching a block older than the submit means
+    // every block the burn could occupy has been searched, so absence is real and the record
+    // clears — an anchorless record is no longer permanently inconclusive.
+    getBlockNumber.mockResolvedValue(50_000_000n);
+    getBlock.mockResolvedValue({ timestamp: BigInt(Math.floor((Date.now() - 172_800_000) / 1000)) });
+    const record = pendingRecord({ submittedAtMs: Date.now() - 86_400_000 });
+    delete record.fromBlock;
+    writePendingReturnBurn(EVM_ADDRESS, record);
+
+    const { resumable, stillPending } = await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(resumable).toBeNull();
+    expect(stillPending).toBe(false);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).toBeNull();
+  });
+
+  it('stops at the chunk budget rather than scanning forever', async () => {
+    // The walk is bounded: an unreachable submit must cost a fixed number of reads and end
+    // 'unknown', not grind through the whole chain.
+    seedInconclusiveAnchorless();
+
+    await recoverPendingReturnBurn(EVM_ADDRESS);
+
+    expect(getLogs.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
   });
 });

@@ -87,9 +87,18 @@ const FASTEST_BLOCK_TIME_MS = 250;
 // Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
 
-// Lookback for the fallback window used when no exact block anchor was captured. Bounded so
-// the call still succeeds; a no-match under this window is never conclusive (see below).
-const FALLBACK_LOOKBACK_BLOCKS = 10_000n;
+// With no anchor there is no reliable way to MAP a timestamp to a block height — chain block
+// times span ~0.25s to ~15s, so "submitted a day ago" is anywhere from 6k to 350k blocks back
+// and any single estimated window is as likely to sit beside the burn as over it. So the
+// anchorless path WALKS BACK from the head in bounded chunks and stops on a fact rather than
+// an estimate: the first chunk whose lowest block PREDATES the submit. Each chunk costs one
+// getLogs plus one getBlock, and the chunk size stays inside provider range caps.
+const FALLBACK_CHUNK_BLOCKS = 10_000n;
+
+// Ceiling on that walk. Hitting it means we ran out of budget before reaching back past the
+// submit, so absence is NOT established and the result must be 'unknown' — the walk's whole
+// purpose is that a negative answer is earned, never assumed.
+const FALLBACK_MAX_CHUNKS = 12;
 
 // Ceiling on the submit→deadline span the window is sized from. That span comes off a
 // PERSISTED record, and the whole point of the window is that it stays inside a provider's
@@ -320,15 +329,13 @@ export async function resolvePendingReturnBurn(
   const wantHookData = encodeCommitmentHookData(BigInt(record.commitment)).toLowerCase();
   const wantAmount = BigInt(record.amount);
 
-  try {
-    const head = await client.getBlockNumber();
-    const window = scanWindow(record, head, now);
+  const findIn = async (fromBlock: bigint, toBlock: bigint): Promise<`0x${string}` | null> => {
     const logs = await client.getLogs({
       address: source.tokenMessenger as `0x${string}`,
       event: TOKEN_MESSENGER_EVENT_ABI[0],
       args: { depositor: record.depositWallet as `0x${string}` },
-      fromBlock: window.fromBlock,
-      toBlock: window.toBlock,
+      fromBlock,
+      toBlock,
     });
     const match = logs.find(
       (log) =>
@@ -337,23 +344,101 @@ export async function resolvePendingReturnBurn(
         Number(log.args.destinationDomain) === config.cctp.starknetDomain &&
         log.transactionHash !== null,
     );
-    if (match?.transactionHash) return { kind: 'landed', burnTx: match.transactionHash };
-    // A clean scan with no match. Two things must BOTH hold before that becomes a verdict:
-    //   - the deadline has passed, so the batch can no longer execute; and
-    //   - the window was EXACT, so we know we looked in the right place. An estimated
-    //     window that happened to be positioned wrong would otherwise read as proof the
-    //     funds never moved and release the guard — on a guess.
-    if (window.exact && now > record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS) {
-      return { kind: 'never-landed' };
+    return match?.transactionHash ?? null;
+  };
+
+  try {
+    const head = await client.getBlockNumber();
+
+    // A no-match only becomes a verdict once BOTH hold: the search demonstrably covered where
+    // the burn could be, and the deadline has passed so nothing more can land. Otherwise it is
+    // 'pending' (still mineable) or 'unknown' (we did not establish absence) — never a guess
+    // that releases the double-burn guard.
+    const searched =
+      record.fromBlock === undefined
+        ? await walkBackToSubmit(record, head, findIn, async (block) => {
+            const { timestamp } = await client.getBlock({ blockNumber: block });
+            return Number(timestamp) * 1000;
+          })
+        : await searchExactWindow(record, head, findIn);
+
+    if (searched.burnTx) return { kind: 'landed', burnTx: searched.burnTx };
+    if (!searched.coveredSubmit) {
+      return {
+        kind: 'unknown',
+        error: new Error('could not search back far enough to establish the burn never happened'),
+      };
     }
-    if (window.exact) return { kind: 'pending' };
-    return {
-      kind: 'unknown',
-      error: new Error('no block anchor for this submission — the scan window is an estimate'),
-    };
+    if (now > record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS) return { kind: 'never-landed' };
+    return { kind: 'pending' };
   } catch (error) {
     return { kind: 'unknown', error };
   }
+}
+
+// What a search established: the burn's tx hash, and whether the range it covered actually
+// reached back over the submit (which is what licenses a NEGATIVE conclusion).
+interface BurnSearch {
+  burnTx: `0x${string}` | null;
+  coveredSubmit: boolean;
+}
+
+// ANCHORED search: the record captured the chain head just before submitting, so the burn —
+// which can only execute between the submit and the deadline — must lie in
+// [anchor, anchor + deadline-span]. One getLogs, a constant ~10 minutes of blocks however old
+// the record is, which is what keeps it inside every provider's range cap.
+async function searchExactWindow(
+  record: PendingReturnBurn,
+  head: bigint,
+  findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+): Promise<BurnSearch> {
+  const anchor = BigInt(record.fromBlock as string);
+  if (anchor > head) {
+    // The anchor sits ABOVE the head — a reorg, a node serving a stale height, or a record
+    // from a different chain. Search the tip so a burn can still be FOUND, but the submit
+    // window was never covered, so absence here proves nothing.
+    return { burnTx: await findIn(head, head), coveredSubmit: false };
+  }
+  const deadlineSpanMs = Math.min(
+    MAX_DEADLINE_SPAN_MS,
+    Math.max(0, record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS - record.submittedAtMs),
+  );
+  const deadlineSpanBlocks = BigInt(Math.ceil(deadlineSpanMs / FASTEST_BLOCK_TIME_MS));
+  // Margin on BOTH sides. The lower one matters most: the anchor read races the submit, so a
+  // slow response can report a height already PAST the burn's block, and starting exactly at
+  // the anchor would scan above it.
+  const lower = anchor > SCAN_MARGIN_BLOCKS ? anchor - SCAN_MARGIN_BLOCKS : 0n;
+  const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
+  return {
+    burnTx: await findIn(lower, upper > head ? head : upper),
+    coveredSubmit: true,
+  };
+}
+
+// ANCHORLESS search: no height to key off, and timestamps cannot be mapped to heights without
+// knowing the chain's block time (0.25s–15s across chains — a day is 6k or 350k blocks). So
+// walk back from the head in bounded chunks and stop on a FACT: the first chunk whose lowest
+// block predates the submit. At that point the walk has covered every block the burn could be
+// in, so a no-match is real; running out of chunks first leaves it unestablished.
+async function walkBackToSubmit(
+  record: PendingReturnBurn,
+  head: bigint,
+  findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+  blockTimestampMs: (block: bigint) => Promise<number>,
+): Promise<BurnSearch> {
+  let hi = head;
+  for (let chunk = 0; chunk < FALLBACK_MAX_CHUNKS; chunk++) {
+    const lo = hi > FALLBACK_CHUNK_BLOCKS ? hi - FALLBACK_CHUNK_BLOCKS : 0n;
+    const burnTx = await findIn(lo, hi);
+    if (burnTx) return { burnTx, coveredSubmit: true };
+    // Genesis: there is nothing older left to search, so absence is as established as it gets.
+    if (lo === 0n) return { burnTx: null, coveredSubmit: true };
+    if ((await blockTimestampMs(lo)) <= record.submittedAtMs) {
+      return { burnTx: null, coveredSubmit: true };
+    }
+    hi = lo - 1n;
+  }
+  return { burnTx: null, coveredSubmit: false };
 }
 
 // A read-only client for the chain a burn executes on. Exported so the burn path anchors
@@ -363,49 +448,3 @@ export function evmClientForSource(source: EvmCctpSource): PublicClient {
   return createPublicClient({ transport: http(source.rpcUrl) }) as PublicClient;
 }
 
-// The block range to search, and whether it is trustworthy enough for a NEGATIVE result.
-//
-// EXACT: the record captured the chain head just before submitting, so the burn — which can
-// only execute between the submit and the deadline — must lie in
-// [fromBlock, fromBlock + deadline-span]. That span is a constant ~10 minutes of blocks
-// however old the record is, which is what keeps one getLogs call inside every provider's
-// range cap. Clamped to the head so we never ask for unmined blocks.
-//
-// ESTIMATED: no anchor (the pre-submit read failed), so fall back to a bounded lookback from
-// the head. A match here is still proof (the commitment identifies it), but a no-match is
-// not — the window may simply be in the wrong place.
-function scanWindow(
-  record: PendingReturnBurn,
-  head: bigint,
-  now: number,
-): { fromBlock: bigint; toBlock: bigint; exact: boolean } {
-  const deadlineSpanMs = Math.min(
-    MAX_DEADLINE_SPAN_MS,
-    Math.max(0, record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS - record.submittedAtMs),
-  );
-  const deadlineSpanBlocks = BigInt(Math.ceil(deadlineSpanMs / FASTEST_BLOCK_TIME_MS));
-
-  if (record.fromBlock !== undefined) {
-    const anchor = BigInt(record.fromBlock);
-    if (anchor > head) {
-      // The anchor sits ABOVE the head — a reorg, a node serving a stale height, or a record
-      // from a different chain. Clamping keeps the range from inverting, but the resulting
-      // scan covers only the tip and NOT the submit window it was supposed to, so it is not
-      // exact: a clean no-match here proves nothing and must never release the guard.
-      return { fromBlock: head, toBlock: head, exact: false };
-    }
-    // Margin on BOTH sides. The lower one matters most: the anchor read races the submit, so
-    // a slow response can report a height already PAST the burn's block. Starting exactly at
-    // the anchor would then scan above the burn, find nothing, and — past the deadline —
-    // call it never-landed. Backing off keeps the window over the burn.
-    const lower = anchor > SCAN_MARGIN_BLOCKS ? anchor - SCAN_MARGIN_BLOCKS : 0n;
-    const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
-    return { fromBlock: lower, toBlock: upper > head ? head : upper, exact: true };
-  }
-
-  // Estimated: walk back far enough to plausibly cover the submit, bounded by the lookback.
-  const elapsedMs = Math.max(0, now - record.submittedAtMs);
-  const back = BigInt(Math.ceil(elapsedMs / FASTEST_BLOCK_TIME_MS)) + SCAN_MARGIN_BLOCKS;
-  const capped = back > FALLBACK_LOOKBACK_BLOCKS ? FALLBACK_LOOKBACK_BLOCKS : back;
-  return { fromBlock: head > capped ? head - capped : 0n, toBlock: head, exact: false };
-}
