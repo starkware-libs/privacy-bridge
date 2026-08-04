@@ -1,8 +1,9 @@
 // Live STRK→USD spot price for the deposit fee estimate.
 //
-// The pool protocol fee is denominated in STRK (config.depositFeeStrk, default 4)
-// but the deposit breakdown + on-chain amount are in USDC, so we need a STRK price
-// to express the fee in USDC. This fetches a live spot price from a public,
+// The pool protocol fee is denominated in STRK (read live via `fetchPoolFeeStrk()`,
+// falling back to config.depositFeeStrk) but the deposit breakdown + on-chain amount
+// are in USDC, so we need a STRK price to express the fee in USDC. This fetches a
+// live spot price from a public,
 // no-auth, CORS-friendly endpoint (Coinbase by default). Returns null on ANY
 // failure (offline, CORS, rate-limit, bad shape) so callers fall back to the
 // configured static price (config.depositFeeEstimate).

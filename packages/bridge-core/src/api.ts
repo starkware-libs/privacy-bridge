@@ -23,6 +23,7 @@ export * from './core/onrampPoll';
 export * from './core/balance';
 export * from './core/discover';
 export * from './core/moveIntoPool';
+export * from './core/poolFee';
 export * from './core/residual';
 export * from './core/bridgeTransferStatus';
 export * from './core/bridgeOut';

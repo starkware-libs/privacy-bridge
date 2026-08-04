@@ -116,14 +116,19 @@ const SN_DOMAIN = 25n;
 // via the anonymizer's noteId-bound OpenNoteDeposit which the SDK's resolveNotes
 // does not count toward spendable balance (only a noteId===undefined open deposit
 // cancels a deficit; compiler.js:457-465, mirrored in bridgeBack.ts). So a
-// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.20 USDC
-// covers ONE return's live fee (~0.14 mainnet / ~0.04 testnet) plus AVNU's
-// documented 15-17% paymaster-drift markup with a modest safety margin: 0.14 ×
-// 1.17 ≈ 0.164, so 0.20 leaves ~22% headroom above the drifted quote. Sized to
-// cover a SINGLE return; subsequent returns need a fresh deposit to top the pool
-// up. cashOut / bridgeOutToWallet do NOT gate — a full exit legitimately drains
-// the pool.
-export const RETURN_FEE_BUFFER_WEI = 200_000n; // 0.20 USDC @ 6dp
+// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.30 USDC
+// covers ONE return's live fee plus AVNU's documented 15-17% paymaster-drift
+// markup with a modest safety margin: the pool's 6-STRK fee is ~0.21 USDC at
+// mainnet STRK prices, 0.21 × 1.17 ≈ 0.246, so 0.30 leaves ~22% headroom above the
+// drifted quote. Sized to cover a SINGLE return; subsequent returns need a fresh
+// deposit to top the pool up. cashOut / bridgeOutToWallet do NOT gate — a full exit
+// legitimately drains the pool.
+//
+// SCALES WITH THE POOL FEE: unlike the UI estimate (which reads `get_fee_amount()`
+// live, poolFee.ts), this is a USDC figure, and converting the pool's STRK fee to
+// USDC needs AVNU's own oracle rate + markup — not a number the client can read.
+// So it stays a constant: re-derive it here whenever the pool's STRK fee changes.
+export const RETURN_FEE_BUFFER_WEI = 300_000n; // 0.30 USDC @ 6dp
 
 export interface BridgeOutArgs {
   // EVM wallet signature of the app's identity sign-message — the only secret input;
