@@ -99,6 +99,15 @@ export function getDiscoveredProviders(): EIP6963ProviderDetail[] {
 // (getWalletConnectProvider.ts's registerWalletConnect).
 const SYNTHETIC_PROVIDER_RDNS = new Set<string>(['walletconnect']);
 
+// True for a registry entry we register ourselves rather than one an extension injected.
+// Exported so callers don't re-hardcode the list: restoring a REMEMBERED wallet pick
+// (WalletProvider) must skip synthetic entries — pinning one would reroute a bare
+// connect()/sign away from the injected global while giving nothing back, since a WC
+// session is never silently resumable.
+export function isSyntheticProviderRdns(rdns: string): boolean {
+  return SYNTHETIC_PROVIDER_RDNS.has(rdns);
+}
+
 // Count of discovered providers that genuinely CONTEND for the `window.ethereum`
 // global — i.e. real injected extensions. The ambiguity the lifecycle guards
 // protect against is two injected wallets racing for that global (MetaMask +
