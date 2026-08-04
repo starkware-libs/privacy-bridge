@@ -1,6 +1,6 @@
 {
   "name": "@starkware-libs/starknet-privacy-bridge",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
