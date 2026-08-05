@@ -1133,29 +1133,79 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   const walletClient = createWalletClient({ transport: custom(eip1193) });
   const publicClient = createPublicClient({ transport: http(source.rpcUrl) });
 
-  // Probe EIP-5792 atomic-batch support up front (it also gates the native-gas
-  // preflight below). Only batch when the wallet reports atomic support (or is
+  // PREFLIGHT — six independent reads, issued CONCURRENTLY (they were serial once,
+  // ~6 round trips of pure latency before the first wallet prompt). Their individual
+  // error contracts are preserved by attaching each promise's own handler:
+  //   - capabilities / fee estimate / approve estimate fail SOFT (two-tx fallback /
+  //     gasPrice-only cap / flat gas envelope), exactly as their old try/catch did;
+  //   - USDC balance, native balance, and gasPrice must succeed. These three are
+  //     SETTLED (never reject in flight) and unwrapped below in the OLD SERIAL ORDER,
+  //     so which error the user sees stays deterministic under a compound failure —
+  //     with a raw Promise.all the first rejection IN TIME would win, letting a flaky
+  //     gas read's raw RPC error displace the actionable low-USDC message.
+  //
+  // Capabilities probe: EIP-5792 atomic-batch support (also gates the native-gas
+  // check below). Only batch when the wallet reports atomic support (or is
   // upgrade-ready via 7702). A wallet without wallet_getCapabilities — or a transport
   // that rejects it (e.g. a WalletConnect session that didn't negotiate the 5792
-  // methods) — throws here and we take the two-transaction fallback.
-  let supportsAtomicBatch = false;
-  try {
-    const capabilities = await getCapabilities(walletClient, { account, chainId: source.chainId });
-    const atomicStatus = capabilities?.atomic?.status;
-    supportsAtomicBatch = atomicStatus === 'supported' || atomicStatus === 'ready';
-  } catch {
-    supportsAtomicBatch = false;
-  }
+  // methods) — falls to the two-transaction path.
+  const settleRead = <T>(
+    read: Promise<T>,
+  ): Promise<{ ok: true; value: T } | { ok: false; reason: unknown }> =>
+    read.then(
+      (value) => ({ ok: true as const, value }),
+      (reason) => ({ ok: false as const, reason }),
+    );
+  const unwrapRead = <T>(settled: { ok: true; value: T } | { ok: false; reason: unknown }): T => {
+    if (!settled.ok) throw settled.reason;
+    return settled.value;
+  };
+  onStatus?.(
+    `Checking ${source.chainName} USDC balance and ${source.nativeCurrency.symbol} for gas…`,
+  );
+  const [
+    supportsAtomicBatch,
+    evmBalanceRead,
+    nativeBalanceRead,
+    gasPriceRead,
+    eip1559Fees,
+    approveGasUnits,
+  ] = await Promise.all([
+    getCapabilities(walletClient, { account, chainId: source.chainId })
+      .then((capabilities) => {
+        const atomicStatus = capabilities?.atomic?.status;
+        return atomicStatus === 'supported' || atomicStatus === 'ready';
+      })
+      .catch(() => false),
+    settleRead(
+      publicClient.readContract({
+        address: source.usdc as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [account],
+      }) as Promise<bigint>,
+    ),
+    settleRead(publicClient.getBalance({ address: account })),
+    settleRead(publicClient.getGasPrice()),
+    // estimateFeesPerGas unavailable (e.g. a non-1559 chain) → undefined: keep the
+    // getGasPrice() cap and let viem/the wallet pick the fees.
+    publicClient.estimateFeesPerGas().catch(() => undefined),
+    // Precise approve estimate (estimable pre-allowance); undefined → the flat
+    // envelope below, so the preflight never crashes on it.
+    publicClient
+      .estimateContractGas({
+        address: source.usdc as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [source.tokenMessenger as `0x${string}`, amountWei],
+        account,
+      })
+      .catch(() => undefined),
+  ]);
+  const evmBalance = unwrapRead(evmBalanceRead);
 
   // Pre-check the EVM USDC balance so a shortfall surfaces a clear, actionable
   // error instead of an opaque on-chain approve/burn revert.
-  onStatus?.(`Checking ${source.chainName} USDC balance…`);
-  const evmBalance = (await publicClient.readContract({
-    address: source.usdc as `0x${string}`,
-    abi: ERC20_ABI,
-    functionName: 'balanceOf',
-    args: [account],
-  })) as bigint;
   if (evmBalance < amountWei) {
     throw new Error(
       `MetaMask account ${evmAddress} is low on USDC on ${source.chainName} ` +
@@ -1176,11 +1226,10 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // so it fails cleanly with the fund-your-wallet message rather than resume-looping.
   // (Fresh path only: the resume path's only chain leg is the manager-gas-paid
   // Starknet mint — no EVM tx — so it must finish even with zero native balance.)
-  onStatus?.(`Checking ${source.chainName} ${source.nativeCurrency.symbol} for gas…`);
-  const nativeBalance = await publicClient.getBalance({ address: account });
-  // Effective per-gas cap: MAX(EIP-1559 maxFeePerGas, legacy gasPrice). Fall back to
-  // getGasPrice() alone if estimateFeesPerGas is unavailable (e.g. a non-1559 chain).
-  const gasPrice = await publicClient.getGasPrice();
+  const nativeBalance = unwrapRead(nativeBalanceRead);
+  const gasPrice = unwrapRead(gasPriceRead);
+
+  // Effective per-gas cap: MAX(EIP-1559 maxFeePerGas, legacy gasPrice).
   let perGasCap = gasPrice;
   // Explicit EIP-1559 fees for the approve/burn submits, read live + floored to the
   // chain's enforced minimum tip and bumped by a margin (selectEip1559Fees) so a
@@ -1192,33 +1241,16 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       ? BigInt(source.minPriorityFeeGwei) * 1_000_000_000n
       : undefined;
   let feeOverrides: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | undefined;
-  try {
-    const fees = await publicClient.estimateFeesPerGas();
-    if (fees?.maxFeePerGas !== undefined && fees.maxFeePerGas > perGasCap) {
-      perGasCap = fees.maxFeePerGas;
-    }
-    if (fees?.maxFeePerGas !== undefined && fees?.maxPriorityFeePerGas !== undefined) {
-      feeOverrides = selectEip1559Fees(fees, minPriorityFeeWei);
-    }
-  } catch {
-    // estimateFeesPerGas unavailable → keep getGasPrice() (already assigned) and
-    // let viem/the wallet pick the fees (feeOverrides stays undefined).
+  if (eip1559Fees?.maxFeePerGas !== undefined && eip1559Fees.maxFeePerGas > perGasCap) {
+    perGasCap = eip1559Fees.maxFeePerGas;
   }
-  // Precise approve estimate + a conservative fixed burn budget; fall back to the
-  // flat envelope if estimateContractGas throws, so the preflight never crashes.
-  let gasUnits: bigint;
-  try {
-    const approveGasUnits = await publicClient.estimateContractGas({
-      address: source.usdc as `0x${string}`,
-      abi: ERC20_ABI,
-      functionName: 'approve',
-      args: [source.tokenMessenger as `0x${string}`, amountWei],
-      account,
-    });
-    gasUnits = approveGasUnits + BURN_GAS_UNITS_BUDGET;
-  } catch {
-    gasUnits = FRESH_PATH_GAS_UNITS;
+  if (eip1559Fees?.maxFeePerGas !== undefined && eip1559Fees?.maxPriorityFeePerGas !== undefined) {
+    feeOverrides = selectEip1559Fees(eip1559Fees, minPriorityFeeWei);
   }
+  // Precise approve estimate + a conservative fixed burn budget; the flat envelope
+  // when the estimate was unavailable.
+  const gasUnits: bigint =
+    approveGasUnits !== undefined ? approveGasUnits + BURN_GAS_UNITS_BUDGET : FRESH_PATH_GAS_UNITS;
   const requiredWei = (gasUnits * perGasCap * GAS_PRICE_SAFETY_NUM) / GAS_PRICE_SAFETY_DEN;
   // Skip this hard block for an atomic-batch wallet: it may be a smart account that
   // pays gas via a paymaster and legitimately holds zero native balance, yet is exactly
