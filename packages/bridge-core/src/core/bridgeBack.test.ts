@@ -315,6 +315,20 @@ vi.mock('./errorMessages', () => ({
   humanizeFinality: (f: unknown) => String(f),
 }));
 
+// Pool protocol fee. Hoisted spies so the preflight tests can assert WHETHER the read
+// happens at all: under the AVNU paymaster approvePoolFee() is a no-op, so reading
+// get_fee_amount() first would be a discarded round trip on the claim's critical path.
+// The defaults reproduce this suite's previous unmocked behaviour (a zero fee via the
+// mocked provider's '0x0' callContract → no approve, no fee-approve anchor).
+const { fetchPoolFeeAmountSpy, approvePoolFeeSpy } = vi.hoisted(() => ({
+  fetchPoolFeeAmountSpy: vi.fn(async (): Promise<bigint> => 0n),
+  approvePoolFeeSpy: vi.fn(async (): Promise<number | undefined> => undefined),
+}));
+vi.mock('./poolFee', () => ({
+  fetchPoolFeeAmount: fetchPoolFeeAmountSpy,
+  approvePoolFee: approvePoolFeeSpy,
+}));
+
 vi.mock('./proven-submit', () => ({
   managerExecute,
   submitProvenCall,
@@ -684,6 +698,92 @@ describe('claimToPool — proven claim binding the created open note (ComputeAnd
     errSpy.mockRestore();
     warnSpy.mockRestore();
     debugSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PREFLIGHT — the serial work between "attestation in hand" and "proof submitted".
+// The claim is the LAST leg of a return, so every read here is time the user spends
+// staring at a finished transfer. These pin WHICH reads happen and WHEN, not how fast
+// they are.
+// ---------------------------------------------------------------------------
+describe('claimToPool — preflight ordering', () => {
+  const PAYMASTER = {
+    endpoint: 'https://pm.test',
+    apiKey: 'KEY',
+    feeMode: 'sponsored_private',
+    poolFeeToken: TOKEN,
+  };
+
+  it('PAYMASTER: never reads the pool fee — approvePoolFee() no-ops, so the read can only be discarded', async () => {
+    (config as { paymaster?: unknown }).paymaster = PAYMASTER;
+    await claimToPool(CLAIM_ARGS);
+    expect(fetchPoolFeeAmountSpy).not.toHaveBeenCalled();
+    expect(approvePoolFeeSpy).not.toHaveBeenCalled();
+  });
+
+  it('MANAGER: still reads + approves the pool fee, and its block seeds the aging anchor', async () => {
+    fetchPoolFeeAmountSpy.mockResolvedValueOnce(4n);
+    approvePoolFeeSpy.mockResolvedValueOnce(99);
+    await claimToPool(CLAIM_ARGS);
+    expect(fetchPoolFeeAmountSpy).toHaveBeenCalledTimes(1);
+    expect(approvePoolFeeSpy).toHaveBeenCalledWith(4n);
+    // (provider, anchor, onStatus, depth) — CLAIM_ARGS passes no onStatus, and the
+    // manager fee path leaves the depth at waitForProvingBlock's own default.
+    expect(waitForProvingBlockSpy).toHaveBeenCalledWith(expect.anything(), 99, undefined, undefined);
+  });
+
+  it('PAYMASTER: the AVNU fee quote runs CONCURRENTLY with the quiescence gate, not behind it', async () => {
+    (config as { paymaster?: unknown }).paymaster = PAYMASTER;
+    // Hold both of the gate's discovery reads open; the quote must already be in flight.
+    const releaseGate: Array<() => void> = [];
+    discoverNoteIdsAtBlockSpy.mockImplementation(
+      () => new Promise<string[]>((resolve) => releaseGate.push(() => resolve(['1', '2']))),
+    );
+    const claimed = claimToPool(CLAIM_ARGS);
+    await vi.waitFor(() => expect(paymasterBuildLeg).toHaveBeenCalledTimes(1));
+    expect(releaseGate.length).toBeGreaterThan(0);
+    releaseGate.forEach((release) => release());
+    await claimed;
+  });
+
+  it('PAYMASTER: a NON-quiescent gate drops the in-flight quote and re-quotes after the aging wait', async () => {
+    (config as { paymaster?: unknown }).paymaster = PAYMASTER;
+    // Differing id-sets at base vs head ⇒ not eligible ⇒ the aging wait stands between
+    // the quote and the build, so the pre-issued quote must NOT be baked into the proof.
+    discoverNoteIdsAtBlockSpy
+      .mockResolvedValueOnce(['1', '2'])
+      .mockResolvedValueOnce(['1', '2', '3']);
+    await claimToPool(CLAIM_ARGS);
+    expect(waitForProvingBlockSpy).toHaveBeenCalled();
+    expect(paymasterBuildLeg).toHaveBeenCalledTimes(2);
+  });
+
+  it('PAYMASTER: a rebuild re-quotes the fee — the concurrent quote is consumed once, never reused', async () => {
+    (config as { paymaster?: unknown }).paymaster = PAYMASTER;
+    // Attempt 1 fails BEFORE the relay starts (no onRelayStart ⇒ safely retryable), so
+    // the stale-nonce path rebuilds and re-proves.
+    paymasterExecuteLeg
+      .mockRejectedValueOnce(new Error('stale nonce'))
+      .mockResolvedValueOnce({ transaction_hash: CLAIM_TX_HASH });
+    const res = await claimToPool(CLAIM_ARGS);
+    expect(res.claimTxHash).toBe(CLAIM_TX_HASH);
+    expect(paymasterBuildLeg).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracks the claim on a tighter poll grid than submitAndTrack's attestation-scale default", async () => {
+    await claimToPool(CLAIM_ARGS);
+    const submitAndTrackMock = submitAndTrack as ReturnType<typeof vi.fn>;
+    const trackOptions = submitAndTrackMock.mock.calls[0][2] as {
+      until: string;
+      intervalMs: number;
+      maxIntervalMs: number;
+    };
+    expect(trackOptions.until).toBe('ACCEPTED_ON_L2');
+    expect(trackOptions.intervalMs).toBeLessThanOrEqual(1_000);
+    // Well under the 8s default ceiling: that grid was tuned for waits measured in
+    // minutes, and here it can sit seconds past an acceptance that already happened.
+    expect(trackOptions.maxIntervalMs).toBeLessThanOrEqual(3_000);
   });
 });
 

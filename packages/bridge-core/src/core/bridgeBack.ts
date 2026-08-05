@@ -207,12 +207,20 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
   // 2. STRK protocol fee: the MANAGER approves it up front so collect_fee() can pull it
   // from the manager during apply_actions. Seeds the proving-block wait. Kept in the
   // build half so the anchor stays fresh relative to the prove.
-  onStatus?.('Checking pool fee…');
-  const feeAmount = await fetchPoolFeeAmount();
+  //
+  // MANAGER PATH ONLY. Under the AVNU paymaster the pool's STRK fee is fronted by the
+  // relayer/forwarder and repaid out of the proof's fee withdraw, so approvePoolFee()
+  // returns undefined immediately (`poolFee.ts`: `if (config.paymaster) return undefined`)
+  // — reading get_fee_amount() first would be a round trip on the claim's critical path
+  // whose result can only ever be discarded. Skip the read, not just the approve.
   let feeApproveBlock: number | undefined;
-  if (feeAmount > 0n) {
-    onStatus?.('Approving pool fee…');
-    feeApproveBlock = await approvePoolFee(feeAmount);
+  if (!config.paymaster) {
+    onStatus?.('Checking pool fee…');
+    const feeAmount = await fetchPoolFeeAmount();
+    if (feeAmount > 0n) {
+      onStatus?.('Approving pool fee…');
+      feeApproveBlock = await approvePoolFee(feeAmount);
+    }
   }
 
   const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
@@ -266,6 +274,28 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
   // The gate's own immediateBase — reused directly by buildOnce's gate-eligible path
   // (below) instead of re-deriving it via a second getCurrentBlock() read.
   let gateImmediateBase: number | undefined;
+
+  // CONCURRENT FEE QUOTE. AVNU's buildTransaction request for this leg is CONSTANT —
+  // {type:'apply_action', pool_address} plus the configured fee mode (paymasterBuildLeg) —
+  // so it depends on nothing the quiescence gate produces, yet it runs strictly AFTER the
+  // gate today (inside buildOnce). Start it here instead, so the AVNU round trip overlaps
+  // the gate's discovery reads rather than queueing behind them. Mirrors the deposit
+  // preflight's concurrent reads.
+  //
+  // Deliberately NOT prefetched across a long wait: the quote is a live STRK→pool-fee-token
+  // conversion the proof must bake in exactly, so it is dropped (and re-quoted inside
+  // buildOnce) on every path that adds real delay before the build — the aging wait below,
+  // a manager fee-approve tx, and every rebuild. Its age therefore stays bounded by the
+  // gate itself, roughly one discovery round trip.
+  let pendingFeeQuote: Promise<PaymasterBuildCtx> | undefined;
+  if (config.paymaster && feeApproveBlock === undefined) {
+    onStatus?.('Requesting pool fee from paymaster…');
+    pendingFeeQuote = paymasterBuildLeg(account, { type: 'apply_action' });
+    // Park a catch so an early rejection cannot surface as an unhandled rejection while
+    // the gate is still running; the rejection is still delivered at buildOnce's await.
+    pendingFeeQuote.catch(() => {});
+  }
+
   if (feeApproveBlock !== undefined) {
     currentAnchor = feeApproveBlock;
   } else {
@@ -283,6 +313,10 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
       usedQuiescenceGate = true;
       gateImmediateBase = immediateBase;
     } else {
+      // Not eligible ⇒ the aging wait (up to PROVING_BLOCK_DEPTH blocks) stands between
+      // here and the build, so the in-flight quote would be stale by the time the proof
+      // bakes it in. Drop it and let buildOnce re-quote after the wait — today's ordering.
+      pendingFeeQuote = undefined;
       currentAnchor = await getCurrentBlock(provider);
     }
   }
@@ -315,8 +349,13 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
     let paymasterCtx: PaymasterBuildCtx | undefined;
     let feeWithdraw: { recipient: string; amount: bigint } | undefined;
     if (config.paymaster) {
-      onStatus?.('Requesting pool fee from paymaster…');
-      paymasterCtx = await paymasterBuildLeg(account, { type: 'apply_action' });
+      // Consume the quote started beside the quiescence gate, ONCE. A rebuild /
+      // rebuildFresh finds it spent and re-quotes fresh: a retry can be a minute or more
+      // after the first attempt, and the fee is a live conversion the proof commits to.
+      const startedFeeQuote = pendingFeeQuote;
+      pendingFeeQuote = undefined;
+      if (!startedFeeQuote) onStatus?.('Requesting pool fee from paymaster…');
+      paymasterCtx = await (startedFeeQuote ?? paymasterBuildLeg(account, { type: 'apply_action' }));
       const fa = paymasterCtx.feeAction;
       if (fa && BigInt(fa.amount || '0') !== 0n) {
         // sponsored_private pays the fee in pool_fee_token (→ the deposit token). The
@@ -487,6 +526,16 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
   return withRebuild(await buildOnce());
 }
 
+// Finality-poll grid for the claim, tighter than submitAndTrack's 1s→8s default. This is
+// the LAST leg of a return: the moment the claim is accepted the run is over, so every
+// second between acceptance and the poll that observes it is time the user spends waiting
+// on a finished transfer. The default grid was tuned for attestation-scale waits, where
+// backing off to 8s costs nothing; against Starknet block times an 8s step can sit seconds
+// past an acceptance that already happened. A 2.5s ceiling keeps that tail short while
+// staying well off a per-second poll (the run's hard timeoutMs is unchanged).
+const CLAIM_TRACK_INTERVAL_MS = 700;
+const CLAIM_TRACK_MAX_INTERVAL_MS = 2_500;
+
 // Submit an ALREADY-PROVEN, FOLDED return claim from the MANAGER (or, on the paymaster
 // path, via AVNU's relayer). The proof carries the CCTP message/attestation, so the mint
 // happens INSIDE this tx — there is no prior on-chain bind to wait for. On a submit
@@ -539,6 +588,8 @@ export async function submitProvenClaim(proven: ProvenClaim): Promise<string> {
       },
       {
         until: 'ACCEPTED_ON_L2',
+        intervalMs: CLAIM_TRACK_INTERVAL_MS,
+        maxIntervalMs: CLAIM_TRACK_MAX_INTERVAL_MS,
         onStatus: ({ finality }) => onStatus?.(`Submitting claim (${humanizeFinality(finality)})…`),
       },
     );
