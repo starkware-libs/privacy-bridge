@@ -724,6 +724,17 @@ export async function fundAccountFromPool(
       throw err;
     }
 
+    // Start the CCTP forwarding-fee quote BEFORE the wallet prompt: it depends only
+    // on (amount, fast, destDomain) — all fixed at this point — so its HTTP round
+    // trip rides under the user's signing time instead of running serially after it.
+    // Kept AFTER the storage probe (an unwritable-storage abort must not fire network
+    // calls). The pre-attached no-op catch only silences the unhandled-rejection
+    // warning while the prompt is open; a rejected quote still rejects the awaited
+    // promise below, inside the same try/catch that owned the error when the call
+    // was serial. A read-only GET, so a user-rejected signature wastes nothing.
+    const quotePromise = fetchForwardMaxFee(amount, { fast, destDomain });
+    quotePromise.catch(() => {});
+
     // Re-sign (fresh only) + derive the account nonce IN-MEMORY. account_nonce =
     // poseidon([tag, viewing_key, index]); commitment H is computed inside bridgeOut.
     // resolveSignature's throw (e.g. a user-rejected wallet prompt) propagates RAW —
@@ -739,12 +750,13 @@ export async function fundAccountFromPool(
       // declared finality just below, so they never diverge — and matches the Iris
       // poll cadence in pollKnobs.
       // FORWARDING-FEE FLOOR (pre-flight): the Forwarding Service deducts its fee IN
-      // USDC from the burn, so the amount must clear it — quote the live max_fee and
-      // reject a sub-floor amount with a CLEAR error here, rather than let the
-      // Anonymizer's assert(amount > max_fee) revert opaquely. The quote's max_fee is
-      // passed to bridgeOut so the burn carries the fee Circle will deduct.
+      // USDC from the burn, so the amount must clear it — quote the live max_fee
+      // (started above, under the signature prompt) and reject a sub-floor amount
+      // with a CLEAR error here, rather than let the Anonymizer's
+      // assert(amount > max_fee) revert opaquely. The quote's max_fee is passed to
+      // bridgeOut so the burn carries the fee Circle will deduct.
       emit('bridge', 'running', 'Quoting CCTP forwarding fee…');
-      const quote = await fetchForwardMaxFee(amount, { fast, destDomain });
+      const quote = await quotePromise;
       assertAboveForwardFloor(amount, quote);
       emit(
         'bridge',
