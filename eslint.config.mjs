@@ -46,7 +46,7 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   },
-  // Secret-hygiene guard (docs/bridge-sdk-refactor.md §3 "Secret hygiene").
+  // Secret-hygiene guard.
   //
   // bridge-core's core orchestrators (moveIntoPool/fundAccountFromPool/cashOut/
   // returnToPool + the aa/ paymaster path) take the raw wallet signature and
@@ -65,13 +65,13 @@ export default tseslint.config(
           selector:
             "CallExpression[callee.object.name='console'] :matches(Identifier[name=/signature/i], Identifier[name=/privateKey/i], Identifier[name=/privKey/i], Identifier[name=/secret/i], MemberExpression[property.name=/signature/i], MemberExpression[property.name=/privateKey/i], MemberExpression[property.name=/privKey/i], MemberExpression[property.name=/secret/i])",
           message:
-            'Secret hygiene: do not pass a signature/privateKey/privKey/secret-named value to console.* (docs/bridge-sdk-refactor.md §3).',
+            'Secret hygiene: do not pass a signature/privateKey/privKey/secret-named value to console.*.',
         },
         {
           selector:
             "CallExpression[callee.property.name='setItem'][callee.object.name=/^(localStorage|sessionStorage)$/] :matches(Identifier[name=/signature/i], Identifier[name=/privateKey/i], Identifier[name=/privKey/i], Identifier[name=/secret/i], MemberExpression[property.name=/signature/i], MemberExpression[property.name=/privateKey/i], MemberExpression[property.name=/privKey/i], MemberExpression[property.name=/secret/i])",
           message:
-            'Secret hygiene: do not persist a signature/privateKey/privKey/secret-named value to localStorage/sessionStorage (docs/bridge-sdk-refactor.md §3). Only the viewing key may be persisted.',
+            'Secret hygiene: do not persist a signature/privateKey/privKey/secret-named value to localStorage/sessionStorage. Only the viewing key may be persisted.',
         },
       ],
     },

@@ -1,5 +1,5 @@
-// Core orchestration tests for moveIntoPool (Slice E, docs/bridge-sdk-refactor.md
-// §1 frozen fund-then-deploy state-transition table + §5 test-migration gate).
+// Core orchestration tests for moveIntoPool (Slice E — the frozen
+// fund-then-deploy state-transition table + the test-migration gate).
 //
 // These are the black-box behavioral proofs of the fund-safety invariants the app's
 // white-box makePrivate tests used to cover (now that runMakePrivate collapses to a

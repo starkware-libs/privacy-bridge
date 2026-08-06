@@ -3,7 +3,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { InFlightProvider, useInFlight } from './InFlightContext';
 import { NetworkProvider, useNetwork } from './NetworkContext';
 
-// Runtime network switch (docs/network-switch-plan.md). Covers:
+// Runtime network switch. Covers:
 //  - FULL DISCONNECT on switch: setNetwork bumps networkEpoch (session-wipe signal)
 //    AND calls useWallet().disconnect (EVM connection dropped).
 //  - BLOCK while in-flight: when a flow reports in-flight, setNetwork no-ops, the

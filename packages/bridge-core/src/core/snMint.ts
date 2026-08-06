@@ -37,7 +37,7 @@ import { encodeCctpBytes } from './cctpBytes';
 import { toHexFelt } from './avnuPaymaster';
 
 // A Starknet felt address → a left-padded 32-byte word, the CCTP mintRecipient
-// form (Starknet addresses are < 2^252, so they fit in 32 bytes). docs/bridge-plan.md §3.
+// form (Starknet addresses are < 2^252, so they fit in 32 bytes).
 // Exported: depositIn.ts and returnIn.ts share this exact implementation.
 export function snAddressToBytes32(snAddress: string): `0x${string}` {
   const hex = snAddress.replace(/^0x/i, '').toLowerCase();
@@ -190,7 +190,7 @@ export async function submitStarknetMint(args: SubmitStarknetMintArgs): Promise<
 
   // FUND-SAFETY GATE (Fix 2 / Bundle A1, full symmetry with the fund-account leg): validate
   // the attested message BEFORE replaying it into receive_message. Iris is a
-  // TRUSTED oblivious service (threat-model.md); a tampered / MITM'd attestation
+  // TRUSTED oblivious service (docs/threat-model.md); a tampered / MITM'd attestation
   // could redirect the mint to an attacker felt or a different destination chain.
   // Assert the EVM SOURCE domain, the Starknet destination domain, and the FULL
   // 32-byte mintRecipient field == the recipient (the SAME bytes32 conversion

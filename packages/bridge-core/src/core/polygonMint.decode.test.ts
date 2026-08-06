@@ -1,7 +1,7 @@
 // Bundle A1 — CCTP-v2 attested-message DECODER + mint-validation gate.
 //
 // We must NOT trust Iris's `message` / `forwardTxHash` unverified: Iris is a
-// TRUSTED oblivious service (threat-model.md), so a compromised/MITM'd Iris could
+// TRUSTED oblivious service (docs/threat-model.md), so a compromised/MITM'd Iris could
 // hand back a message that redirects the mint to an attacker EOA or a different
 // chain. These tests pin the decoder offsets against a REAL attested Iris message
 // (the GOLDEN fixture below) and prove the forwarded-mint gate rejects a tampered
