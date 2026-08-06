@@ -7,7 +7,7 @@
 // The fund-account leg no longer submits receiveMessage itself — Circle's Forwarding
 // Service does — so there is no viem write to mock; both pollers are pure fetch.
 //
-// Frozen shape: docs/bridge-interface.md §4. The cross-chain leg itself can only
+// Frozen shape. The cross-chain leg itself can only
 // be verified live (.claude/rules/verification.md) — these pin client behavior.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

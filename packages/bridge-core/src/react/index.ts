@@ -22,7 +22,7 @@ export type { WithdrawCctpFeeEstimate } from './useWithdrawCctpFeeEstimate';
 
 // Unified wallet layer: injected EIP-6963 extensions (MetaMask, Rabby, …) AND
 // WalletConnect coexist behind one picker (selectProvider → getEthereumProvider →
-// signMessage). See docs/architecture.md Key decisions.
+// signMessage).
 export { WalletProvider } from './wallet/WalletProvider';
 export { useWallet } from './wallet/useWallet';
 export type { WalletContextValue } from './wallet/types';

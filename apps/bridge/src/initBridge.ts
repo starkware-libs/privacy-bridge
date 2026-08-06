@@ -16,7 +16,6 @@
 // leaves un-mockably for that test file (verified empirically in apps/web when
 // switching to the barrel broke a network-edge mock). The `./config` subpath is a
 // published specifier an extracted app consumes unchanged — see
-// docs/bridge-sdk-refactor.md Slice Y / §6.
 import { bridgeEnvFromRecord, initBridgeConfig } from '@starkware-libs/starknet-privacy-bridge/config';
 
 initBridgeConfig(

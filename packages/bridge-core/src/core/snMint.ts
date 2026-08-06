@@ -37,7 +37,7 @@ import { encodeCctpBytes } from './cctpBytes';
 import { toHexFelt } from './avnuPaymaster';
 
 // A Starknet felt address → a left-padded 32-byte word, the CCTP mintRecipient
-// form (Starknet addresses are < 2^252, so they fit in 32 bytes). docs/bridge-plan.md §3.
+// form (Starknet addresses are < 2^252, so they fit in 32 bytes).
 // Exported: depositIn.ts and returnIn.ts share this exact implementation.
 export function snAddressToBytes32(snAddress: string): `0x${string}` {
   const hex = snAddress.replace(/^0x/i, '').toLowerCase();

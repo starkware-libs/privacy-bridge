@@ -4,11 +4,11 @@
 // public/recomputable metadata + a coarse lifecycle. There is NO backend — a
 // server keyed by EVM address would join the EVM identity to the Starknet
 // identity + every per-account EOA, the exact linkage the threat model forbids
-// (docs/threat-model.md, docs/architecture.md). So the list lives only on this
+// (docs/threat-model.md). So the list lives only on this
 // device, namespaced by EVM address, and is fully reconstructable from chain
 // via accountScan.scanDerivedAccounts.
 //
-// Persistence policy (docs/architecture.md "Account view" Key decision): only
+// Persistence policy: only
 // public-or-recomputable fields live here — addresses, tx hashes, the commitment
 // H, the fixed amount, a coarse timestamp, a lifecycle tag. NEVER private keys,
 // the raw wallet signature, or claim secrets (those stay in-memory, recomputed
@@ -118,9 +118,9 @@ const LIFECYCLES: ReadonlySet<string> = new Set([
 ]);
 
 // Migrate-on-read: a record persisted before the Slice R rename used the legacy
-// pre-Slice-R index field name instead of `accountIndex` (bridge-sdk-refactor.md
-// §1.1 — the localStorage key STRING is unchanged; only this in-record field name
-// moved; see the property read below). Accept the old key here so existing
+// pre-Slice-R index field name instead of `accountIndex` (the localStorage key
+// STRING is unchanged; only this in-record field name moved; see the property
+// read below). Accept the old key here so existing
 // history isn't dropped by the rename.
 function migrateAccountIndexKey(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
@@ -348,11 +348,11 @@ function isValidInflightBurnRecord(value: unknown): boolean {
 }
 
 // Per-account index counter (NON-SECRET), keyed by EVM address (bridge-sdk-
-// refactor.md Slice D). The index is a plain integer; knowing it computes
+// Slice D). The index is a plain integer; knowing it computes
 // nothing without the viewing key, so it is NOT a key and the no-persist-keys
 // rule holds. The viewing key folds it into account_nonce/the per-account EOA,
 // so every account is unlinkable and recomputable from the signature + this
-// saved index (bridge-plan.md §5, Decision 3). Same `pmp.bidIndex` key STRING
+// saved index (Decision 3). Same `pmp.bidIndex` key STRING
 // the app used pre-migration (Decision 6, §1.1) — renaming the wire key would
 // orphan an in-flight counter, the same fund-safety class as ACCOUNTS_KEY.
 const ACCOUNT_INDEX_KEY = 'pmp.bidIndex';
