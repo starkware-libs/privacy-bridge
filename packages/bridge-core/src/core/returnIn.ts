@@ -51,6 +51,7 @@ import { config, getEvmCctpSource, resolveEvmCctpDestination } from './config';
 import { isTerminalAttestFailure, waitForAttestation } from './polygonMint';
 import { isCctpMessageNonceUsed } from './depositIn';
 import { snAddressToBytes32 } from './snMint';
+import type { CctpMessageMatch } from './polygonMint';
 import {
   deriveAccountNonce,
   deriveInboundCommitment,
@@ -72,6 +73,17 @@ import {
   writePendingReturnBurn,
   type PendingReturnBurn,
 } from './pendingReturnBurn';
+
+// Identifies OUR return message in an Iris response. The return burn is submitted by
+// the builder relayer, which batches several users' ops into ONE transaction, so the
+// response can hold strangers' CCTP messages.
+function returnMessageMatch(sourceDomain: number, inboundAnonymizer?: string): CctpMessageMatch {
+  return {
+    expectedSourceDomain: sourceDomain,
+    expectedDestinationDomain: config.cctp.starknetDomain,
+    expectedRecipient: snAddressToBytes32(inboundAnonymizer ?? config.inboundAnonymizerAddress),
+  };
+}
 
 // CCTP Standard finality (free, finalized) — the default for testing. 1000 = Fast.
 const STANDARD_FINALITY = 2000;
@@ -661,8 +673,16 @@ export interface ReturnBurnResult {
 // Leaves the cursor in place on success (the claim stage clears it after the folded
 // claim lands). Never mints or claims here.
 export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<ReturnBurnResult> {
-  const { accountIndex, channel, amount, evmAddress, commitment, depositWallet, submitGaslessBatch, onStatus } =
-    args;
+  const {
+    accountIndex,
+    channel,
+    amount,
+    evmAddress,
+    commitment,
+    depositWallet,
+    submitGaslessBatch,
+    onStatus,
+  } = args;
   const minFinalityThreshold = args.minFinalityThreshold ?? STANDARD_FINALITY;
   const maxFee = args.maxFee ?? 0n;
   // Enforce the fee-free-return invariant before we burn (see assertFeeFreeReturn).
@@ -694,6 +714,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     try {
       const { message, attestation } = await waitForAttestation(burnTx, {
         sourceDomain: record.sourceDomain,
+        match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer),
         onStatus,
       });
       // Resume-only: the folded claim (mint INSIDE it) may already have landed on a
@@ -787,7 +808,8 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
   // can only ever resolve 'unknown' on a clean no-match, so gating on the scan meant a
   // refused submit blocked every future return for this wallet forever.
   const unresolved = readPendingReturnBurn(evmAddress);
-  if (unresolved && isPendingBurnExecutable(unresolved)) throw unresolvedSubmissionError(unresolved);
+  if (unresolved && isPendingBurnExecutable(unresolved))
+    throw unresolvedSubmissionError(unresolved);
 
   // (2) FRESH PATH. The burn runs GASLESSLY from the deposit wallet via the
   // injected submitter — both it and the deposit wallet are required here.
@@ -1106,8 +1128,16 @@ export interface ReturnToPoolResult {
 //   - fresh: prepareFreshReturn() sizes + burns, then claims.
 // The cursor is CLEARED after the claim (the claim stage is its documented owner).
 export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPoolResult> {
-  const { signature, accountIndex, channel, evmAddress, prepareFreshReturn, readReturnableBalance, destChainId, onStep } =
-    args;
+  const {
+    signature,
+    accountIndex,
+    channel,
+    evmAddress,
+    prepareFreshReturn,
+    readReturnableBalance,
+    destChainId,
+    onStep,
+  } = args;
   const minFinalityThreshold = args.minFinalityThreshold ?? STANDARD_FINALITY;
   const maxFee = args.maxFee ?? 0n;
   // Enforce the fee-free-return invariant up front (see assertFeeFreeReturn) so a
@@ -1192,7 +1222,9 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // the stale re-validation so the balance probe (which reads THIS account's wallet) never
   // decides another account's cursor is stale.
   if (cursor && (cursor.accountIndex !== accountIndex || cursor.channel !== channel)) {
-    const cursorLabel = cursor.channel ? `${cursor.channel} #${cursor.accountIndex}` : `#${cursor.accountIndex}`;
+    const cursorLabel = cursor.channel
+      ? `${cursor.channel} #${cursor.accountIndex}`
+      : `#${cursor.accountIndex}`;
     const requestedLabel = channel ? `${channel} #${accountIndex}` : `#${accountIndex}`;
     const err = new Error(
       `A return for account ${cursorLabel} is already in progress — ` +
@@ -1279,7 +1311,9 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     }
     amount = plan.amount;
     if (amount <= 0n) {
-      const err = new Error("No returnable USDC on this account's deposit wallet — nothing to return.");
+      const err = new Error(
+        "No returnable USDC on this account's deposit wallet — nothing to return.",
+      );
       emit('cctp', 'error', err.message);
       throw err;
     }
@@ -1452,6 +1486,7 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
   try {
     ({ message, attestation } = await waitForAttestation(record.burnTx, {
       sourceDomain: record.sourceDomain,
+      match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer),
       onStatus,
     }));
   } catch (err) {
