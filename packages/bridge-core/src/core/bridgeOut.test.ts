@@ -8,8 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 //   then ONE InvokeExternal -> OutboundAnonymizer.privacy_invoke(BuyParams{
 //   mint_recipient, amount, max_fee, min_finality_threshold, destination_domain}).
 //
-// Expectations are derived from the interface (docs/bridge-interface.md
-// §1, §2, §4), NOT from the implementation:
+// Expectations are derived from the interface, NOT from the implementation:
 //   - withdraw recipient = the Anonymizer, amount = the fixed denomination D;
 //   - the single InvokeExternal targets the Anonymizer and its calldata encodes
 //       privacy_invoke(params: BuyParams), which serialises FLAT as
@@ -382,8 +381,8 @@ describe('bridgeOut — fee-buffer gate (Phase 3)', () => {
   });
 
   it('surfaces the max spendable amount in the error', async () => {
-    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT); // 1 USDC; max = 1 - 0.20 = 0.80
-    await expect(bid()).rejects.toThrow(/bridge at most 0\.8 USDC/);
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT); // 1 USDC; max = 1 - 0.30 = 0.70
+    await expect(bid()).rejects.toThrow(/bridge at most 0\.7 USDC/);
   });
 
   it('allows a withdraw that leaves exactly the fee-buffer', async () => {
@@ -578,7 +577,7 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
 // destination. SAME withdraw + privacy_invoke(Buy) shape as bridgeOut(), but:
 //   - mint_recipient = the destination address (no per-account EOA);
 //   - NO per-account commitment H (a cash-out has no return claim, and the burn no
-//     longer emits any H at all — bridge-plan.md, threat-model.md).
+//     longer emits any H at all — docs/threat-model.md).
 // Reuses the same SDK/provider/proving/tx + manager-paid submit mocks as above.
 // ---------------------------------------------------------------------------
 // A distinct user destination address (20-byte EVM hex), != the per-account EOA.
@@ -651,7 +650,7 @@ describe('bridgeOutToWallet — Leg B cash-out (withdraw + decoy-H burn)', () =>
 
   it('records NO per-account commitment H for a cash-out (no return claim; burn no longer emits H)', async () => {
     // The cash-out has no return claim, so it must not compute or record an account H —
-    // and the burn no longer emits any H at all (bridge-plan.md, threat-model.md).
+    // and the burn no longer emits any H at all (docs/threat-model.md).
     await bridgeOutToWallet({ signature: SIGNATURE, amount: AMOUNT, destination: DEST_ADDRESS });
     // The BUY calldata is exactly 8 felts: no trailing H slot.
     expect(invokeResult!.calldata).toHaveLength(8);

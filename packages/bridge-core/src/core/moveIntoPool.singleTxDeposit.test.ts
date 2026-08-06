@@ -410,7 +410,7 @@ describe('moveIntoPool — Part B single-tx deposit fold', () => {
       // Resume detects the nonce already used: fire onMintAlreadyConsumed, do NOT fold,
       // return the already-landed net (mirrors the real fundFromMetaMask fold resume).
       mFundMM.mockImplementation(async (args) => {
-        if (args.deferMint) args.onMintAlreadyConsumed?.();
+        if (args.deferMint) args.onMintAlreadyConsumed?.({ foldBurn: true });
         return AMOUNT;
       });
     });

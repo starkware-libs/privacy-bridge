@@ -2,7 +2,7 @@
 // Copyright 2026 StarkWare Industries Ltd.
 
 // Offline unit tests for the CCTP attestation poll + the Forwarding-Service mint
-// poll (BUY 3-4), the frozen shape in docs/bridge-interface.md §4. No network is
+// poll (BUY 3-4), the frozen shape. No network is
 // touched: global.fetch is mocked for Circle Iris. The fund-account leg no longer submits
 // receiveMessage itself — Circle's Forwarding Service does — so we poll Iris for
 // the forwardTxHash instead. The cross-chain leg itself can only be verified live
@@ -78,7 +78,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('waitForAttestation (Iris polling — bridge-interface.md §4)', () => {
+describe('waitForAttestation (Iris polling)', () => {
   it('polls the right URL: /v2/messages/{snDomain=25}?transactionHash={burnTxHash}', async () => {
     fetchMock.mockResolvedValue(
       res(200, { messages: [{ status: 'complete', message: MESSAGE, attestation: ATTESTATION }] }),
@@ -161,7 +161,7 @@ describe('waitForAttestation (Iris polling — bridge-interface.md §4)', () => 
   });
 });
 
-describe('waitForForwardedMint (Forwarding-Service mint poll — bridge-interface.md §4)', () => {
+describe('waitForForwardedMint (Forwarding-Service mint poll)', () => {
   it('keeps polling until Iris reports a forwardTxHash, then returns it', async () => {
     // First Iris is still attesting (no forwardTxHash yet); then the Forwarding
     // Service submits the destination mint and Iris reports forwardTxHash.

@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { IdentityProvider, useIdentity } from './IdentityContext';
 
-// Session reset on network switch (docs/network-switch-plan.md test 4): when the
+// Session reset on network switch (test 4): when the
 // network changes, IdentityContext must WIPE the derived snAddress + status back to
 // idle (the derived SN account is network-specific: ozClassHash / poolAddress
 // differ). We drive this via useNetwork().networkEpoch, which

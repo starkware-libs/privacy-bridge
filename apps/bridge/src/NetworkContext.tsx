@@ -9,7 +9,7 @@
  * source registry) and the `config` Proxy makes every call site observe the swap.
  * This context is the app's single entry point for that swap.
  *
- * SAFETY (docs/network-switch-plan.md decisions):
+ * SAFETY:
  *   - FULL DISCONNECT on switch — the derived Starknet account is network-specific
  *     (ozClassHash / poolAddress differ). Switching fully
  *     disconnects the EVM wallet AND wipes the derived session (IdentityContext
@@ -99,7 +99,7 @@ export type NetworkContextValue = {
    * True while a switch is unsafe (fund-safety): a mounted flow is in-flight OR a
    * persisted burn-but-not-resolved CCTP cursor — deposit-in, bid burn, OR return —
    * exists for ANY funder (even signed-out). Switching disconnect()s and wipes ALL
-   * resume cursors (pmp.*), so this blocks it. See docs/network-switch-plan.md.
+   * resume cursors (pmp.*), so this blocks it.
    */
   switchBlocked: boolean;
   /**

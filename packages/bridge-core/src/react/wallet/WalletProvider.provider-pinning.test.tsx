@@ -36,6 +36,10 @@ vi.mock('./getWalletConnectProvider', () => ({
 // device-store touches localStorage on disconnect; stub the clear.
 vi.mock('./device-store', () => ({
   clearDeviceIdentity: vi.fn(),
+  // The remembered wallet pick: default to "nothing remembered" so these cases keep
+  // exercising the cold-start ambiguity behavior they were written for.
+  readWalletPick: vi.fn(() => null),
+  writeWalletPick: vi.fn(),
 }));
 
 const MM_ADDR = '0x1111111111111111111111111111111111111111';

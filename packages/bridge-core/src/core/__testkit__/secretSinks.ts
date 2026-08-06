@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-// Secret-hygiene test helper (docs/bridge-sdk-refactor.md §3 "Secret hygiene").
+// Secret-hygiene test helper.
 //
 // Slice 0 prereq for the new orchestrators (moveIntoPool/fundBid/cashOut/
 // returnToPool, Slices E/F/G): those take the raw wallet `signature` in-memory

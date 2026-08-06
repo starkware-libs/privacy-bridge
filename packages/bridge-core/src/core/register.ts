@@ -87,8 +87,8 @@ export async function registerWithPool(args: RegisterArgs): Promise<void> {
   // PAYMASTER path: a standalone register can't pay its pool fee — a fresh account has
   // no private balance for the fee withdraw AVNU requires (165 MISSING_FEE_TRANSFER_TO).
   // So defer: the deposit's `autoRegister` folds register() into the deposit's single
-  // apply_actions, where the deposited USDC funds the combined fee (deposit.ts;
-  // open-questions.md #13). No-op here.
+  // apply_actions, where the deposited USDC funds the combined fee (deposit.ts).
+  // No-op here.
   if (config.paymaster) {
     onStatus?.('Registration will be bundled with the deposit (paymaster).');
     return;

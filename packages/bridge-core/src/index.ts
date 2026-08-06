@@ -3,8 +3,7 @@
 
 // Bridge-core: value-movement engine + key derivation for the starknet-privacy pool.
 // Key derivation lives in ./derivation (physically absorbed from the former
-// packages/shared — see docs/bridge-sdk-refactor.md Slice Z).
-// Design: ../../docs/superpowers/specs/2026-06-29-bridge-split-design.md
+// packages/shared).
 
 // Key derivation (formerly packages/shared)
 export {

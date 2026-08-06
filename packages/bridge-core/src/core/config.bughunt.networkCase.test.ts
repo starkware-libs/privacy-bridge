@@ -6,9 +6,9 @@
 // `NETWORK=MAINNET`, `NETWORK=' mainnet'`, or a typo `NETWORK=main` silently
 // resolves to `network = 'testnet'`, so a mainnet cutover that fat-fingers
 // the case boots the WHOLE app on testnet defaults (pool address, anonymizer,
-// CCTP source registry, Iris). No documented contract in docs/ says NETWORK
-// must be lowercase — the mainnet-cutover-plan.md documents `NETWORK=mainnet`
-// as the master switch but never says other casings are rejected.
+// CCTP source registry, Iris). Nothing declares NETWORK case-sensitive:
+// `NETWORK=mainnet` is the master switch, but no other casing is stated to
+// be rejected.
 //
 // This test asserts a safer contract: `NETWORK=Mainnet` should either
 //   (a) normalize to mainnet, OR

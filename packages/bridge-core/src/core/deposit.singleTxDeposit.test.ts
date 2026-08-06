@@ -165,3 +165,89 @@ describe('depositToPool — Part B single-tx fold (paymaster invoke shape)', () 
     expect(submitAndTrackMock).toHaveBeenCalledOnce();
   });
 });
+
+describe('depositToPool — generic foldCalls (single-tx claim+shield)', () => {
+  const CLAIM: { contractAddress: string; entrypoint: string; calldata: string[] } = {
+    contractAddress: '0xREGISTRY',
+    entrypoint: 'claim',
+    calldata: ['0xeth', '0x1', '0x0', '0x2', '0x0', '0x1', '0xacct'],
+  };
+
+  it('foldCalls=[claim] → userCalls === [claim, approve], claim at index 0; ONE submit', async () => {
+    await depositToPool({
+      account,
+      viewingKey: 7n,
+      amountWei: 1_000_000n,
+      immediateProve: true,
+      foldCalls: [CLAIM],
+    });
+
+    expect(paymasterBuildLegMock).toHaveBeenCalledOnce();
+    const leg = paymasterBuildLegMock.mock.calls[0]![1] as {
+      type: string;
+      userCalls: { contractAddress: string; entrypoint: string; calldata: string[] }[];
+    };
+    expect(leg.type).toBe('invoke_and_apply_action');
+    expect(leg.userCalls).toHaveLength(2);
+
+    // Index 0 MUST be the folded claim, byte-for-byte (its effect — crediting the deposit
+    // token — must land BEFORE the approve + pool pull that consume it).
+    expect(leg.userCalls[0]).toEqual(CLAIM);
+    // Index 1 MUST be the pool approve.
+    expect(leg.userCalls[1]!.entrypoint).toBe('approve');
+    expect(leg.userCalls[1]!.contractAddress).toBe('0xUSDC');
+
+    // Exactly ONE tracked submit — the atomic claim+approve+deposit tx.
+    expect(submitAndTrackMock).toHaveBeenCalledOnce();
+  });
+
+  it('foldCalls + foldMint → order is [claim, receive_message, approve]', async () => {
+    await depositToPool({
+      account,
+      viewingKey: 7n,
+      amountWei: 1_000_000n,
+      immediateProve: true,
+      foldCalls: [CLAIM],
+      foldMint: { message: MESSAGE, attestation: ATTESTATION },
+    });
+
+    const leg = paymasterBuildLegMock.mock.calls[0]![1] as {
+      userCalls: { entrypoint: string }[];
+    };
+    expect(leg.userCalls).toHaveLength(3);
+    expect(leg.userCalls[0]!.entrypoint).toBe('claim');
+    expect(leg.userCalls[1]!.entrypoint).toBe('receive_message');
+    expect(leg.userCalls[2]!.entrypoint).toBe('approve');
+    expect(submitAndTrackMock).toHaveBeenCalledOnce();
+  });
+
+  it('empty/undefined foldCalls → unchanged [approve] shape', async () => {
+    await depositToPool({
+      account,
+      viewingKey: 7n,
+      amountWei: 1_000_000n,
+      immediateProve: true,
+      foldCalls: [],
+    });
+    const leg = paymasterBuildLegMock.mock.calls[0]![1] as {
+      userCalls: { entrypoint: string }[];
+    };
+    expect(leg.userCalls).toHaveLength(1);
+    expect(leg.userCalls[0]!.entrypoint).toBe('approve');
+  });
+
+  it('foldCalls on the manager path (no paymaster) fail CLOSED, never silently dropped', async () => {
+    const saved = h.cfg.paymaster;
+    (h.cfg as { paymaster?: unknown }).paymaster = undefined;
+    try {
+      await expect(
+        depositToPool({ account, viewingKey: 7n, amountWei: 1n, foldCalls: [CLAIM] }),
+      ).rejects.toThrow(/paymaster path/i);
+      // Nothing was submitted — the guard fires before any build/submit.
+      expect(paymasterBuildLegMock).not.toHaveBeenCalled();
+      expect(submitAndTrackMock).not.toHaveBeenCalled();
+    } finally {
+      (h.cfg as { paymaster?: unknown }).paymaster = saved;
+    }
+  });
+});

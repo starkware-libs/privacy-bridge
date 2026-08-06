@@ -3,8 +3,7 @@
 
 // Client-side, in-memory key derivation from an EVM wallet signature.
 // Pure functions only — no DOM/network/React. Never log or persist raw keys.
-// Design: ../../../../docs/key-derivation.md
-// (Absorbed from the former packages/shared — see docs/bridge-sdk-refactor.md Slice Z.)
+// (Absorbed from the former packages/shared.)
 
 export { STARKNET_KEY_LABEL, VIEWING_KEY_LABEL, POLYGON_EOA_LABEL } from './messages.js';
 export { deriveStarknetPrivateKey, deriveStarknetAccount } from './starknet-key.js';

@@ -25,6 +25,10 @@ vi.mock('./getWalletConnectProvider', () => ({
 }));
 vi.mock('./device-store', () => ({
   clearDeviceIdentity: vi.fn(),
+  // The remembered wallet pick: default to "nothing remembered" so these cases keep
+  // exercising the cold-start ambiguity behavior they were written for.
+  readWalletPick: vi.fn(() => null),
+  writeWalletPick: vi.fn(),
 }));
 
 let resolveRequestAccounts: ((accounts: string[]) => void) | null = null;

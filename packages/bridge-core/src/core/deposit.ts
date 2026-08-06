@@ -222,6 +222,21 @@ export interface DepositArgs {
   // — so this is fail-closed: never wrong, at worst no speedup that once. Ignored on the
   // manager path and whenever undefined.
   prebuiltProof?: PrebuiltDepositProof;
+  // GENERIC pre-call fold (single-tx deposit, paymaster path). Arbitrary calls prepended
+  // at the FRONT of this deposit's atomic AVNU invoke `calls` array — BEFORE the folded
+  // `receive_message` (if any) and the `approve` — so they execute FIRST, in the same
+  // Starknet tx that pulls + deposits. The motivating use is folding a funding call whose
+  // effect the deposit consumes (e.g. a GrantRegistry `claim` that credits the deposit
+  // token to the account: claim → approve → pool pull → apply_action, one tx), replacing a
+  // separate funding tx + its landing/aging wait. Money-safe by construction: the whole
+  // invoke is atomic, so a revert moves nothing, and the folded calls are validated by the
+  // #77 anti-substitution guard (they ride inside `userCalls`, which is compared index-by-
+  // index against AVNU's echo). The deposit PROOF is unaffected — foldCalls are invoke user
+  // calls, not part of the apply_actions proof — so a prebuiltProof stays reusable. The
+  // caller owns the folded call's own idempotency (e.g. the claim's once-per-wallet slot
+  // guard) since a post-relay-ambiguous retry re-includes them. Ignored on the manager path
+  // (a manager multicall runs as the MANAGER, not the derived account) and when empty.
+  foldCalls?: Call[];
 }
 
 // A deposit apply_actions proof produced by buildDepositProofAhead WITHOUT submitting —
@@ -371,9 +386,9 @@ async function proveDepositAt(
 // it can run during the minutes-long attestation wait rather than after it.
 //
 // The pool fee is quoted from a BARE `apply_action` (NOT invoke_and_apply_action): the
-// gasless AVNU paymaster charges only the fixed pool fee (docs/open-questions.md #13 —
-// `sponsored_private` sponsors gas, the fee is a server-fixed pool_fee_amount oracle-
-// converted to the pool_fee_token), which does NOT depend on the folded `receive_message`.
+// gasless AVNU paymaster charges only the fixed pool fee (`sponsored_private`
+// sponsors gas, the fee is a server-fixed pool_fee_amount oracle-converted to the
+// pool_fee_token), which does NOT depend on the folded `receive_message`.
 // So no attestation is needed to learn the fee. The submit (depositToPool) re-quotes the
 // REAL invoke_and_apply_action fee and only reuses this proof when they match — a drift
 // (e.g. an oracle price move between quotes) discards it and rebuilds. Paymaster path only.
@@ -449,9 +464,18 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     autoRegister = true,
     foldMint,
     prebuiltProof,
+    foldCalls,
   } = args;
   const provider = getRpcProvider();
   const depositorAddress = account.address;
+
+  // foldCalls ride the AVNU invoke `userCalls`, which the manager path never builds (it
+  // submits a bare apply_actions). Silently dropping them would run the deposit WITHOUT
+  // its folded funding call → the pool pull reverts (or worse, moves the wrong funds), so
+  // fail CLOSED rather than drop them. Mirrors buildDepositProofAhead's paymaster-only guard.
+  if (foldCalls?.length && !config.paymaster) {
+    throw new Error('depositToPool foldCalls require the AVNU paymaster path.');
+  }
 
   const approveCall = depositApproveCall(amountWei);
   let lastTxBlockNumber: number | undefined;
@@ -499,6 +523,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     provingDepth,
     foldMint,
     prebuiltProof,
+    foldCalls,
   );
 
   onStatus?.('Deposited into pool.');
@@ -527,6 +552,7 @@ async function proveAndSubmitDeposit(
   provingDepth: number = PROVING_BLOCK_DEPTH,
   foldMint?: { message: `0x${string}`; attestation: `0x${string}` },
   prebuiltProof?: PrebuiltDepositProof,
+  foldCalls?: Call[],
 ): Promise<void> {
   // MUTABLE proving anchor + depth so the PART-C rebuild-on-expiry can re-pick a FRESH
   // anchor from the current head (undefined → waitForProvingBlock reads latest now) at the
@@ -574,7 +600,7 @@ async function proveAndSubmitDeposit(
     // FIRST to learn the fee, inject the withdraw into the SAME USDC `.with()` block as
     // the deposit (so the deposit funds the fee — no separate STRK), prove, then execute.
     // autoRegister folds a fresh account's register() into this one apply_actions, so
-    // register + deposit + fee ride a single AVNU-submitted tx (open-questions.md #13).
+    // register + deposit + fee ride a single AVNU-submitted tx.
     let paymasterCtx: PaymasterBuildCtx | undefined;
     let feeWithdraw: { recipient: string; amount: bigint } | undefined;
     if (config.paymaster) {
@@ -585,9 +611,19 @@ async function proveAndSubmitDeposit(
       // guard compares this list index-by-index against AVNU's echo, so the order is
       // enforced end-to-end. The same list rides into paymasterExecuteLeg via
       // paymasterCtx.userCalls — no second edit at the execute site.
-      const userCalls = foldMint
-        ? [buildReceiveMessageCall(config, foldMint.message, foldMint.attestation), approveCall]
-        : [approveCall];
+      //
+      // GENERIC foldCalls ride at the FRONT — before the mint (if any) and the approve —
+      // so a folded funding call (e.g. a grant `claim` that credits the deposit token)
+      // executes FIRST and its effect is available to the approve + pool pull that follow,
+      // all atomic. Same #77 coverage (they are part of userCalls). Ordering:
+      // [...foldCalls, receive_message?, approve].
+      const userCalls: Call[] = [
+        ...(foldCalls ?? []),
+        ...(foldMint
+          ? [buildReceiveMessageCall(config, foldMint.message, foldMint.attestation)]
+          : []),
+        approveCall,
+      ];
       paymasterCtx = await paymasterBuildLeg(account, {
         type: 'invoke_and_apply_action',
         userCalls,

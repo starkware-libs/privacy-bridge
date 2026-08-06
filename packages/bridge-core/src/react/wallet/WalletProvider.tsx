@@ -10,11 +10,12 @@ import {
   hasMetaMask,
   injectedProviderCount,
   isSessionlessWalletConnect,
+  isSyntheticProviderRdns,
   requestAccounts,
   selectProvider,
   type EIP6963ProviderInfo,
 } from './injectedProvider';
-import { clearDeviceIdentity } from './device-store';
+import { clearDeviceIdentity, readWalletPick, writeWalletPick } from './device-store';
 import { WalletContext } from './context';
 import type { WalletContextValue } from './types';
 import { resetWalletConnectProvider, registerWalletConnect } from './getWalletConnectProvider';
@@ -122,6 +123,33 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Restore the REMEMBERED wallet pick as soon as that wallet announces itself. This is
+  // what makes a reload cheap for a multi-wallet user: `selectedRdns` is per-page-load
+  // state, so without a remembered pick the ambiguous-multi guard below refuses the silent
+  // `eth_accounts` read whenever 2+ injected wallets are installed — `canResume` stays
+  // false and the user is pushed back through the picker on EVERY reload, even though
+  // nothing was ever revoked. Restoring pins the provider and sets the selection, which
+  // re-runs the silent read against the right wallet.
+  //
+  // It cannot surface a wallet popup: nothing here calls `eth_requestAccounts` — the pick
+  // is a local hint that only unblocks a silent read.
+  //
+  // Constraints: ONCE per page load (a later explicit pick must win, and this must never
+  // fight the picker); pre-session only; only for a wallet still installed (selectProvider
+  // no-ops on an unknown rdns, so an uninstalled wallet just leaves the picker); never a
+  // synthetic entry (see isSyntheticProviderRdns). Keyed on `providers` so it retries as
+  // extensions announce asynchronously after mount.
+  const walletPickRestoredRef = useRef(false);
+  useEffect(() => {
+    if (walletPickRestoredRef.current || sessionEnteredRef.current || selectedRdns != null) return;
+    const rdns = readWalletPick();
+    if (!rdns || isSyntheticProviderRdns(rdns)) return;
+    const detail = selectProvider(rdns);
+    if (!detail) return; // not announced (yet, or uninstalled) — retry when the list changes
+    walletPickRestoredRef.current = true;
+    setSelectedRdns(detail.info.rdns);
+  }, [providers, selectedRdns]);
+
   // Silent read of the already-authorized account for the SELECTED provider, so a
   // returning user can one-click "Resume session" — without entering the session
   // (the dual-gate at `address` holds, no private state revealed). Keyed on the
@@ -153,6 +181,20 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // contend for window.ethereum — synthetic entries (WalletConnect) don't inject
     // into the global, so WC + one injected wallet stays unambiguous.
     if (injectedProviderCount() > 1 && selectedRdns == null) {
+      setAuthorizedAddress(null);
+      return;
+    }
+    // PENDING-PICK guard. A remembered wallet that hasn't announced yet is NOT the same as
+    // "no preference": extensions announce asynchronously, so an early announcer can be the
+    // lone discovered provider for a moment. Reading the bare global in that window would
+    // attribute ANOTHER extension's account to this visit — and for a consumer that
+    // auto-resumes on `canResume`, that silently enters a session as the WRONG wallet, after
+    // which `sessionEnteredRef` blocks the restore below for the rest of the load. So hold
+    // off until the remembered pick resolves (the restore sets `selectedRdns`, re-running
+    // this effect). If that wallet is gone for good it simply never resolves and the picker
+    // is required — the correct outcome after uninstalling the wallet you last used.
+    const rememberedRdns = readWalletPick();
+    if (selectedRdns == null && rememberedRdns && !isSyntheticProviderRdns(rememberedRdns)) {
       setAuthorizedAddress(null);
       return;
     }
@@ -302,6 +344,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         if (!isCurrent()) return;
         setAuthorizedAddress(accounts[0] ?? null);
         setSessionEntered(accounts[0] != null);
+        // Remember the wallet for the next visit — only after the wallet actually
+        // authorized us, so a rejected/abandoned attempt never leaves a pick behind.
+        // Synthetic entries are skipped for the same reason the restore skips them.
+        if (accounts[0] != null && resolvedRdns && !isSyntheticProviderRdns(resolvedRdns)) {
+          writeWalletPick(resolvedRdns);
+        }
         await readChainId(provider);
         if (!isCurrent()) return;
         setIsModalOpen(false);
@@ -361,8 +409,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [authorizedAddress, selectedRdns, openLoginModal, readChainId]);
 
   // Disconnect / "Forget this device": end the session AND wipe the persisted
-  // pmp.* state (identity, derived accounts, indices, in-flight cursors) so the next visit
-  // starts clean — no residual private metadata. The wallet authorization itself
+  // pmp.* state (identity, derived accounts, indices, in-flight cursors, and the
+  // remembered wallet pick — so the next visit asks which wallet again instead of
+  // silently resolving the old one) so the next visit starts clean — no residual private
+  // metadata. The wallet authorization itself
   // is the user's to revoke in their wallet; we drop our copy. For WC sessions we
   // also tear down the relay session (best-effort) so the wc@2:* localStorage
   // entry can't silently rehydrate on the next visit.

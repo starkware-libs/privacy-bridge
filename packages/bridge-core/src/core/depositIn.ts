@@ -45,6 +45,7 @@ import type { Account } from 'starknet';
 
 import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
+import { markNonRetryable } from './errors';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
 import {
@@ -63,6 +64,7 @@ import {
 } from './cctpFees';
 import { switchChain, type EthereumProvider } from '../lib/ethereum';
 import { hasAnyInflightReturn } from './returnIn';
+import { hasAnyPendingReturnBurn } from './pendingReturnBurn';
 import { hasAnyInflightBurn } from './account-store';
 import { assertStorageWritable } from './storageProbe';
 
@@ -158,7 +160,7 @@ const ERC20_ABI = [
 ] as const satisfies Abi;
 
 // CCTP V2 depositForBurn (circlefin EVM TokenMessengerV2). Param order matches
-// docs/bridge-plan.md §3 / the Starknet deposit_for_burn used by the Anonymizer.
+// Mirrors the Starknet deposit_for_burn used by the Anonymizer.
 const TOKEN_MESSENGER_ABI = [
   {
     type: 'function',
@@ -433,7 +435,17 @@ function hasResumableRecordGeneric(raw: string): boolean {
 // Cheap synchronous localStorage reads; safe to call from render / a switch guard.
 export function hasAnyInflightTransfer(): boolean {
   // Strict, known kinds first (unchanged semantics).
-  if (hasAnyInflightDeposit() || hasAnyInflightBurn() || hasAnyInflightReturn()) return true;
+  // hasAnyPendingReturnBurn covers the submitted-but-unconfirmed return burn, whose store
+  // is NOT named pmp.inflight* — so neither the strict readers nor the generic scan below
+  // would otherwise see it, and a switch could wipe the only handle on a live burn.
+  if (
+    hasAnyInflightDeposit() ||
+    hasAnyInflightBurn() ||
+    hasAnyInflightReturn() ||
+    hasAnyPendingReturnBurn()
+  ) {
+    return true;
+  }
 
   // Generic scan for ANY other inflight cursor key (forward-compat). The three
   // strictly-validated kinds are already handled above; skip them here so their
@@ -629,6 +641,10 @@ export interface FundFromMetaMaskArgs {
   // present in EVM_CCTP_SOURCES, MetaMask is switched to it before the burn.
   // Omitting preserves the existing auto-detect + default-fallback behavior.
   sourceChainId?: number;
+  // CONTINUE ONLY (unattended watcher / Continue button): finish an already-burned
+  // deposit, never start one. With nothing to resume this throws NOTHING_TO_RESUME
+  // instead of falling through to a fresh approve + depositForBurn.
+  resumeOnly?: boolean;
   // PART B (single-tx deposit-in fold): when true, the Starknet CCTP mint
   // (receive_message) is NOT submitted as its own tx here — instead the attested
   // {message, attestation} are handed back via onMintFold so the caller folds
@@ -648,14 +664,16 @@ export interface FundFromMetaMaskArgs {
     attestation: `0x${string}`;
     clearMintCursor: () => void;
   }) => void;
-  // FIX 1 (fold path only): fired on RESUME when the CCTP nonce is already consumed on
-  // the SN MessageTransmitterV2 ⟺ the prior atomic fold deposit already committed. When
-  // this fires, fundFromMetaMask does NOT re-burn and returns the already-landed net;
-  // the caller converges on completion (balance cross-check) instead of re-folding the
-  // spent nonce (which would revert "Nonce already used" every retry). Never fires on the
-  // standalone 2-tx path (deferMint false) — there a consumed nonce keeps the historical
-  // fresh-re-burn behavior.
-  onMintAlreadyConsumed?: () => void;
+  // FIX 1: fired on RESUME when the CCTP nonce is already consumed on the SN
+  // MessageTransmitterV2. When this fires, fundFromMetaMask does NOT re-burn and returns
+  // the already-landed net; the caller converges on completion (balance cross-check)
+  // instead of re-folding the spent nonce (which would revert "Nonce already used" every
+  // retry). Fires for a fold burn, or for ANY burn under resumeOnly; a standalone burn
+  // without resumeOnly keeps the historical fresh-re-burn behavior.
+  // `foldBurn` reports the shape of the burn being resumed (from the cursor): a fold
+  // deposit is atomic, so a swept balance proves completion in one read; a standalone
+  // mint can leave the funds resting on the account, which the caller must confirm.
+  onMintAlreadyConsumed?: (info: { foldBurn: boolean }) => void;
   // Fired when the source-chain CCTP burn is confirmed — on a FRESH burn (path 3) or when a
   // prior run's burn is RESUMED from the cursor (path 2) — with the burn tx hash + a
   // source-chain block-explorer URL for it (when the source config carries one). Lets the
@@ -897,7 +915,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     burnTx: string,
     sourceDomain: number,
     recipient: string,
-    opts?: { detectAlreadyMinted?: boolean; foldBurn?: boolean },
+    opts?: { detectAlreadyMinted?: boolean; foldBurn?: boolean; resumeOnly?: boolean },
   ): Promise<'minted' | 'already-minted' | 'already-deposited' | 'deferred'> => {
     try {
       const { message, attestation } = await waitForAttestation(burnTx, {
@@ -914,7 +932,8 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       // the derived account after that prior run, so the balance is back to zero —
       // but is_nonce_used is monotonic once receive_message lands, so a `true`
       // read PROVES the mint already happened. The cursor is provably dead: clear
-      // it and let the caller fall through to a FRESH burn for the CURRENT amount.
+      // it, then either converge (below) or — a standalone burn with no resumeOnly —
+      // fall through to a FRESH burn for the CURRENT amount.
       if (opts?.detectAlreadyMinted && (await isCctpMessageNonceUsed(message))) {
         clearInflightDeposit(evmAddress);
         // FIX 1 — FOLD path (deferMint): the mint rides INSIDE the atomic deposit tx, so a
@@ -936,8 +955,13 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         // value that ALREADY reached the pool — a double-spend (Bugbot HIGH). A legacy
         // cursor has no `fold` field ⟹ standalone (it predates the fold feature), which is
         // the correct historical classification.
-        if (opts?.foldBurn) {
-          args.onMintAlreadyConsumed?.();
+        //
+        // Resume-only converges too, on EITHER burn shape: it may never start a fresh
+        // burn, and a standalone mint can leave funds resting on the account, so the
+        // caller finishes with a deposit-only of whatever settled.
+        if (opts?.foldBurn || opts?.resumeOnly) {
+          if (!opts.foldBurn) onStatus?.('Prior deposit already minted — finishing it.');
+          args.onMintAlreadyConsumed?.({ foldBurn: opts.foldBurn === true });
           return 'already-deposited';
         }
         return 'already-minted';
@@ -954,7 +978,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         // attested message BEFORE building receive_message (snMint.ts). The fold path
         // SKIPS submitStarknetMint — the mint rides inside the caller's deposit tx — so
         // run the SAME gate HERE before handing the bytes over; otherwise a tampered /
-        // MITM'd Iris attestation (Iris is a TRUSTED oblivious service, threat-model.md)
+        // MITM'd Iris attestation (Iris is a TRUSTED oblivious service, docs/threat-model.md)
         // would be folded in UNCHECKED (redirected mint recipient / wrong destination
         // domain). Same params + same TERMINAL "recipient/domain mismatch" throw
         // (classified non-transient, cleared as terminal, never resume-looped) as the
@@ -1059,7 +1083,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       inflight.snRecipient,
       // foldBurn from the PERSISTED cursor (how the burn began), not live config —
       // a consumed nonce on a fold burn must converge, never re-burn (Bugbot HIGH).
-      { detectAlreadyMinted: true, foldBurn: inflight.fold === true },
+      { detectAlreadyMinted: true, foldBurn: inflight.fold === true, resumeOnly: args.resumeOnly },
     );
     if (result === 'minted' || result === 'deferred' || result === 'already-deposited') {
       // #229: the mint already landed (or, on the PART B fold, WILL land inside the
@@ -1082,6 +1106,18 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     onStatus?.('Prior deposit already minted — starting a fresh deposit…');
   }
 
+  // RESUME-ONLY STOP. Every EVM write and wallet prompt in this module lives past this
+  // line (approve/depositForBurn, wallet_sendCalls, the resolveSource chain switch), so
+  // one guard here makes "a continue can never start a burn" true by construction. A
+  // caller that continues unattended must fail here instead of prompting the wallet.
+  if (args.resumeOnly) {
+    const err = new Error('There is no in-flight deposit to continue for this wallet.') as Error & {
+      code: 'NOTHING_TO_RESUME';
+    };
+    err.code = 'NOTHING_TO_RESUME';
+    throw markNonRetryable(err);
+  }
+
   // (3) FRESH PATH.
   const ethProvider = args.provider;
   if (!ethProvider) {
@@ -1100,29 +1136,79 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   const walletClient = createWalletClient({ transport: custom(eip1193) });
   const publicClient = createPublicClient({ transport: http(source.rpcUrl) });
 
-  // Probe EIP-5792 atomic-batch support up front (it also gates the native-gas
-  // preflight below). Only batch when the wallet reports atomic support (or is
+  // PREFLIGHT — six independent reads, issued CONCURRENTLY (they were serial once,
+  // ~6 round trips of pure latency before the first wallet prompt). Their individual
+  // error contracts are preserved by attaching each promise's own handler:
+  //   - capabilities / fee estimate / approve estimate fail SOFT (two-tx fallback /
+  //     gasPrice-only cap / flat gas envelope), exactly as their old try/catch did;
+  //   - USDC balance, native balance, and gasPrice must succeed. These three are
+  //     SETTLED (never reject in flight) and unwrapped below in the OLD SERIAL ORDER,
+  //     so which error the user sees stays deterministic under a compound failure —
+  //     with a raw Promise.all the first rejection IN TIME would win, letting a flaky
+  //     gas read's raw RPC error displace the actionable low-USDC message.
+  //
+  // Capabilities probe: EIP-5792 atomic-batch support (also gates the native-gas
+  // check below). Only batch when the wallet reports atomic support (or is
   // upgrade-ready via 7702). A wallet without wallet_getCapabilities — or a transport
   // that rejects it (e.g. a WalletConnect session that didn't negotiate the 5792
-  // methods) — throws here and we take the two-transaction fallback.
-  let supportsAtomicBatch = false;
-  try {
-    const capabilities = await getCapabilities(walletClient, { account, chainId: source.chainId });
-    const atomicStatus = capabilities?.atomic?.status;
-    supportsAtomicBatch = atomicStatus === 'supported' || atomicStatus === 'ready';
-  } catch {
-    supportsAtomicBatch = false;
-  }
+  // methods) — falls to the two-transaction path.
+  const settleRead = <T>(
+    read: Promise<T>,
+  ): Promise<{ ok: true; value: T } | { ok: false; reason: unknown }> =>
+    read.then(
+      (value) => ({ ok: true as const, value }),
+      (reason) => ({ ok: false as const, reason }),
+    );
+  const unwrapRead = <T>(settled: { ok: true; value: T } | { ok: false; reason: unknown }): T => {
+    if (!settled.ok) throw settled.reason;
+    return settled.value;
+  };
+  onStatus?.(
+    `Checking ${source.chainName} USDC balance and ${source.nativeCurrency.symbol} for gas…`,
+  );
+  const [
+    supportsAtomicBatch,
+    evmBalanceRead,
+    nativeBalanceRead,
+    gasPriceRead,
+    eip1559Fees,
+    approveGasUnits,
+  ] = await Promise.all([
+    getCapabilities(walletClient, { account, chainId: source.chainId })
+      .then((capabilities) => {
+        const atomicStatus = capabilities?.atomic?.status;
+        return atomicStatus === 'supported' || atomicStatus === 'ready';
+      })
+      .catch(() => false),
+    settleRead(
+      publicClient.readContract({
+        address: source.usdc as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [account],
+      }) as Promise<bigint>,
+    ),
+    settleRead(publicClient.getBalance({ address: account })),
+    settleRead(publicClient.getGasPrice()),
+    // estimateFeesPerGas unavailable (e.g. a non-1559 chain) → undefined: keep the
+    // getGasPrice() cap and let viem/the wallet pick the fees.
+    publicClient.estimateFeesPerGas().catch(() => undefined),
+    // Precise approve estimate (estimable pre-allowance); undefined → the flat
+    // envelope below, so the preflight never crashes on it.
+    publicClient
+      .estimateContractGas({
+        address: source.usdc as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [source.tokenMessenger as `0x${string}`, amountWei],
+        account,
+      })
+      .catch(() => undefined),
+  ]);
+  const evmBalance = unwrapRead(evmBalanceRead);
 
   // Pre-check the EVM USDC balance so a shortfall surfaces a clear, actionable
   // error instead of an opaque on-chain approve/burn revert.
-  onStatus?.(`Checking ${source.chainName} USDC balance…`);
-  const evmBalance = (await publicClient.readContract({
-    address: source.usdc as `0x${string}`,
-    abi: ERC20_ABI,
-    functionName: 'balanceOf',
-    args: [account],
-  })) as bigint;
   if (evmBalance < amountWei) {
     throw new Error(
       `MetaMask account ${evmAddress} is low on USDC on ${source.chainName} ` +
@@ -1143,11 +1229,10 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // so it fails cleanly with the fund-your-wallet message rather than resume-looping.
   // (Fresh path only: the resume path's only chain leg is the manager-gas-paid
   // Starknet mint — no EVM tx — so it must finish even with zero native balance.)
-  onStatus?.(`Checking ${source.chainName} ${source.nativeCurrency.symbol} for gas…`);
-  const nativeBalance = await publicClient.getBalance({ address: account });
-  // Effective per-gas cap: MAX(EIP-1559 maxFeePerGas, legacy gasPrice). Fall back to
-  // getGasPrice() alone if estimateFeesPerGas is unavailable (e.g. a non-1559 chain).
-  const gasPrice = await publicClient.getGasPrice();
+  const nativeBalance = unwrapRead(nativeBalanceRead);
+  const gasPrice = unwrapRead(gasPriceRead);
+
+  // Effective per-gas cap: MAX(EIP-1559 maxFeePerGas, legacy gasPrice).
   let perGasCap = gasPrice;
   // Explicit EIP-1559 fees for the approve/burn submits, read live + floored to the
   // chain's enforced minimum tip and bumped by a margin (selectEip1559Fees) so a
@@ -1159,33 +1244,16 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       ? BigInt(source.minPriorityFeeGwei) * 1_000_000_000n
       : undefined;
   let feeOverrides: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | undefined;
-  try {
-    const fees = await publicClient.estimateFeesPerGas();
-    if (fees?.maxFeePerGas !== undefined && fees.maxFeePerGas > perGasCap) {
-      perGasCap = fees.maxFeePerGas;
-    }
-    if (fees?.maxFeePerGas !== undefined && fees?.maxPriorityFeePerGas !== undefined) {
-      feeOverrides = selectEip1559Fees(fees, minPriorityFeeWei);
-    }
-  } catch {
-    // estimateFeesPerGas unavailable → keep getGasPrice() (already assigned) and
-    // let viem/the wallet pick the fees (feeOverrides stays undefined).
+  if (eip1559Fees?.maxFeePerGas !== undefined && eip1559Fees.maxFeePerGas > perGasCap) {
+    perGasCap = eip1559Fees.maxFeePerGas;
   }
-  // Precise approve estimate + a conservative fixed burn budget; fall back to the
-  // flat envelope if estimateContractGas throws, so the preflight never crashes.
-  let gasUnits: bigint;
-  try {
-    const approveGasUnits = await publicClient.estimateContractGas({
-      address: source.usdc as `0x${string}`,
-      abi: ERC20_ABI,
-      functionName: 'approve',
-      args: [source.tokenMessenger as `0x${string}`, amountWei],
-      account,
-    });
-    gasUnits = approveGasUnits + BURN_GAS_UNITS_BUDGET;
-  } catch {
-    gasUnits = FRESH_PATH_GAS_UNITS;
+  if (eip1559Fees?.maxFeePerGas !== undefined && eip1559Fees?.maxPriorityFeePerGas !== undefined) {
+    feeOverrides = selectEip1559Fees(eip1559Fees, minPriorityFeeWei);
   }
+  // Precise approve estimate + a conservative fixed burn budget; the flat envelope
+  // when the estimate was unavailable.
+  const gasUnits: bigint =
+    approveGasUnits !== undefined ? approveGasUnits + BURN_GAS_UNITS_BUDGET : FRESH_PATH_GAS_UNITS;
   const requiredWei = (gasUnits * perGasCap * GAS_PRICE_SAFETY_NUM) / GAS_PRICE_SAFETY_DEN;
   // Skip this hard block for an atomic-batch wallet: it may be a smart account that
   // pays gas via a paymaster and legitimately holds zero native balance, yet is exactly

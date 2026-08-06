@@ -9,7 +9,7 @@ import {
 } from './poolDepositCursor';
 import { hasAnyInflightTransfer } from './depositIn';
 
-// FUND-SAFETY (Row 1 double-burn guard, docs/bridge-sdk-refactor.md §1): the pool-deposit
+// FUND-SAFETY (Row 1 double-burn guard): the pool-deposit
 // resume cursor persists that funds landed on a derived SN account pending a pool deposit,
 // so a cross-run resume never re-funds (re-burns). Round-trip + corrupt-drop + the
 // network-switch guard interaction are proven here; the orchestrator wiring is proven in

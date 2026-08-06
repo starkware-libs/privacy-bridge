@@ -6,7 +6,7 @@
 // signed pool tx (Withdraw{recipient=Anonymizer} + InvokeExternal ->
 // Anonymizer.privacy_invoke). BUY path steps 1-2.
 //
-// Frozen shape: ../../../../docs/bridge-interface.md §4. Mirrors deposit.ts /
+// Frozen shape. Mirrors deposit.ts /
 // register.ts patterns (createPrivateTransfers, waitForProvingBlock aging,
 // createProofInvocation -> executeWithInvocation -> account.execute, STRK-fee
 // seeding, invalidateProofNonceCache single-retry). privacy_invoke returns an
@@ -78,7 +78,7 @@ import {
 import { consumeAccountIndex } from './account-store';
 
 // CCTP min_finality_threshold: 2000 = Standard (free, finalized); 1000 = Fast
-// (paid). docs/bridge-plan.md §3, Decision 4. The default follows config.cctp.fast
+// (paid). Decision 4. The default follows config.cctp.fast
 // (the CCTP_FAST env) so the burn's declared finality MATCHES the fee quote (which
 // also defaults to config.cctp.fast) — a hardcoded Standard default here would burn
 // slow (~13-19 min) even with Fast enabled, while paying the Fast fee. Callers may
@@ -110,7 +110,7 @@ function assertQuotedFinalityMatchesBurn(
     );
   }
 }
-// sn_domain baked into H (Starknet CCTP domain). docs/bridge-interface.md §2.
+// sn_domain baked into H (Starknet CCTP domain).
 const SN_DOMAIN = 25n;
 
 // Fee-buffer reserved in the pool for the eventual PRIVATE return fee (Phase 3).
@@ -119,14 +119,19 @@ const SN_DOMAIN = 25n;
 // via the anonymizer's noteId-bound OpenNoteDeposit which the SDK's resolveNotes
 // does not count toward spendable balance (only a noteId===undefined open deposit
 // cancels a deficit; compiler.js:457-465, mirrored in bridgeBack.ts). So a
-// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.20 USDC
-// covers ONE return's live fee (~0.14 mainnet / ~0.04 testnet) plus AVNU's
-// documented 15-17% paymaster-drift markup with a modest safety margin: 0.14 ×
-// 1.17 ≈ 0.164, so 0.20 leaves ~22% headroom above the drifted quote. Sized to
-// cover a SINGLE return; subsequent returns need a fresh deposit to top the pool
-// up. cashOut / bridgeOutToWallet do NOT gate — a full exit legitimately drains
-// the pool.
-export const RETURN_FEE_BUFFER_WEI = 200_000n; // 0.20 USDC @ 6dp
+// bid-funding bridgeOut must LEAVE at least this much in the pool. 0.30 USDC
+// covers ONE return's live fee plus AVNU's documented 15-17% paymaster-drift
+// markup with a modest safety margin: the pool's 6-STRK fee is ~0.21 USDC at
+// mainnet STRK prices, 0.21 × 1.17 ≈ 0.246, so 0.30 leaves ~22% headroom above the
+// drifted quote. Sized to cover a SINGLE return; subsequent returns need a fresh
+// deposit to top the pool up. cashOut / bridgeOutToWallet do NOT gate — a full exit
+// legitimately drains the pool.
+//
+// SCALES WITH THE POOL FEE: unlike the UI estimate (which reads `get_fee_amount()`
+// live, poolFee.ts), this is a USDC figure, and converting the pool's STRK fee to
+// USDC needs AVNU's own oracle rate + markup — not a number the client can read.
+// So it stays a constant: re-derive it here whenever the pool's STRK fee changes.
+export const RETURN_FEE_BUFFER_WEI = 300_000n; // 0.30 USDC @ 6dp
 
 export interface BridgeOutArgs {
   // EVM wallet signature of the app's identity sign-message — the only secret input;
@@ -259,7 +264,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
   // computeClaimH binds note_binding to claim_secret (NOT the viewing key) so the
   // on-chain claim — whose frozen signature carries only claim_secret — can
   // recompute the SAME H. The raw viewing key feeds claim_secret only and is
-  // never revealed on-chain (docs/bridge-interface.md §2, threat-model.md).
+  // never revealed on-chain (docs/threat-model.md).
   const claimSecret = deriveClaimSecret(viewingKey, accountNonce);
   const commitmentH = computeClaimH({ claimSecret, amount, snDomain: SN_DOMAIN });
 
@@ -306,7 +311,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
 // ---------------------------------------------------------------------------
 // fundAccountFromPool — compose bridgeOut + waitForBridgedMint behind ONE
 // account-funding orchestrator that owns the in-flight burn resume cursor
-// (Slice F, docs/bridge-sdk-refactor.md §1/§2). This replaces the hand-rolled
+// (Slice F). This replaces the hand-rolled
 // burn→attest→mint state machine + cursor that lived in the app's
 // account-funding context. The app now passes only signature/accountIndex/amount +
 // the injected deposit-wallet resolver; the account_nonce / commitment H are
@@ -722,6 +727,17 @@ export async function fundAccountFromPool(
       throw err;
     }
 
+    // Start the CCTP forwarding-fee quote BEFORE the wallet prompt: it depends only
+    // on (amount, fast, destDomain) — all fixed at this point — so its HTTP round
+    // trip rides under the user's signing time instead of running serially after it.
+    // Kept AFTER the storage probe (an unwritable-storage abort must not fire network
+    // calls). The pre-attached no-op catch only silences the unhandled-rejection
+    // warning while the prompt is open; a rejected quote still rejects the awaited
+    // promise below, inside the same try/catch that owned the error when the call
+    // was serial. A read-only GET, so a user-rejected signature wastes nothing.
+    const quotePromise = fetchForwardMaxFee(amount, { fast, destDomain });
+    quotePromise.catch(() => {});
+
     // Re-sign (fresh only) + derive the account nonce IN-MEMORY. account_nonce =
     // poseidon([tag, viewing_key, index]); commitment H is computed inside bridgeOut.
     // resolveSignature's throw (e.g. a user-rejected wallet prompt) propagates RAW —
@@ -737,12 +753,13 @@ export async function fundAccountFromPool(
       // declared finality just below, so they never diverge — and matches the Iris
       // poll cadence in pollKnobs.
       // FORWARDING-FEE FLOOR (pre-flight): the Forwarding Service deducts its fee IN
-      // USDC from the burn, so the amount must clear it — quote the live max_fee and
-      // reject a sub-floor amount with a CLEAR error here, rather than let the
-      // Anonymizer's assert(amount > max_fee) revert opaquely. The quote's max_fee is
-      // passed to bridgeOut so the burn carries the fee Circle will deduct.
+      // USDC from the burn, so the amount must clear it — quote the live max_fee
+      // (started above, under the signature prompt) and reject a sub-floor amount
+      // with a CLEAR error here, rather than let the Anonymizer's
+      // assert(amount > max_fee) revert opaquely. The quote's max_fee is passed to
+      // bridgeOut so the burn carries the fee Circle will deduct.
       emit('bridge', 'running', 'Quoting CCTP forwarding fee…');
-      const quote = await fetchForwardMaxFee(amount, { fast, destDomain });
+      const quote = await quotePromise;
       assertAboveForwardFloor(amount, quote);
       emit(
         'bridge',
@@ -924,7 +941,7 @@ export interface BridgeOutToWalletResult {
 // bridgeOut() — withdraw to the Anonymizer + ONE InvokeExternal ->
 // Anonymizer.privacy_invoke(Buy) — but: mint_recipient = the destination address
 // (no per-account EOA) and no per-account commitment H (a cash-out has no return claim,
-// and the burn no longer emits H — bridge-plan.md, threat-model.md).
+// and the burn no longer emits H — docs/threat-model.md).
 // Manager-paid via the shared proveAndSubmitBridgeOut helper.
 export async function bridgeOutToWallet(
   args: BridgeOutToWalletArgs,
@@ -998,8 +1015,8 @@ export async function bridgeOutToWallet(
 
 // ---------------------------------------------------------------------------
 // cashOut — compose bridgeOutToWallet + waitForBridgedMint behind ONE cash-out
-// orchestrator that owns the pmp.inflightCashOut resume cursor (Slice G,
-// docs/bridge-sdk-refactor.md §1/§2). This replaces the hand-rolled burn→attest→
+// orchestrator that owns the pmp.inflightCashOut resume cursor (Slice G).
+// This replaces the hand-rolled burn→attest→
 // mint state machine + cursor that lived in the app's ReturnContext.runCashOut.
 // The app now passes only the base-unit amount + the user's chosen Polygon
 // destination + the connected evmAddress + a lazy resolveSignature; the CCTP
@@ -1528,7 +1545,7 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     // PAYMASTER path: the pool fee must be baked into the proof as a withdraw to the
     // AVNU forwarder (AVNU 165 otherwise). buildTransaction FIRST to learn the fee, then
     // inject it into the SAME USDC `.with()` block as the account withdraw — both draw from
-    // the user's private notes (mirrors deposit.ts; open-questions.md #13).
+    // the user's private notes (mirrors deposit.ts).
     let paymasterCtx: PaymasterBuildCtx | undefined;
     let feeWithdraw: { recipient: string; amount: bigint } | undefined;
     if (config.paymaster) {

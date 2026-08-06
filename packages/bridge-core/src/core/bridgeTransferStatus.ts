@@ -2,7 +2,7 @@
 // Copyright 2026 StarkWare Industries Ltd.
 
 // Unified, direction-agnostic status + resume surface for BOTH bridge directions
-// (docs/bridge-sdk-refactor.md — Phase 1 shared engine). ONE reader across all five
+// (Phase 1 shared engine). ONE reader across all five
 // persisted in-flight cursors that tells the app whether an interrupted transfer is
 // waiting for this identity, and ONE thin router that drives the EXISTING
 // resume-capable orchestrator for that phase to completion. Phase 2 (the apps) wires
@@ -55,8 +55,9 @@ export interface BridgeTransferStatus {
 // Circle's Forwarding Service — none of which requests a NEW wallet signature/approval.
 // So needsSignature is FALSE for every phase today; the field stays for a FUTURE cursor
 // that would persist a PRE-burn state (which would need a new user-signed tx to finish):
-//   - cctp-mint-in  : fundFromMetaMask resume (depositIn.ts ~L687) runs finishAttestAndMint
-//                     off the persisted burn tx — no re-approve/re-burn.
+//   - cctp-mint-in  : a continue that passes resumeOnly (depositIn.ts) finishes attest +
+//                     mint off the persisted burn tx and THROWS rather than reaching the
+//                     fresh path — approve/burn/switchChain are unreachable by construction.
 //   - pool-deposit  : moveIntoPool resume short-circuit / deposit-live-balance
 //                     (moveIntoPool.ts) — funds already minted; depositToPool is a proven
 //                     pool tx (paymaster/manager), no wallet approval.
