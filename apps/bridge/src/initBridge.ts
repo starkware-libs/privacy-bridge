@@ -17,8 +17,27 @@
 // switching to the barrel broke a network-edge mock). The `./config` subpath is a
 // published specifier an extracted app consumes unchanged — see
 // docs/bridge-sdk-refactor.md Slice Y / §6.
+//
+// PROD: the AVNU paymaster key NEVER ships in the bundle. Point the SDK's paymaster
+// endpoint at the same-origin /api/avnu proxy (src/server/avnuProxy.ts), which
+// injects the real x-paymaster-api-key from server-side env (AVNU_PAYMASTER_API_KEY).
+// The 'edge-proxy' placeholder only flips the SDK's "paymaster ON" switch
+// (resolvePaymaster is truthy-gated); the proxy overwrites the header, so the
+// placeholder value is never trusted upstream. Absolute same-origin URL (not a bare
+// '/api/avnu') for parity with any consumer that requires http(s) URLs.
+// DEV (`pnpm dev` has no proxy): direct AVNU access with the dev-only
+// VITE_AVNU_PAYMASTER_API_KEY.
 import { bridgeEnvFromRecord, initBridgeConfig } from '@starkware-libs/starknet-privacy-bridge/config';
 
-initBridgeConfig(
-  bridgeEnvFromRecord(import.meta.env as unknown as Record<string, unknown>, 'VITE_'),
-);
+const rawEnv = import.meta.env as unknown as Record<string, unknown>;
+const bridgeEnvRecord = {
+  ...rawEnv,
+  ...(import.meta.env.PROD
+    ? {
+        VITE_AVNU_PAYMASTER_URL: new URL('/api/avnu', window.location.origin).toString(),
+        VITE_AVNU_PAYMASTER_API_KEY: 'edge-proxy',
+      }
+    : {}),
+};
+
+initBridgeConfig(bridgeEnvFromRecord(bridgeEnvRecord, 'VITE_'));
