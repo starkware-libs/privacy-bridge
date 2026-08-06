@@ -3,7 +3,7 @@
 // This is the composed orchestrator that replaces the
 // hand-rolled sequencing in the app's IdentityContext.runMakePrivate — it owns the
 // step order, the transient-vs-terminal retry, and the fund-then-deploy bookkeeping
-// (docs/bridge-sdk-refactor.md §1, frozen interface + state-transition table).
+// (frozen interface + state-transition table).
 //
 // Secret hygiene (Decision 5): the raw wallet `signature` is an IN-MEMORY argument;
 // the SN private key + viewing key are derived internally and NEVER logged or
@@ -230,7 +230,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
 // THIS invocation, FALSE on the resume short-circuit (a prior run's deposit already
 // landed). The UI gates its success/no-op copy on `deposited`, never on a racy
 // balance-delta read. The step order + fund-then-deploy invariants are the frozen
-// state-transition table (docs/bridge-sdk-refactor.md §1):
+// state-transition table:
 //   - deploy is funded-and-executed AT MOST ONCE per run;
 //   - the deposit step reads a POST-deploy balance and never double-funds on retry
 //     (an already-deployed account under a user-paid deploy fee has ALREADY spent
@@ -606,8 +606,8 @@ export async function moveIntoPool(
       // on-chain at execution, not inside the proof) and the amount is a-priori, so it needs
       // nothing from the bridge — proving it during the (minutes-long) attestation wait
       // instead of after it removes the proof time from the critical path. The gasless AVNU
-      // paymaster charges only the fixed pool fee (independent of the folded receive_message
-      // — docs/open-questions.md #13), so buildDepositProofAhead quotes it from a bare
+      // paymaster charges only the fixed pool fee (independent of the folded
+      // receive_message), so buildDepositProofAhead quotes it from a bare
       // apply_action with no attestation dependency; depositToPool re-quotes the real fee and
       // reuses this proof only if it still matches (else rebuilds — fail-closed, never wrong,
       // at worst no speedup that once). Only on the FOLD path (paymaster + metamask + fresh

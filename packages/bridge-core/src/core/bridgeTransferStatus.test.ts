@@ -1,5 +1,5 @@
-// Tests for the unified bridge status reader + resume router (Phase 1 shared engine,
-// docs/bridge-sdk-refactor.md). Two concerns:
+// Tests for the unified bridge status reader + resume router (Phase 1 shared
+// engine). Two concerns:
 //   1. getBridgeTransferStatus — ONE reader over all five persisted cursors: each in
 //      isolation maps to the right (direction/phase/needsSignature/amount); multiple
 //      present → most-advanced-wins priority; none → null; corrupt/disabled localStorage
