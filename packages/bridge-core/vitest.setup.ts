@@ -17,11 +17,11 @@ import { initBridgeConfig } from './src/core/config';
 export const TEST_ENV_VARS: Readonly<Record<string, string | undefined>> = {
   NETWORK: 'testnet',
   CHAIN_ID: 'SN_SEPOLIA',
-  PRIVACY_POOL_ADDRESS: '0x1',
   PROOF_VALIDITY_BLOCKS: '20',
   OZ_ACCOUNT_CLASS_HASH: '0x5b4b537eaa2399e3aa99c4e2e0208ebd6c71bc1467938cd52c798c601e43564',
-  STRK_TOKEN_ADDRESS: '0x3',
-  ANONYMIZER_ADDRESS: '0x4',
+  // NOTE: protocol contract/token addresses (pool, in/outbound anonymizers, SN + EVM
+  // CCTP contracts, STRK + native USDC) are BAKED-ONLY in config.ts — NOT injectable —
+  // so tests read the real baked testnet defaults for them; no fixture is needed here.
   // Admin (manager) fixtures: the moved register/deposit/bridgeOut/manager-nonce
   // suites assert the MANAGER-paid proven-submit path, which requires config.admin.
   ADMIN_ADDRESS: '0x4',
@@ -33,9 +33,8 @@ export const TEST_ENV_VARS: Readonly<Record<string, string | undefined>> = {
   AVNU_PAYMASTER_URL: '',
   AVNU_FEE_MODE: '',
   AVNU_POOL_FEE_TOKEN: '',
-  // Deposit fixtures (native-USDC defaults) so the deposit module's view of config
-  // is deterministic under test.
-  DEPOSIT_TOKEN_ADDRESS: '0x6',
+  // Deposit fixtures so the deposit module's view of config is deterministic under
+  // test. (The token ADDRESS is baked-only in config.ts; symbol/decimals stay injectable.)
   DEPOSIT_TOKEN_SYMBOL: 'USDC',
   DEPOSIT_TOKEN_DECIMALS: '6',
   DEPOSIT_TOKEN_MINT_ENTRYPOINT: '',
@@ -47,9 +46,6 @@ export const TEST_ENV_VARS: Readonly<Record<string, string | undefined>> = {
   CCTP_FAST: 'false',
   POLYGON_CHAIN_ID: '80002',
   POLYGON_USDC_ADDRESS: '0x00000000000000000000000000000000000000a4',
-  CCTP_EVM_TOKEN_MESSENGER: '',
-  CCTP_TOKEN_MESSENGER: '',
-  CCTP_MESSAGE_TRANSMITTER: '',
   CCTP_ATTESTATION_API: '',
   CCTP_DEFAULT_SOURCE_CHAIN_ID: '',
   POLYGON_RPC_URL: '',
