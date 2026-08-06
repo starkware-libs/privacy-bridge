@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Tests for the Fast-aware Iris poll cadence + the merged attest→forwarded-mint
 // loop (polygonMint.ts). No network is touched: global.fetch is mocked for Circle
 // Iris and `sleep` is injected so the poll cadence is observable without real waiting.

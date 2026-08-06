@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Device-local persisted state for the bridge/privacy app. EVERYTHING the app
 // writes to localStorage is namespaced under `pmp.*` and is NON-SECRET by policy
 // (public addresses, the read-only pool viewing key, non-secret account-funding

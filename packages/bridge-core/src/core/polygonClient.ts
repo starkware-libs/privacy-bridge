@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Read-only Polygon client + ERC-20 balance helpers (Polymarket-free).
 import { createPublicClient, http, type PublicClient } from 'viem';
 import { polygon, polygonAmoy } from 'viem/chains';

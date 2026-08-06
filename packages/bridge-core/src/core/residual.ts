@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Chain-sourced "undeposited residual" detection — the durable signal that a prior
 // make-private deposit was interrupted AFTER its CCTP mint (funds minted onto the
 // derived SN account) but BEFORE moveIntoPool swept them into the pool. The

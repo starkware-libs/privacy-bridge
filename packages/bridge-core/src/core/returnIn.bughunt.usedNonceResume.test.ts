@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // BUGHUNT E1 (now built into the fold design) — returnBurnToPool's RESUME path consults
 // `is_nonce_used` on the SN MessageTransmitterV2 as an authoritative consumed-state gate
 // (mirroring depositIn.ts:finishAttestAndMint's detectAlreadyMinted). In the FOLDED

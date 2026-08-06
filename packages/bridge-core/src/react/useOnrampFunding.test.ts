@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Core fund-safety spec for the frozen on-ramp phase machine (Slice E2). These
 // assertions were ported from the DepositModal card-on-ramp white-box tests so the
 // session/token/isLive machine keeps its coverage after moving into /react. The

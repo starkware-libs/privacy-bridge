@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // EIP-6963 injected (browser-extension) wallet discovery + selection for the
 // bridge-core wallet layer. Ported from the pre-split apps/web/src/wallet/ethereum.ts
 // (removed in 48d0b66) so the MetaMask/Rabby/… EXTENSION connects directly, while

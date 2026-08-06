@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // returnToPool / returnBurnToPool must enforce the fee-free-return invariant. The
 // proven claim (claimToPool) drains ledger[commitment], which receive_and_bind credits
 // with the GROSS burned amount, so a per-call CCTP fee would leave the NET mint

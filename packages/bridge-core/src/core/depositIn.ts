@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Fund the pool deposit from the user's OWN MetaMask USDC — instead of the dev
 // treasury transferring it into the derived account (ensureDepositTokenFunded).
 //

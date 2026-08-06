@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bug-hunt B1: deriveAccountNonce / deriveClaimSecret pass their bigint args
 // straight into Poseidon with NO felt-range check (upper bound < STARK_P).
 // Poseidon silently reduces mod P inside the hash, so a non-canonical bigint

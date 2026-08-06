@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // derivePolygonEoa must reject an accountIndex outside the safe-integer range.
 // Any index ≥ 2^53 has already lost precision as an IEEE-754 double, so two
 // distinct intended indices can map to the SAME double and derive the SAME EOA

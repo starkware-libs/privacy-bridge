@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { useContext } from 'react';
 import { WalletContext } from './context';
 import type { WalletContextValue } from './types';

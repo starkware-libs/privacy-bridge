@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // AVNU paymaster client — private-pool (apply_action) flow.
 //
 // Shapes are pinned to AVNU's LIVE deployed endpoint (sepolia/mainnet

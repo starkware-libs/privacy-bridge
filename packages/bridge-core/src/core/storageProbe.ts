@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared pre-flight storage-writability probe (Bundle A2 pattern). Before an
 // irreversible on-chain burn/withdraw that persists a resume cursor, prove
 // localStorage actually accepts a write + read-back. If it can't (private-

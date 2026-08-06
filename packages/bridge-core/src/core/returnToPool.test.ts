@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Core-level fund-safety tests for returnToPool() — the composed Leg-A return
 // orchestrator for the FOLDED single-tx return: reverse-CCTP burn + attest
 // (returnBurnToPool) → ONE proven ComputeAndInvoke claim that MINTS (receive_message,

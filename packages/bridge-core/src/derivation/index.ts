@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Client-side, in-memory key derivation from an EVM wallet signature.
 // Pure functions only — no DOM/network/React. Never log or persist raw keys.
 // (Absorbed from the former packages/shared.)

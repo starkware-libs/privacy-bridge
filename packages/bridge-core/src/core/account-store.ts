@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Per-user derived-account HISTORY store (NON-SECRET), keyed by connected EVM
 // address. This is the client-side "account DB" the dashboard reads: a list of
 // the derived accounts an EVM identity has funded from the pool, each with its

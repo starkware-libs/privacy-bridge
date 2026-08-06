@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Return-funds Leg-A: the REVERSE-CCTP burn (Polygon → Starknet) that returns a
 // per-account deposit wallet's leftover USDC back into the InboundAnonymizer via
 // privacy-compute (no sub-accounts) — the pool's `ComputeAndInvoke` feature.

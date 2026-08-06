@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // useDepositCctpFeeEstimate — Slice C. Mocks fetchForwardMaxFee so these tests
 // exercise only the hook's debounce/cancel/fail-open bookkeeping, not the real
 // Iris fee lookup (covered by core/cctpFees.test.ts).

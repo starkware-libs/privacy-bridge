@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // A1 (bughunt): fundFromMetaMask's `assertAboveForwardFloor` guard is INSIDE the
 // `if (maxFee === undefined && fast)` branch (depositIn.ts:626-648), so any caller
 // passing an EXPLICIT `args.maxFee >= amountWei` bypasses the floor entirely and

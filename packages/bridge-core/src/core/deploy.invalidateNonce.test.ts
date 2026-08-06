@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // transferStrkFromAdmin does a direct out-of-band adminAccount.execute(transferCall)
 // (the admin == the manager account), so — like deposit.ts:ensureDepositTokenFunded —
 // it must call invalidateManagerNonce() afterwards. Otherwise proven-submit's shared

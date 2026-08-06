@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // PART B — moveIntoPool single-tx deposit fold control flow.
 //
 // The fold applies by default whenever the fold precondition holds (AVNU paymaster

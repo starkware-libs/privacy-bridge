@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Adversarial CCTP attestation/forwarded-mint tests (BUY steps 3-4) — exercises
 // the REAL exported code paths in polygonMint.ts against a MOCKED Iris endpoint.
 // No network is touched. Complements polygonMint.test.ts (which pins the happy-

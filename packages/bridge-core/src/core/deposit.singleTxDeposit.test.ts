@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // PART B — single-tx deposit fold shape (deposit.ts, paymaster path).
 //
 // When depositToPool is given `foldMint`, the AVNU invoke `calls` array it hands to

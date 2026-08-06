@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bootstrap bridge-core config from the standalone bridge app's Vite env (Slice X —
 // config injection). bridge-core reads NO import.meta.env of its own; the app owns
 // its env and hands it in. `bridgeEnvFromRecord` copies the DEV/PROD flags and every

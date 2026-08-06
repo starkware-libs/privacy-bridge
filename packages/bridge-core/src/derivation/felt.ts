@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared STARK-felt Poseidon helpers for this package's H-scheme derivations
 // (claim-commitment.ts, inbound-commitment.ts). Centralized so the STARK prime
 // and the canonical-range check can't drift between call sites (issues #41/#42).

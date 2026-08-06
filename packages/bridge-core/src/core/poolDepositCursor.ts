@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Cross-run resume cursor for the pool-DEPOSIT leg of moveIntoPool (the deploy-fee-OFF
 // funding path — frozen Row 1 / metamask).
 //

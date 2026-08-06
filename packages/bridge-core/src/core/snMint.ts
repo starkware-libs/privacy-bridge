@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared Starknet CCTP mint primitives for the DEPOSIT-IN leg, plus the RETURN leg's
 // client-side pre-flight message gates.
 //

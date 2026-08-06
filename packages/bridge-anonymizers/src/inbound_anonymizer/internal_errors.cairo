@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! Internal invariants for the inbound anonymizer — these should never trigger
 //! for a well-formed, Circle-attested message; they guard `try_into` unwraps.
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // DEV/TEST-ONLY synthetic EIP-1193 provider for automated E2E of the
 // WalletConnect-only wallet layer — NO real WC relay / QR / phone.
 //

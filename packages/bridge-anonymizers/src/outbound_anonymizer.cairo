@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! Outbound anonymizer: the pool withdraws USDC to this contract, which burns it
 //! through Circle CCTP toward a destination-chain recipient (the BUY leg). Only
 //! the baked pool may drive it, and nothing is returned to the pool.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { EthereumProvider } from './signMessage';
 import type { EIP6963ProviderInfo } from './injectedProvider';
 

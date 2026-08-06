@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bug-hunt B2: `env.vars.NETWORK === 'mainnet'` at config.ts:117 and :768 is a
 // case-sensitive strict-equal. Any user setting `NETWORK=Mainnet`,
 // `NETWORK=MAINNET`, `NETWORK=' mainnet'`, or a typo `NETWORK=main` silently

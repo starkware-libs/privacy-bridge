@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 StarkWare Industries Ltd.
+
 # Shared Bugbot-gate thread check, invoked from bugbot-gate.yml for both the
 # pull_request path and each PR derived from a merge_group's head_ref.
 #

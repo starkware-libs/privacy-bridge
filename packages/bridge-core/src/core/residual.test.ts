@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Tests for the chain-sourced undeposited-residual reader (#433). readUndepositedResidual
 // is a thin delegate to readDepositTokenBalance (the SN account's on-chain deposit-token
 // balance); the dust threshold's strict-`>` semantics are the shared contract both the

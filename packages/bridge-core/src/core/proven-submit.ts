@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { Account, AllowArray, Call, RpcProvider } from 'starknet';
 import { stark } from 'starknet';
 import { config } from './config';

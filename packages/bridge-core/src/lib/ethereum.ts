@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Minimal EVM wallet provider types + helpers used by bridge-core modules.
 // The WalletConnect-only React wallet layer lives in bridge-core/react.
 //

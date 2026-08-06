@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! Revert reasons for the outbound anonymizer.
 
 /// `privacy_invoke` caller is not the baked pool address.

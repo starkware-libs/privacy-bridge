@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Move Into Pool flow: EVM wallet → CCTP burn → Starknet privacy pool.
  * Calls the moveIntoPool orchestrator (bridge-core) via the WC provider — it

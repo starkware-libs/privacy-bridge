@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Live private (in-pool) balance readout, shown at the top of the dashboard.
  *

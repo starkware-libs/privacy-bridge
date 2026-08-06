@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Behavioural tests for the shared manager-paid Starknet CCTP mint primitive
 // (submitStarknetMint). This is the receive_message leg extracted from
 // depositIn.ts so both the deposit-in (mint to derived SN account) and the

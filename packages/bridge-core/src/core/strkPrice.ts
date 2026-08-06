@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Live STRK→USD spot price for the deposit fee estimate.
 //
 // The pool protocol fee is denominated in STRK (read live via `fetchPoolFeeStrk()`,

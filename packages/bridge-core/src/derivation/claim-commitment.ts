@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Per-account claim commitment (the H scheme), IDENTICAL to the Cairo Anonymizer.
 // Frozen interface + test vector.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { getRpcProvider } from './provider';
 import { config } from './config';
 import { READ_BLOCK } from './tx';

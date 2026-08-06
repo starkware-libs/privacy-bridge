@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // C3 BUG PROBE for deposit.ts:264
 //
 // When build({ autoRegister: true }) bundles register+deposit and the tx reverts

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Inbound-bind commitment (CCTP → pool RETURN leg), IDENTICAL to what the pool's
 // `ComputeAndInvoke` recomputes on-chain and to the Cairo `InboundAnonymizer`.
 //

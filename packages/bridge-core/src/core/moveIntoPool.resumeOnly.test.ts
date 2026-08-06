@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Resume-only continue: `resume: true` derives `resumeOnly` for BOTH fundDepositToken
 // call sites (deploy step + deposit step), skips the eth_requestAccounts prompt, and
 // converges a standalone burn whose CCTP nonce is already consumed instead of stranding

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! Shared types + interfaces used by both anonymizer contracts.
 
 use starknet::ContractAddress;

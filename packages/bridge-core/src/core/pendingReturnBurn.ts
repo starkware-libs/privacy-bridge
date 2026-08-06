@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Pending return-burn record — the SUBMITTED-but-unconfirmed half of the return leg.
 //
 // WHY THIS EXISTS. The return burn is a gasless relayer batch (returnIn.ts's injected

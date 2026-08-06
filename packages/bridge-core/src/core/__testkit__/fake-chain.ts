@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Offline fake-chain harness for cross-module INTEGRATION tests.
 //
 // Unlike the per-module unit tests (which mock the step modules wholesale), this

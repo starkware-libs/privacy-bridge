@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bundle A1 — CCTP-v2 attested-message DECODER + mint-validation gate.
 //
 // We must NOT trust Iris's `message` / `forwardTxHash` unverified: Iris is a

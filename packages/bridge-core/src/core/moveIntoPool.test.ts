@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Core orchestration tests for moveIntoPool (Slice E — the frozen
 // fund-then-deploy state-transition table + the test-migration gate).
 //

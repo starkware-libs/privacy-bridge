@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Branch tests for the proven-submit AVNU paymaster path
 // (submitProvenViaPaymaster / submitProvenCall routing). The AVNU client is mocked
 // so no network is touched; we assert the buildTransaction→(sign)→executeTransaction

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Debounced CCTP forward-fee estimate for the cash-out / withdraw leg (Starknet →
 // EVM destination) — the sibling of useDepositCctpFeeEstimate. Display-only: the UI
 // folds these into its net-of-fees breakdown so the user sees what actually lands

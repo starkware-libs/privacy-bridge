@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { Account, BlockIdentifier, constants } from 'starknet';
 import { formatUnits } from 'viem';
 import {
