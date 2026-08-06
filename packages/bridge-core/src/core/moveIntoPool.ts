@@ -606,8 +606,8 @@ export async function moveIntoPool(
       // on-chain at execution, not inside the proof) and the amount is a-priori, so it needs
       // nothing from the bridge — proving it during the (minutes-long) attestation wait
       // instead of after it removes the proof time from the critical path. The gasless AVNU
-      // paymaster charges only the fixed pool fee (independent of the folded receive_message
-      // ), so buildDepositProofAhead quotes it from a bare
+      // paymaster charges only the fixed pool fee (independent of the folded
+      // receive_message), so buildDepositProofAhead quotes it from a bare
       // apply_action with no attestation dependency; depositToPool re-quotes the real fee and
       // reuses this proof only if it still matches (else rebuilds — fail-closed, never wrong,
       // at worst no speedup that once). Only on the FOLD path (paymaster + metamask + fresh

@@ -5,8 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 //   then ONE InvokeExternal -> OutboundAnonymizer.privacy_invoke(BuyParams{
 //   mint_recipient, amount, max_fee, min_finality_threshold, destination_domain}).
 //
-// Expectations are derived from the interface (
-// §1, §2, §4), NOT from the implementation:
+// Expectations are derived from the interface, NOT from the implementation:
 //   - withdraw recipient = the Anonymizer, amount = the fixed denomination D;
 //   - the single InvokeExternal targets the Anonymizer and its calldata encodes
 //       privacy_invoke(params: BuyParams), which serialises FLAT as

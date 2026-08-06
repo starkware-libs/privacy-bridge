@@ -347,8 +347,8 @@ function isValidInflightBurnRecord(value: unknown): boolean {
   );
 }
 
-// Per-account index counter (NON-SECRET), keyed by EVM address (bridge-sdk-
-// Slice D). The index is a plain integer; knowing it computes
+// Per-account index counter (NON-SECRET), keyed by EVM address (Slice D). The
+// index is a plain integer; knowing it computes
 // nothing without the viewing key, so it is NOT a key and the no-persist-keys
 // rule holds. The viewing key folds it into account_nonce/the per-account EOA,
 // so every account is unlinkable and recomputable from the signature + this
