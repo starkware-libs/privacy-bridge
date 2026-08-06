@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared pool STRK protocol-fee helpers: the single place that READS the pool's fee
 // (`get_fee_amount`) and the manager-paid fee-approve that settles it. Used by
 // bridgeOut.ts (withdraw+burn / cash-out), bridgeBack.ts (claim), register.ts, and

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   clearSelectedProvider,

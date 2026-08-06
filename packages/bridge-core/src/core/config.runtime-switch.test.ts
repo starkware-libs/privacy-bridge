@@ -1,4 +1,7 @@
-// Runtime testnet↔mainnet network switch (docs/network-switch-plan.md).
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
+// Runtime testnet↔mainnet network switch.
 // The config is a pure `configFor(n, env)` factory selected by a runtime holder
 // (getActiveConfig / setActiveNetwork); `config` and `EVM_CCTP_SOURCES` are live
 // Proxies so existing `config.X` call sites observe a swap with no rename.

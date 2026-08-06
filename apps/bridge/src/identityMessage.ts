@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // The signature message this app asks the wallet to sign — the sole secret input
 // to identity derivation. App-owned (the SDK carries no app branding): the string
 // IS the identity domain, so changing a byte (text or "Version") re-derives every

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Core-level fund-safety tests for cashOut() — the composed Leg-B cash-out
 // orchestrator (withdraw + CCTP burn toward a user address → attest → Forwarding-
 // Service mint) that owns the pmp.inflightCashOut resume cursor. These are the

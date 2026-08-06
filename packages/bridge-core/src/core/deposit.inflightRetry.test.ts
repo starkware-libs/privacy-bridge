@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // proveAndSubmitDeposit's manager branch must not re-submit an already-landed deposit
 // on a tracking timeout. The submit tx hash is captured inside the submit callback, so
 // when submitAndTrack times out waiting for PRE_CONFIRMED after the apply_actions has

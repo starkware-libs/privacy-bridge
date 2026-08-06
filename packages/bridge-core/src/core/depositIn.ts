@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Fund the pool deposit from the user's OWN MetaMask USDC — instead of the dev
 // treasury transferring it into the derived account (ensureDepositTokenFunded).
 //
@@ -156,7 +159,7 @@ const ERC20_ABI = [
 ] as const satisfies Abi;
 
 // CCTP V2 depositForBurn (circlefin EVM TokenMessengerV2). Param order matches
-// docs/bridge-plan.md §3 / the Starknet deposit_for_burn used by the Anonymizer.
+// Mirrors the Starknet deposit_for_burn used by the Anonymizer.
 const TOKEN_MESSENGER_ABI = [
   {
     type: 'function',
@@ -1037,7 +1040,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         // attested message BEFORE building receive_message (snMint.ts). The fold path
         // SKIPS submitStarknetMint — the mint rides inside the caller's deposit tx — so
         // run the SAME gate HERE before handing the bytes over; otherwise a tampered /
-        // MITM'd Iris attestation (Iris is a TRUSTED oblivious service, threat-model.md)
+        // MITM'd Iris attestation (Iris is a TRUSTED oblivious service, docs/threat-model.md)
         // would be folded in UNCHECKED (redirected mint recipient / wrong destination
         // domain). Same params + same TERMINAL "recipient/domain mismatch" throw
         // (classified non-transient, cleared as terminal, never resume-looped) as the

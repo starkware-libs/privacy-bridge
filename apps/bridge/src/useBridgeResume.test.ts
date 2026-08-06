@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Resume/recovery behavior for the bridge panels.
 //
 // Model (post into-pool click-to-continue change):

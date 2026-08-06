@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bug-hunt B1: deriveAccountNonce / deriveClaimSecret pass their bigint args
 // straight into Poseidon with NO felt-range check (upper bound < STARK_P).
 // Poseidon silently reduces mod P inside the hash, so a non-canonical bigint
@@ -6,7 +9,7 @@
 //
 // #41 (bridge-hunt) added the equivalent guard to `computeClaimH` — the
 // same defensive pattern must also apply to the recovery-recipe helpers
-// (bridge-plan.md §4), otherwise a bug or fuzz input upstream can silently
+// otherwise a bug or fuzz input upstream can silently
 // map two distinct intended VKs / nonces to the same secret.
 //
 // RED on current main (no upper-bound guard); would go GREEN after adding

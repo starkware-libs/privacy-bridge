@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, it, expect, beforeEach } from 'vitest';
 import { gapLimitScan, scanDerivedAccounts, type ScannedAccount } from './accountScan';
 import { readDerivedAccounts, upsertDerivedAccount, peekNextAccountIndex } from './account-store';

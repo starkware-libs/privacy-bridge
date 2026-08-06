@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Regression tests for the STRANDED RETURN BURN: a gasless relayer batch the relayer
 // ACCEPTED but whose outcome the client never observed.
 //

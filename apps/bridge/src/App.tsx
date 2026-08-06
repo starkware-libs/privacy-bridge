@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { useEffect } from 'react';
 import { useWallet, shortenAddress } from '@starkware-libs/starknet-privacy-bridge/react';
 import { NavBar } from './components/NavBar';

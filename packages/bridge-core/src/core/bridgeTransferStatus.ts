@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Unified, direction-agnostic status + resume surface for BOTH bridge directions
-// (docs/bridge-sdk-refactor.md — Phase 1 shared engine). ONE reader across all five
+// (Phase 1 shared engine). ONE reader across all five
 // persisted in-flight cursors that tells the app whether an interrupted transfer is
 // waiting for this identity, and ONE thin router that drives the EXISTING
 // resume-capable orchestrator for that phase to completion. Phase 2 (the apps) wires

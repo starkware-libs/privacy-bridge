@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Offline unit tests for the AVNU paymaster JSON-RPC client (avnuPaymaster.ts),
 // pinned to AVNU's LIVE deployed schema (reverse-verified against the
 // sepolia/mainnet endpoint's JSON-RPC validator, 2026-06-24). No network: fetch is

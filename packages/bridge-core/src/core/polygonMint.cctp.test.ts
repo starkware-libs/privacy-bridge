@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Adversarial CCTP attestation/forwarded-mint tests (BUY steps 3-4) — exercises
 // the REAL exported code paths in polygonMint.ts against a MOCKED Iris endpoint.
 // No network is touched. Complements polygonMint.test.ts (which pins the happy-
@@ -7,7 +10,7 @@
 // The fund-account leg no longer submits receiveMessage itself — Circle's Forwarding
 // Service does — so there is no viem write to mock; both pollers are pure fetch.
 //
-// Frozen shape: docs/bridge-interface.md §4. The cross-chain leg itself can only
+// Frozen shape. The cross-chain leg itself can only
 // be verified live (.claude/rules/verification.md) — these pin client behavior.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

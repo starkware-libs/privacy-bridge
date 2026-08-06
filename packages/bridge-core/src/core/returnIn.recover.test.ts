@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Tests for recoverBridgeIn — FOLD-ONLY, CURSOR-DRIVEN recovery of a return that BURNED
 // but whose folded claim never landed. Recovery matches THIS identity's persisted burn
 // cursor by commitment, re-fetches the attestation, checks the CCTP nonce, and either

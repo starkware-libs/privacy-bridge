@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Pins the CCTP `ByteArray` calldata encoder (Starknet receive_message). Pure math,
 // no chain — see cctpBytes.ts for the core::byte_array::ByteArray layout this targets
 // (matched to the on-chain receive_message ABI) and the live-verification boundary

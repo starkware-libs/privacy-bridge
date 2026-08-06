@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // MUST be first: injects the app's env into bridge-core (Slice X) before any module
 // reads bridge-core `config`.
 import './initBridge';

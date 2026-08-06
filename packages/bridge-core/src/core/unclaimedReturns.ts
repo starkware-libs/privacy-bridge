@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Unclaimed returns — detection of return legs whose final FOLDED claim never ran.
 // The return burn commits the USDC to CCTP and persists a burn cursor
 // (pmp.inflightReturn); the folded pool claim (bridgeBack.ts) then mints + claims it in

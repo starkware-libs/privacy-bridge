@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 StarkWare Industries Ltd.
+
 # Declare + deploy the InboundAnonymizer to Starknet SEPOLIA (testnet).
 # Shared declare/deploy logic lives in deploy-common.sh.
 #

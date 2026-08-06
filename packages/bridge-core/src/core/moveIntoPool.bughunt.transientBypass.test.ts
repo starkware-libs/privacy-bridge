@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // BUGHUNT E2 — moveIntoPool.runStep's TRANSIENT-retry BYPASSES depositToPool's
 // paymaster ambiguity fail-closed guard.
 //

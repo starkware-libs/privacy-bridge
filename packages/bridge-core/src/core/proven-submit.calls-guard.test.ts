@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // #77 — SECURITY regression: paymasterExecuteLeg must refuse to sign a paymaster
 // typed_data whose embedded calls diverge from the caller's actual userCalls.
 //

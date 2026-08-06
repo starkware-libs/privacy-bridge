@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Regression (Slice E2, BUG-1/#193): a wallet network switch mid-flight invalidates
 // the session (the modal responds by calling cancel()), so no stale-chain probe or
 // stale-derive result is applied. Proven at the hook via the token/isLive invariant:

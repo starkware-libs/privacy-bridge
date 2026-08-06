@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // BUGHUNT A — accountScan.scanAccountEoas is a BALANCE-ONLY detector.
 //
 // Claim: On a fresh browser (no local pmp.bidIndex / pmp.bids), the cross-chain

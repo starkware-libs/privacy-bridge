@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // #103 regression: ensureDepositTokenFunded's direct adminAccount.execute is invisible
 // to proven-submit.ts's shared, locally-authoritative manager nonce counter — it never
 // goes through managerExecute. If the admin account shares the manager's on-chain

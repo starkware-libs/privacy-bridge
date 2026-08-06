@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Test setup: inject bridge-core config (Slice X).
 //
 // bridge-core no longer reads import.meta.env — it resolves everything from the env

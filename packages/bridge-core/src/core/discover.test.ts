@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The indexer's `/v1/sync/incoming_state` JSON parse lives inside the SDK's

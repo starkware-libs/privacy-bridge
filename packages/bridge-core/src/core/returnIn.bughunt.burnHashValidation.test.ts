@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // BUGHUNT — returnBurnToPool trusts the injected submitGaslessBatch(calls) return
 // value VERBATIM as an on-chain tx hash and persists it into the resume cursor
 // without any format validation. If the relayer returns "" (empty), a non-0x-hex

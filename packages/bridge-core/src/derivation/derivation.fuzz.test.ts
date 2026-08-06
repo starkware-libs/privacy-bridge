@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, expect, it } from 'vitest';
 import { ec, hash } from 'starknet';
 import { secp256k1 } from '@noble/curves/secp256k1';
@@ -202,7 +205,7 @@ describe(`derivation fuzz (N=${N}, seed=0x${FUZZ_SEED.toString(16)})`, () => {
 
   // ── deriveAccountNonce + deriveClaimSecret + computeClaimH ─────────────────────
   describe('deriveAccountNonce + deriveClaimSecret + computeClaimH', () => {
-    // Anchor: the frozen §3 test vector (bridge-interface.md §3 / the Cairo==TS
+    // Anchor: the frozen test vector (the Cairo==TS
     // oracle) must still hold. Pinned here so a fuzz refactor can't drift the
     // canonical numbers.
     const FROZEN_VK = 123456789n;

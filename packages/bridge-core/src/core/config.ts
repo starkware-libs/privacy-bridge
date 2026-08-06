@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bridge config — INJECTED, framework-agnostic (no build-tool env coupling).
 // This is the bridge-core portion of the config — network, Starknet RPC/prover/indexer,
 // pool, anonymizer, CCTP, Polygon, AVNU, admin. Trading-specific config (CLOB,
@@ -105,7 +108,6 @@ function resolveAdmin(e: BridgeEnv): AdminConfig | undefined {
 // Selecting the EVM source registry by network (not merging both) is deliberate:
 // it stops a TESTNET config from burning REAL USDC if MetaMask happens to be on a
 // mainnet chain (the mint would target the testnet transmitter and strand funds).
-// See docs/mainnet-cutover-plan.md.
 export type Network = 'testnet' | 'mainnet';
 
 // Normalize the `NETWORK` env var — trim + lowercase, then accept the two documented
@@ -184,7 +186,7 @@ function requirePerNetworkEnv(
 //     paymaster (`buildTransaction`/`executeTransaction`, PR avnu-labs/paymaster#67),
 //     which carries the pool's STARK proof + proof_facts and submits from AVNU's
 //     relayer — an unlinkable third party, removing the shared-manager↔account
-//     linkage (the Starknet-side P0 in threat-model.md). See avnuPaymaster.ts +
+//     linkage (the Starknet-side P0 in docs/threat-model.md). See avnuPaymaster.ts +
 //     proven-submit.ts. The pool must be whitelisted with AVNU.
 //
 // BUNDLE-EXPOSURE NOTICE: like the Polymarket builder creds below (and UNLIKE
@@ -203,7 +205,7 @@ type PaymasterConfig = {
   //   'sponsored_private' (default) — AVNU pays gas; the USER pays the pool fee from
   //     their private balance in `poolFeeToken` (→ USDC), baked into the SDK proof as a
   //     Withdraw to the forwarder. The only mode a USDC-only account can use; deposit /
-  //     bridgeOut / bridgeBack all bake this fee. See open-questions.md #13.
+  //     bridgeOut / bridgeBack all bake this fee.
   //   'sponsored' — AVNU's relayer is the caller and sponsors GAS, but does NOT waive
   //     the pool fee: it only fixes the fee token to STRK, so `fee_action` still comes
   //     back non-zero (validated live: a ~1-STRK withdraw). Unusable for a USDC-only
@@ -228,7 +230,7 @@ function resolvePaymaster(e: BridgeEnv): PaymasterConfig | undefined {
   // user in `poolFeeToken` (→ USDC, the deposit token) as a withdraw baked into the
   // proof, so the deposit itself funds the fee — no separate STRK balance needed.
   // (`sponsored` would force the fee token to STRK, which a USDC-only account can't
-  // pay; see open-questions.md #13 / AVNU private-transactions.md.)
+  // pay.)
   const feeMode = (e.vars.AVNU_FEE_MODE || 'sponsored_private') as
     | 'sponsored_private'
     | 'sponsored';
@@ -239,8 +241,8 @@ function resolvePaymaster(e: BridgeEnv): PaymasterConfig | undefined {
 // An EVM chain the user can fund the pool deposit FROM, via CCTP burn-and-mint
 // (MetaMask burns USDC here → it mints to the derived Starknet account). One row
 // per Circle-supported source chain; adding a chain is data-only. EVM CCTP V2
-// shares one TokenMessenger address across standard chains (docs/bridge-plan.md
-// §3), so only the domain + USDC + RPC differ per row.
+// shares one TokenMessenger address across standard chains, so only the
+// domain + USDC + RPC differ per row.
 export interface EvmCctpSource {
   // EIP-155 chain id (the key the runtime looks up from MetaMask's eth_chainId).
   chainId: number;
@@ -404,7 +406,7 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   const IS_MAINNET = n === 'mainnet';
 
   // EVM CCTP V2 TokenMessengerV2 — one shared address across standard EVM chains,
-  // but a DIFFERENT one per network (docs/bridge-plan.md §3). Overridable for a
+  // but a DIFFERENT one per network. Overridable for a
   // private fork via the `CCTP_EVM_TOKEN_MESSENGER` env var. `||` (not `??`) so a
   // blank env line (empty string) falls through to the network default.
   const EVM_CCTP_TOKEN_MESSENGER =
@@ -416,8 +418,8 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   // The "fund from MetaMask" source-chain registry. Keyed by EIP-155 chain id so
   // the deposit-in leg picks whatever chain MetaMask is currently on. Add a row to
   // support another chain (data-only). USDC addresses are CONFIRM-against-Circle
-  // (Circle's CCTP page omits some testnet USDC tokens — docs/open-questions.md #1;
-  // mainnet addresses sourced from Circle's USDC list — docs/mainnet-cutover-plan.md §2).
+  // (Circle's CCTP page omits some testnet USDC tokens; mainnet addresses are
+  // sourced from Circle's USDC list).
   const EVM_CCTP_SOURCES_TESTNET: Record<number, EvmCctpSource> = {
     // Polygon Amoy.
     80002: {
@@ -495,7 +497,7 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
 
   // Mainnet source chains (active only when network=mainnet). No faucetUrl —
   // mainnet has no faucet, so the "insufficient gas" pre-check just omits the link.
-  // USDC + domains: docs/mainnet-cutover-plan.md §2 (CONFIRM against Circle).
+  // USDC + domains (CONFIRM against Circle).
   const EVM_CCTP_SOURCES_MAINNET: Record<number, EvmCctpSource> = {
     // Polygon PoS.
     137: {
@@ -565,7 +567,7 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   const evmCctpSources = IS_MAINNET ? EVM_CCTP_SOURCES_MAINNET : EVM_CCTP_SOURCES_TESTNET;
 
   // Bridge-OUT DESTINATION registry (pool → EVM). The CCTP contracts + USDC are the
-  // SAME regardless of direction (docs/bridge-plan.md §3), so derive the dest rows
+  // SAME regardless of direction, so derive the dest rows
   // from the SAME network's source rows — this reuses the audited USDC addresses and
   // guarantees the two registries stay in lock-step (same chainIds, same network).
   const evmCctpDestinationsFor = (
@@ -609,7 +611,7 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   const STRK_PRICE_USD = e.vars.STRK_PRICE_USD ?? '0.05';
   // How the derived account's one-time DEPLOY fee is paid (see docs). Defaults to
   // 'sponsored' (AVNU pays; a pure deploymentData deployment authorized by the
-  // deploy signature — the documented mandatory deploy path, open-questions.md #13).
+  // deploy signature — the documented mandatory deploy path).
   // 'default' (account pays its own deploy fee in USDC via AVNU pay-in-token) is
   // NOT usable: the pay-in-token fee is charged via a SNIP-9 `execute_from_outside`
   // transfer FROM the account, but the account is not yet deployed at deploy time,
@@ -641,7 +643,7 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       e.vars.CHAIN_ID ||
       (IS_MAINNET ? '0x534e5f4d41494e' : '0x534e5f5345504f4c4941'),
     // starknet-privacy pool — public on-chain addresses, baked per-network
-    // (docs/mainnet-cutover-plan.md §0/§1). Override via `PRIVACY_POOL_ADDRESS` for a fork.
+    // Override via `PRIVACY_POOL_ADDRESS` for a fork.
     poolAddress:
       e.vars.PRIVACY_POOL_ADDRESS ||
       (IS_MAINNET
@@ -842,7 +844,7 @@ function requireActiveConfig(): Config {
 
 // The CURRENTLY ACTIVE, fully-resolved config. Read this (or `config` below) at
 // call time — do NOT capture it in a module-level `const`, or it will read stale
-// after a swap. See docs/architecture.md (Key decisions: live config).
+// after a swap (live config).
 export function getActiveConfig(): Config {
   return requireActiveConfig();
 }

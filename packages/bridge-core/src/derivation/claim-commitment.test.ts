@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, expect, it } from 'vitest';
 import { hash } from 'starknet';
 import {
@@ -11,19 +14,19 @@ import {
 } from './claim-commitment.js';
 
 // The Cairo == TS oracle. These exact numbers are pinned in
-// docs/bridge-interface.md §3 and MUST also be asserted by the snforge tester
+// the frozen vector and MUST also be asserted by the snforge tester
 // against the same fixed inputs, guaranteeing the Cairo Anonymizer and this
 // package compute byte-identical claim_secret / note_binding / H values.
 
 const poseidon = (xs: bigint[]) => BigInt(hash.computePoseidonHashOnElements(xs));
 
-// Fixed test-vector inputs (pure fixtures — no real keys). bridge-interface.md §3.
+// Fixed test-vector inputs (pure fixtures — no real keys).
 const VIEWING_KEY = 123456789n;
 const ACCOUNT_NONCE = 42n;
 const AMOUNT = 1_000_000n; // 1 USDC @ 6dp
 const SN_DOMAIN = 25n;
 
-// Expected outputs (bridge-interface.md §3). Same fixed numbers the Cairo
+// Expected outputs. Same fixed numbers the Cairo
 // tester asserts → TS == Cairo. note_binding is bound to claim_secret (not a
 // separate channel_key) so the on-chain claim — which carries only claim_secret
 // — recomputes the SAME H bridgeOut records.
@@ -35,7 +38,7 @@ const EXPECTED_H =
   1184640639497699140437908751684073211882192473677451888065106092277727692916n;
 
 describe('claim-commitment H scheme (frozen)', () => {
-  it('pins the domain-separation felt tags (bridge-interface.md §2)', () => {
+  it('pins the domain-separation felt tags', () => {
     expect(CLAIM_TAG).toBe(20827682326329802832626734641n);
     expect(BIND_TAG).toBe(80135280620601915687458353n);
     expect(H_TAG).toBe(5214979532862936625n);
@@ -61,7 +64,7 @@ describe('claim-commitment H scheme (frozen)', () => {
     });
 
     it('matches the raw frozen Poseidon recipe end-to-end (input order is exact)', () => {
-      // Independently recompute via the literal bridge-interface.md §2 spans so a
+      // Independently recompute via the literal frozen spans so a
       // refactor of claim-commitment.ts that reorders/relabels a span is caught.
       const claimSecret = poseidon([CLAIM_TAG, VIEWING_KEY, ACCOUNT_NONCE]);
       const noteBinding = poseidon([BIND_TAG, claimSecret]);
@@ -124,7 +127,7 @@ describe('claim-commitment H scheme (frozen)', () => {
     });
   });
 
-  describe('deriveAccountNonce (recovery recipe — bridge-plan.md §4)', () => {
+  describe('deriveAccountNonce (recovery recipe)', () => {
     it('is poseidon([ACCOUNT_NONCE_TAG, viewing_key, trade_counter])', () => {
       expect(deriveAccountNonce(VIEWING_KEY, 0)).toBe(poseidon([ACCOUNT_NONCE_TAG, VIEWING_KEY, 0n]));
       expect(deriveAccountNonce(VIEWING_KEY, 7)).toBe(poseidon([ACCOUNT_NONCE_TAG, VIEWING_KEY, 7n]));

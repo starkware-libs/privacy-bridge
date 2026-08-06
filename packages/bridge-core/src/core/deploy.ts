@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { PaymasterRpc, RpcError } from 'starknet';
 import type { PaymasterDetails } from 'starknet';
 import { getRpcProvider, makeAccount } from './provider';

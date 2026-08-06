@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { derivePolygonEoa } from '../derivation/index';
 import { getPolygonPublicClient, readUsdcBalance, POLYGON_USDC_DECIMALS } from './polygonClient';
 import {

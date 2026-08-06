@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bug-hunter supervisor test file
 // RED = fails on current code → PROVEN bug
 // GREEN = passes on current code → documents behavior (not a bug)

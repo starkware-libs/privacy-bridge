@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // FUND-SAFETY (Bugbot MEDIUM — "WC config stale after switch"): the WC provider is
 // a module-level lazy singleton whose rpcMap is baked from config.polygon at init.
 // A runtime network switch flips the live config, but the already-built provider

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Unit test for the on-ramp settlement poll (waitForDepositTokenBalance). It must
 // resolve once the derived account's deposit-token balance reaches baseline+target
 // (card payment settled), swallow a transient RPC error and keep polling, and reject

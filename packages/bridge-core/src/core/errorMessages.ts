@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Error-message humanization (Bundle B4). The orchestrators surface raw
 // SDK/RPC/CCTP error text to the user; those messages are terse and full of
 // on-chain jargon (NON_ZERO_VALUE, REVERTED, ERC20 transfer failures). Map the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { Account, Call, constants } from 'starknet';
 import {
   createPrivateTransfers,
@@ -383,9 +386,9 @@ async function proveDepositAt(
 // it can run during the minutes-long attestation wait rather than after it.
 //
 // The pool fee is quoted from a BARE `apply_action` (NOT invoke_and_apply_action): the
-// gasless AVNU paymaster charges only the fixed pool fee (docs/open-questions.md #13 —
-// `sponsored_private` sponsors gas, the fee is a server-fixed pool_fee_amount oracle-
-// converted to the pool_fee_token), which does NOT depend on the folded `receive_message`.
+// gasless AVNU paymaster charges only the fixed pool fee (`sponsored_private`
+// sponsors gas, the fee is a server-fixed pool_fee_amount oracle-converted to the
+// pool_fee_token), which does NOT depend on the folded `receive_message`.
 // So no attestation is needed to learn the fee. The submit (depositToPool) re-quotes the
 // REAL invoke_and_apply_action fee and only reuses this proof when they match — a drift
 // (e.g. an oracle price move between quotes) discards it and rebuilds. Paymaster path only.
@@ -597,7 +600,7 @@ async function proveAndSubmitDeposit(
     // FIRST to learn the fee, inject the withdraw into the SAME USDC `.with()` block as
     // the deposit (so the deposit funds the fee — no separate STRK), prove, then execute.
     // autoRegister folds a fresh account's register() into this one apply_actions, so
-    // register + deposit + fee ride a single AVNU-submitted tx (open-questions.md #13).
+    // register + deposit + fee ride a single AVNU-submitted tx.
     let paymasterCtx: PaymasterBuildCtx | undefined;
     let feeWithdraw: { recipient: string; amount: bigint } | undefined;
     if (config.paymaster) {

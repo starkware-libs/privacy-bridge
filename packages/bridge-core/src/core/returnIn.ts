@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Return-funds Leg-A: the REVERSE-CCTP burn (Polygon → Starknet) that returns a
 // per-account deposit wallet's leftover USDC back into the InboundAnonymizer via
 // privacy-compute (no sub-accounts) — the pool's `ComputeAndInvoke` feature.
@@ -113,8 +116,8 @@ const ERC20_ABI = [
 // PLUS a trailing opaque `hookData` field. The return burn uses the HOOK variant (not
 // plain depositForBurn) so the bound commitment rides along in `hookData`, read by
 // `InboundAnonymizer::receive_and_bind` on the Starknet side (32-byte big-endian —
-// encodeCommitmentHookData). Param order otherwise matches docs/bridge-plan.md §3 /
-// the depositForBurn used by depositIn.ts.
+// encodeCommitmentHookData). Param order otherwise matches the depositForBurn
+// used by depositIn.ts.
 const TOKEN_MESSENGER_HOOK_ABI = [
   {
     type: 'function',
@@ -223,8 +226,8 @@ function readInflightReturnMap(): InflightReturnMap {
 }
 
 // Migrate-on-read: a cursor persisted before the Slice R rename used the legacy
-// pre-Slice-R index field name instead of `accountIndex` (bridge-sdk-refactor.md
-// §1.1; see the property read below). Accept it here so an in-flight return
+// pre-Slice-R index field name instead of `accountIndex` (see the property
+// read below). Accept it here so an in-flight return
 // crossing the rename isn't dropped as corrupt (which would strand an
 // already-committed CCTP burn).
 function migrateAccountIndexKey(value: unknown): unknown {
@@ -1017,7 +1020,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
 // ---------------------------------------------------------------------------
 // returnToPool — compose returnBurnToPool + the folded claim behind ONE return
 // orchestrator that owns the inflight-return cursor TRUST + ALL the sequencing
-// (Slice G, docs/bridge-sdk-refactor.md §1/§2, Decision 7). Since the mint is folded
+// (Slice G, Decision 7). Since the mint is folded
 // INTO the claim, the sequence is just: burn → attest (returnBurnToPool) → prove+submit
 // the folded claim (buildAndProveClaim + submitProvenClaim). There is no separate mint,
 // no credit-settle gate, and (because the proof commits the CCTP message) no

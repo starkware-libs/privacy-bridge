@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Backward-compat + separation guarantees for the account-CHANNEL derivation.
 //
 // The channel param on derivePolygonEoa / deriveAccountNonce MUST reproduce the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Unit tests for the shared full-node-lag retry (submitReusingProofOnNodeLag), the single
 // primitive every proven-submit leg (claim, deposit, withdraw+burn, register) delegates to.
 // Covers: retry-the-same-submit-then-resolve, bounded exhaustion, non-node-lag passthrough,

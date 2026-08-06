@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Return funds: the inverse of the return-CCTP burn (returnIn.ts). ONE atomic,
 // proof-authorized pool tx on the Starknet side — the FOLDED single-tx claim:
 //
@@ -191,7 +194,7 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
 
   // PRE-FLIGHT (fail-closed, before any proving): validate the attested message binds to
   // the InboundAnonymizer (source/dest/recipient) AND carries destinationCaller = inbound
-  // (bypass-proof). Iris is a TRUSTED oblivious service (threat-model.md) — a tampered
+  // (bypass-proof). Iris is a TRUSTED oblivious service (docs/threat-model.md) — a tampered
   // attestation would revert the folded receive_message on-chain anyway (COMMITMENT_
   // MISMATCH / destination_caller), but catching it here avoids proving a doomed claim.
   // Throws the terminal "recipient/domain mismatch" error (never resume-looped).

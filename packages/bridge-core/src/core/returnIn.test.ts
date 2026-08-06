@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Behavioural tests for the return-funds Leg-A reverse-CCTP burn
 // (returnBurnToPool). Exercises the REAL returnIn.ts against an INJECTED gasless
 // submitter (no EVM RPC) and a mocked Iris attestation. The cross-chain leg itself is

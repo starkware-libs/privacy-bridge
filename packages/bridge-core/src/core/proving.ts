@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { RpcProvider } from 'starknet';
 
 // PROVING BLOCK CHOICE. The pool accepts a proof while

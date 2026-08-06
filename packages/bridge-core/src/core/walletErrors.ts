@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Classifies a dead / reloaded browser-wallet extension and bounds the sign call.
 //
 // MetaMask's MV3 background worker is suspended on tab idle and re-created on

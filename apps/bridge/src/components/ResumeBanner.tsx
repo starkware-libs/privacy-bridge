@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Interrupted-transfer banner shared by MoveIntoPool/MoveFromPool: shows the
  * detected resume status, then either a resuming spinner or an error + manual

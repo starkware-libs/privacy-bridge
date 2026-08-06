@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { isNodeLagError, sleep } from './proving';
 
 // FULL-NODE-LAG retry budget, shared by every proven-submit leg (claim, deposit,

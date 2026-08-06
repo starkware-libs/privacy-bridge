@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Bootstrap bridge-core config from the standalone bridge app's Vite env (Slice X —
 // config injection). bridge-core reads NO import.meta.env of its own; the app owns
 // its env and hands it in. `bridgeEnvFromRecord` copies the DEV/PROD flags and every
@@ -15,8 +18,7 @@
 // setupFiles, BEFORE any test file's hoisted `vi.mock` runs — permanently caching the
 // leaves un-mockably for that test file (verified empirically in apps/web when
 // switching to the barrel broke a network-edge mock). The `./config` subpath is a
-// published specifier an extracted app consumes unchanged — see
-// docs/bridge-sdk-refactor.md Slice Y / §6.
+// published specifier an extracted app consumes unchanged.
 //
 // PROD: the AVNU paymaster key NEVER ships in the bundle. Point the SDK's paymaster
 // endpoint at the same-origin /api/avnu proxy (src/server/avnuProxy.ts), which

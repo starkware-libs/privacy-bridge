@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 //! snforge suite for the inbound anonymizer (the CCTP → pool RETURN leg), fold
 //! design: the CCTP mint is folded into the pool-only
 //! `privacy_invoke_with_computation`, so the whole return is one proof-authorized

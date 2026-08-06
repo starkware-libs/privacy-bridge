@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import {
   consumeAccountIndex,
@@ -98,9 +101,9 @@ describe('readDerivedAccounts — migrate-on-read for the pre-Slice-R legacy ind
   });
 });
 
-// Ported from apps/web/src/identity/nextBidIndex.test.ts (bridge-sdk-refactor.md
-// Slice D — the peek/persist/next logic moved here from BidContext; the app
-// keeps thin `peekNextBidIndex`/`persistConsumedBidIndex` aliases).
+// Ported from apps/web/src/identity/nextBidIndex.test.ts (Slice D — the
+// peek/persist/next logic moved here from BidContext; the app keeps thin
+// `peekNextBidIndex`/`persistConsumedBidIndex` aliases).
 //
 // Regression: `scanDerivedAccounts` upserts recovered accounts into `pmp.bids`
 // WITHOUT bumping the standalone `pmp.bidIndex` counter, so the counter can lag

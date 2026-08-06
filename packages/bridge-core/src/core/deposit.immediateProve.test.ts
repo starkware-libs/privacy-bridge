@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // PART A — immediate-prove threading (deposit.ts, paymaster path).
 //
 // depositToPool must, when immediateProve:true, prove NOW (undefined anchor → no aging

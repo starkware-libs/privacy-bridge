@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Debounced bridge-funding quote for the order ticket. The user types a **bet**;
 // we compute how much to burn (bet + CCTP fee + swap slippage + cushion + an optional
 // generic `extraReserveMicro`, e.g. a downstream order fee) and what lands.

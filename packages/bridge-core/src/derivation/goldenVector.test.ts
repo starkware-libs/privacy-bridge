@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { describe, expect, it } from 'vitest';
 import { deriveViewingKey } from './viewing-key.js';
 import { derivePolygonEoa } from './polygon-key.js';
 import { deriveAccountNonce, deriveClaimSecret, computeClaimH } from './claim-commitment.js';
 
-// Derivation golden-vector (bridge-sdk-refactor.md Slice R proof gate): pins the
+// Derivation golden-vector (Slice R proof gate): pins the
 // FULL derivation pipeline (viewing key -> account nonce -> claim_secret -> H,
 // and the derived Polygon EOA) end-to-end for fixed inputs, captured GREEN
 // against the code as it existed immediately before the Slice R vocabulary

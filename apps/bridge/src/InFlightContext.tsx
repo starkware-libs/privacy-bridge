@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * In-flight flow aggregation for apps/bridge.
  *
  * FUND-SAFETY: a network switch must be BLOCKED while any value-moving flow is
  * live — a mid-CCTP-burn/mint switch would strand funds (CCTP burn-and-mint
- * requires source+dest on the SAME network; see docs/mainnet-cutover-plan.md).
+ * requires source+dest on the SAME network).
  * Each flow (MoveIntoPool / MoveFromPool) registers itself here while it is
  * running (signing / running phases) and also while it holds a persisted,
  * unresolved/resumable transfer. NetworkContext.setNetwork consults `anyInFlight`

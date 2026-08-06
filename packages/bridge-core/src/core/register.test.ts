@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Unit tests for the load-bearing internals of the register idempotency fix:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { defineConfig, loadEnv, type ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
@@ -11,7 +14,7 @@ export default defineConfig(({ mode }) => {
   // from one dev origin. bridge-core builds rpcUrl='/rpc/'+network in dev, so each
   // network's requests land on its own prefix (`/rpc/testnet`, `/rpc/mainnet`, …),
   // each proxied to that network's upstream env var. DEV-ONLY; in production the
-  // browser reaches upstreams over OHTTP (one gateway per network — threat-model.md).
+  // browser reaches upstreams over OHTTP (one gateway per network — docs/threat-model.md).
   const proxy: Record<string, ProxyOptions> = {};
 
   // Proxy one network's prefix to its upstream. If the upstream env var is UNSET,

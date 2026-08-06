@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { hasAnyInflightTransfer } from './depositIn';
 

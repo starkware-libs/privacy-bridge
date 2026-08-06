@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 import type { Account, BlockIdentifier, constants } from 'starknet';
 import { formatUnits } from 'viem';
 import {
@@ -87,7 +90,7 @@ export async function discoverPrivateBalance(args: DiscoverBalanceArgs): Promise
 // and the viewing key (the demo's path), so persisting the viewing key lets the
 // dashboard show the in-pool balance on reconnect WITHOUT a re-sign. The viewing
 // key is persisted by design (read-only capability — it can't move funds); the
-// private key and the raw signature never are. See docs/architecture.md.
+// private key and the raw signature never are.
 export async function discoverPrivateBalanceForAddress(args: {
   snAddress: string;
   viewingKey: bigint;

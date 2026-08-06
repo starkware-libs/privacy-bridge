@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Parity + safety tests for the inbound-bind commitment derivation.
 //
 // The FROZEN cross-language vector below is asserted here (TS) AND in the Cairo

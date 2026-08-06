@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Transient-vs-terminal error classification for the orchestrators.
 //
 // The starknet-core layer (proven-submit's manager nonce, the proving-block

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // C1 regression: pollIris (via waitForAttestation) must treat an OK 200 whose
 // body is the JSON literal `null` as TRANSIENT, exactly like an empty/partial
 // 200 (see polygonMint.emptyBody.test.ts).

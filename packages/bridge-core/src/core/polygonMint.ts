@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // CCTP V2 Forwarding-Service flow: poll Circle Iris for the burn's attestation
 // (the EVM->Starknet fund-in leg still needs the raw {message, attestation} to
 // replay), and — on the Starknet->Polygon FUND-ACCOUNT leg — poll Iris for the
@@ -8,7 +11,7 @@
 // forwarding fee IN USDC from the burned amount, so the recipient EOA receives
 // `amount - maxFee` (the fee floor is enforced pre-flight in cctpFees.ts).
 //
-// Frozen shape: ../../../../docs/bridge-interface.md §4. The fund-in leg's mint
+// Frozen shape. The fund-in leg's mint
 // (depositIn.ts) and the decoder/validation gate below are unchanged.
 //
 // In-memory only — never log/persist the per-account EOA private key.
@@ -549,7 +552,7 @@ export async function waitForBridgedMint(
 
 // --- CCTP v2 message decoder (fund-safety gate, Bundle A1) -------------------
 // We MUST NOT trust Iris's `message`/`forwardTxHash` unverified: Iris is a
-// TRUSTED oblivious service (threat-model.md), so a compromised / MITM'd Iris
+// TRUSTED oblivious service (docs/threat-model.md), so a compromised / MITM'd Iris
 // could hand back a message that redirects the mint to an attacker EOA or a
 // different chain. Before accepting the forwarded mint we decode the message and
 // assert it matches what bridgeOut burned: our Starknet source domain, the
@@ -557,7 +560,7 @@ export async function waitForBridgedMint(
 //
 // Byte layout — Circle CCTP v2 (MessageV2 header + BurnMessageV2 body),
 // verified against a live attested Iris message (burn
-// 0x2d3f…549b9) AND bridgeOut's deposit_for_burn (docs/bridge-interface.md §4):
+// 0x2d3f…549b9) AND bridgeOut's deposit_for_burn:
 //
 //   MessageV2 header (148 bytes):
 //     [0..4)    version                   uint32

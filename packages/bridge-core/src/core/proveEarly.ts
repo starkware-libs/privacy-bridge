@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // Shared prove-early machinery: the "skip the PROVING_BLOCK_DEPTH aging wait when
 // the account is provably quiescent" pattern used by bridgeOut.ts (withdraw/sell)
 // and bridgeBack.ts (return claim). Extracted so both flows share ONE

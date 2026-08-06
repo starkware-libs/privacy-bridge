@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 // bridge-core/react — React hooks for bridge functionality.
 // Wallet plumbing and identity hooks for both apps/bridge and apps/web.
 
@@ -22,7 +25,7 @@ export type { WithdrawCctpFeeEstimate } from './useWithdrawCctpFeeEstimate';
 
 // Unified wallet layer: injected EIP-6963 extensions (MetaMask, Rabby, …) AND
 // WalletConnect coexist behind one picker (selectProvider → getEthereumProvider →
-// signMessage). See docs/architecture.md Key decisions.
+// signMessage).
 export { WalletProvider } from './wallet/WalletProvider';
 export { useWallet } from './wallet/useWallet';
 export type { WalletContextValue } from './wallet/types';

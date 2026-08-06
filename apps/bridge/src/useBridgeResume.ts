@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 StarkWare Industries Ltd.
+
 /**
  * Shared resume/recovery detection for both bridge directions (Phase 2 of the
- * resume refactor — docs/bridge-sdk-refactor.md). Reads the ONE in-flight transfer
+ * resume refactor). Reads the ONE in-flight transfer
  * for the derived identity via bridge-core's getBridgeTransferStatus and, for a
  * matching direction, drives it to completion through resumeBridgeTransfer.
  *
