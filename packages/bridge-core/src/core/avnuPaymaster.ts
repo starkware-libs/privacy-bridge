@@ -10,7 +10,7 @@
 //
 // The proven pool legs are STARK-proven by the SDK; AVNU's relayer submits them
 // (carrying the proof), so the derived account is never the on-chain sender and the
-// shared manager leaves the value path (closes the Starknet-side P0 — threat-model.md).
+// shared manager leaves the value path (closes the Starknet-side P0 — docs/threat-model.md).
 //
 // Flow (two JSON-RPC methods, each taking { transaction, parameters }):
 //   - paymaster_buildTransaction → for invoke_and_apply_action returns the SNIP-9

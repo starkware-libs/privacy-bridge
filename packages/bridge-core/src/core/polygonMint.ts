@@ -485,7 +485,7 @@ export async function waitForBridgedMint(
 
 // --- CCTP v2 message decoder (fund-safety gate, Bundle A1) -------------------
 // We MUST NOT trust Iris's `message`/`forwardTxHash` unverified: Iris is a
-// TRUSTED oblivious service (threat-model.md), so a compromised / MITM'd Iris
+// TRUSTED oblivious service (docs/threat-model.md), so a compromised / MITM'd Iris
 // could hand back a message that redirects the mint to an attacker EOA or a
 // different chain. Before accepting the forwarded mint we decode the message and
 // assert it matches what bridgeOut burned: our Starknet source domain, the

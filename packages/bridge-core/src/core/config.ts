@@ -184,7 +184,7 @@ function requirePerNetworkEnv(
 //     paymaster (`buildTransaction`/`executeTransaction`, PR avnu-labs/paymaster#67),
 //     which carries the pool's STARK proof + proof_facts and submits from AVNU's
 //     relayer — an unlinkable third party, removing the shared-manager↔account
-//     linkage (the Starknet-side P0 in threat-model.md). See avnuPaymaster.ts +
+//     linkage (the Starknet-side P0 in docs/threat-model.md). See avnuPaymaster.ts +
 //     proven-submit.ts. The pool must be whitelisted with AVNU.
 //
 // BUNDLE-EXPOSURE NOTICE: like the Polymarket builder creds below (and UNLIKE

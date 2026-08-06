@@ -575,7 +575,7 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
 // destination. SAME withdraw + privacy_invoke(Buy) shape as bridgeOut(), but:
 //   - mint_recipient = the destination address (no per-account EOA);
 //   - NO per-account commitment H (a cash-out has no return claim, and the burn no
-//     longer emits any H at all — bridge-plan.md, threat-model.md).
+//     longer emits any H at all — bridge-plan.md, docs/threat-model.md).
 // Reuses the same SDK/provider/proving/tx + manager-paid submit mocks as above.
 // ---------------------------------------------------------------------------
 // A distinct user destination address (20-byte EVM hex), != the per-account EOA.
@@ -648,7 +648,7 @@ describe('bridgeOutToWallet — Leg B cash-out (withdraw + decoy-H burn)', () =>
 
   it('records NO per-account commitment H for a cash-out (no return claim; burn no longer emits H)', async () => {
     // The cash-out has no return claim, so it must not compute or record an account H —
-    // and the burn no longer emits any H at all (bridge-plan.md, threat-model.md).
+    // and the burn no longer emits any H at all (bridge-plan.md, docs/threat-model.md).
     await bridgeOutToWallet({ signature: SIGNATURE, amount: AMOUNT, destination: DEST_ADDRESS });
     // The BUY calldata is exactly 8 felts: no trailing H slot.
     expect(invokeResult!.calldata).toHaveLength(8);

@@ -679,7 +679,7 @@ export async function paymasterExecuteLeg(
 // Submits a proof-bearing pool call via the AVNU PRIVATE paymaster: AVNU's relayer
 // is the on-chain sender (carrying proof + proof_facts), so neither the derived
 // account nor a shared manager appears as the submitter — closing the Starknet-side
-// linkage (threat-model.md).
+// linkage (docs/threat-model.md).
 //
 // This all-in-one variant builds → (guards) → executes with a proof that was already
 // generated. It CANNOT inject the pool fee into that pre-built proof, so it GUARDS on a

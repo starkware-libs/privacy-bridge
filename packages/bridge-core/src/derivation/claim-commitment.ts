@@ -91,7 +91,7 @@ export interface ClaimHArgs {
 // note_binding is bound to `claim_secret` (NOT a separate channel_key). This is
 // the single value the on-chain `claim(claim_secret, amount, note_id)` can
 // recompute: its frozen signature carries only `claim_secret` (revealing the
-// viewing key / pool channel key on-chain is a hard rule, threat-model.md), so
+// viewing key / pool channel key on-chain is a hard rule, docs/threat-model.md), so
 // any binding the contract verifies must be derivable from `claim_secret`
 // alone. claim_secret is already a one-way, single-use, per-account child of
 // the viewing key, so it carries the ownership/anti-replay binding; the real

@@ -261,7 +261,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
   // computeClaimH binds note_binding to claim_secret (NOT the viewing key) so the
   // on-chain claim — whose frozen signature carries only claim_secret — can
   // recompute the SAME H. The raw viewing key feeds claim_secret only and is
-  // never revealed on-chain (docs/bridge-interface.md §2, threat-model.md).
+  // never revealed on-chain (docs/bridge-interface.md §2, docs/threat-model.md).
   const claimSecret = deriveClaimSecret(viewingKey, accountNonce);
   const commitmentH = computeClaimH({ claimSecret, amount, snDomain: SN_DOMAIN });
 
@@ -938,7 +938,7 @@ export interface BridgeOutToWalletResult {
 // bridgeOut() — withdraw to the Anonymizer + ONE InvokeExternal ->
 // Anonymizer.privacy_invoke(Buy) — but: mint_recipient = the destination address
 // (no per-account EOA) and no per-account commitment H (a cash-out has no return claim,
-// and the burn no longer emits H — bridge-plan.md, threat-model.md).
+// and the burn no longer emits H — bridge-plan.md, docs/threat-model.md).
 // Manager-paid via the shared proveAndSubmitBridgeOut helper.
 export async function bridgeOutToWallet(
   args: BridgeOutToWalletArgs,
