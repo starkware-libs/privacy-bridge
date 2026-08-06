@@ -130,16 +130,5 @@ environment. `bridge-core` excludes test files from the `tsc` build via `tsconfi
 - `./react` hooks follow a `running`-flag state-machine pattern.
 - Comment style: see `.claude/skills/concise-comments/SKILL.md` — describe the present, don't narrate
   history.
-
-### Privacy hard rules (any change must uphold these)
-
-- **Never log or persist** the raw wallet signature, any private key (Starknet key, per-account EVM
-  key), or a claim/inbound secret. Enforced by an eslint `no-restricted-syntax` guard and the
-  `no-log-secret-material` Semgrep rule.
-- The pool **viewing key MAY be persisted** — it is a read-only capability (discovers notes, cannot
-  move funds). Addresses, public keys, and recomputable non-secret metadata are fine.
-- A transfer's two sides — the user's Starknet identity (SN account + pool) and the EVM address funds
-  move to/from — must be **unlinkable on-chain**. Don't introduce a shared submitter, a reused
-  address across legs, or a network call carrying both identities.
-
-`.cursor/BUGBOT.md` states these in review-rule form, in priority order.
+- The privacy hard rules any change must uphold — secret hygiene (and the viewing-key exception) and
+  on-chain unlinkability — are in `.cursor/BUGBOT.md`, in priority order.
