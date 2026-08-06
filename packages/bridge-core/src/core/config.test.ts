@@ -1,4 +1,4 @@
-// Pins the NETWORK master switch (docs/mainnet-cutover-plan.md §1-§2): the default
+// Pins the NETWORK master switch: the default
 // keeps every testnet default; 'mainnet' flips the network-scoped defaults (EVM
 // source registry, Starknet CCTP destination, deposit token, Polygon block, default
 // source chain) without touching testnet behaviour.
@@ -157,7 +157,7 @@ describe('EVM_CCTP_SOURCES_MAINNET — blank env vars fall back to literal defau
   });
 });
 
-// AVNU paymaster config (docs/architecture.md Key decisions; open-questions #13).
+// AVNU paymaster config.
 // resolvePaymaster() returns undefined until AVNU_PAYMASTER_API_KEY is set, so
 // manager-pays stays the default; when set, endpoint/feeMode/poolFeeToken default to
 // the AVNU mainnet sponsored_private wiring and stay individually overridable.
@@ -186,7 +186,7 @@ describe('config.paymaster (AVNU)', () => {
 });
 
 // Deploy-fee mode. Defaults to 'sponsored' (AVNU pays; a pure deploymentData deploy —
-// the mandatory deploy path per open-questions.md #13). 'default' (user pays in USDC
+// the mandatory deploy path). 'default' (user pays in USDC
 // via AVNU pay-in-token) is NOT usable: the fee is charged via a SNIP-9 execute_from_
 // outside transfer from the account, which is not yet deployed at deploy time → AVNU
 // rejects "SNIP-9 not implemented for the account". The USDC estimate must be a valid

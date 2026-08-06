@@ -2,8 +2,7 @@
 // writes to localStorage is namespaced under `pmp.*` and is NON-SECRET by policy
 // (public addresses, the read-only pool viewing key, non-secret account-funding
 // indices/cursors — never the private key, the raw wallet signature, or claim
-// secrets). See docs/architecture.md "Account view" Key decision +
-// .claude/rules/code-style.md.
+// secrets).
 //
 // This is the bridge-core mirror of apps/web's identity/device-store.ts: the
 // single source of truth for the key set so "Disconnect / Forget this device"
@@ -19,7 +18,7 @@
 // wiped HERE because this is the single point disconnect()/"Forget this device"
 // clears (bridge-core is acyclic-below the apps, so it can't import their stores
 // — it carries the frozen key STRINGS instead). The key STRINGS below are frozen
-// wire values (bridge-sdk-refactor.md §1.1) — never rename them, only the
+// wire values — never rename them, only the
 // surrounding identifiers/comments.
 export const PMP_STORAGE_KEYS = [
   'pmp.identity', // derived Starknet address + public key + viewing key

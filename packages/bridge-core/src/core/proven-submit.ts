@@ -700,13 +700,13 @@ export async function submitProvenViaPaymaster(
   // the proof — the forwarder collects the pool fee from that `TransferTo` action, and
   // submitting without it fails with AVNU error 165 (MISSING_FEE_TRANSFER_TO). The
   // proof here is already built, so we can't inject it; fail clearly. (`sponsored`
-  // only fixes the fee token to STRK — it does NOT waive the fee.) See
-  // open-questions.md #13 / AVNU's private-transactions doc. A zero fee_action proceeds.
+  // only fixes the fee token to STRK — it does NOT waive the fee.) A zero
+  // fee_action proceeds.
   if (ctx.feeAction && BigInt(ctx.feeAction.amount || '0') !== 0n) {
     throw new Error(
       `AVNU paymaster fee_action is non-zero (${ctx.feeAction.amount} of ${ctx.feeAction.token}). ` +
         'The pool fee must be baked into the privacy proof as a withdraw to the forwarder (AVNU collects ' +
-        'it from that TransferTo action) — not yet wired for this leg. See open-questions.md #13.',
+        'it from that TransferTo action) — not yet wired for this leg.',
     );
   }
   return paymasterExecuteLeg(account, call, proofDetails, ctx, { onRelayStart: leg.onRelayStart });

@@ -157,7 +157,7 @@ const ERC20_ABI = [
 ] as const satisfies Abi;
 
 // CCTP V2 depositForBurn (circlefin EVM TokenMessengerV2). Param order matches
-// docs/bridge-plan.md §3 / the Starknet deposit_for_burn used by the Anonymizer.
+// Mirrors the Starknet deposit_for_burn used by the Anonymizer.
 const TOKEN_MESSENGER_ABI = [
   {
     type: 'function',

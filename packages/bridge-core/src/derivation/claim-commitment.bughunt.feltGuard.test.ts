@@ -6,7 +6,7 @@
 //
 // #41 (bridge-hunt) added the equivalent guard to `computeClaimH` — the
 // same defensive pattern must also apply to the recovery-recipe helpers
-// (bridge-plan.md §4), otherwise a bug or fuzz input upstream can silently
+// otherwise a bug or fuzz input upstream can silently
 // map two distinct intended VKs / nonces to the same secret.
 //
 // RED on current main (no upper-bound guard); would go GREEN after adding

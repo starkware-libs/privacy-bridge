@@ -1,5 +1,5 @@
 // Per-account claim commitment (the H scheme), IDENTICAL to the Cairo Anonymizer.
-// Frozen interface + test vector: ../../../../docs/bridge-interface.md §2-3.
+// Frozen interface + test vector.
 //
 // Poseidon over a span, mirroring the pool's hashes.cairo idiom:
 //   poseidon_hash_span (Cairo)  ==  hash.computePoseidonHashOnElements (TS).
@@ -11,7 +11,7 @@ import { assertCanonicalFelt, poseidon } from './felt.js';
 import { assertValidChannel } from './messages.js';
 
 // Domain-separation felt tags (Cairo short-string literals `<NAME>:V<version>`).
-// Decimal values are pinned in bridge-interface.md §2 and asserted by the tester.
+// Decimal values are frozen and asserted by the tester.
 export const CLAIM_TAG = BigInt(shortString.encodeShortString('CLAIM_TAG:V1'));
 export const BIND_TAG = BigInt(shortString.encodeShortString('BIND_TAG:V1'));
 export const H_TAG = BigInt(shortString.encodeShortString('H_TAG:V1'));
@@ -20,11 +20,11 @@ export const H_TAG = BigInt(shortString.encodeShortString('H_TAG:V1'));
 // domain-separates the recovery recipe below. The literal string passed to
 // encodeShortString below is FROZEN (a poseidon hash input, mirrored by the
 // Cairo Anonymizer) — do not change it even though the identifier itself was
-// renamed (bridge-sdk-refactor.md Slice R).
+// renamed (Slice R).
 export const ACCOUNT_NONCE_TAG = BigInt(shortString.encodeShortString('BIDNONCE:V1'));
 
 // account_nonce = poseidon([ACCOUNT_NONCE_TAG, viewing_key, trade_counter]).
-// Recovery recipe (bridge-plan.md §4): the per-account nonce is a deterministic
+// Recovery recipe: the per-account nonce is a deterministic
 // child of the viewing key + the non-secret per-account index (`trade_counter`),
 // so the whole return is recomputable from the single MetaMask signature + the
 // saved index — no persisted secret. Feeds deriveClaimSecret. In-memory only;
@@ -69,7 +69,7 @@ export function deriveAccountNonce(
 // claim_secret = poseidon([CLAIM_TAG, viewing_key, account_nonce]).
 // One-way Poseidon child of the viewing key; reveals neither the VK nor other
 // accounts. The raw viewing key is an input here only and is never revealed
-// on-chain. See bridge-interface.md §2.
+// on-chain.
 export function deriveClaimSecret(viewingKey: bigint, accountNonce: bigint): bigint {
   // Felt-range guards on BOTH Poseidon inputs — mirror deriveAccountNonce above.
   // A non-canonical viewing key OR account nonce ≥ P reduces silently mod P and
@@ -95,11 +95,11 @@ export interface ClaimHArgs {
 // any binding the contract verifies must be derivable from `claim_secret`
 // alone. claim_secret is already a one-way, single-use, per-account child of
 // the viewing key, so it carries the ownership/anti-replay binding; the real
-// front-run hardening is the Schnorr-over-note_id upgrade (bridge-plan.md
-// Decision 2), which keeps H pure-Poseidon so it drops in unchanged.
+// front-run hardening is the Schnorr-over-note_id upgrade (Decision 2),
+// which keeps H pure-Poseidon so it drops in unchanged.
 //
 // Byte-identical to the Cairo Anonymizer.compute_h and the frozen §3 vector.
-// In-memory only — never log/persist claim_secret. See bridge-interface.md §2.
+// In-memory only — never log/persist claim_secret.
 export function computeClaimH({ claimSecret, amount, snDomain }: ClaimHArgs): bigint {
   // All three inputs must be canonical felts in [0, P). Values outside this
   // range reduce silently mod P inside Poseidon — two distinct inputs that are
