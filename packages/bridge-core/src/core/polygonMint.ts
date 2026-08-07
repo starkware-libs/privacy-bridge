@@ -46,9 +46,54 @@ interface IrisResponse {
   messages?: IrisMessage[];
 }
 
+// What identifies OUR CCTP message inside a response that may hold several.
+export interface CctpMessageMatch {
+  expectedSourceDomain: number;
+  expectedDestinationDomain: number;
+  expectedRecipient: string;
+  // Exact BurnMessageV2 hookData the burn carried (0x-hex, lowercased on compare).
+  // Required where domains + recipient cannot tell same-recipient burns apart — every
+  // return burn mints to the SHARED inbound anonymizer, so only the burn-bound
+  // commitment in hookData is unique per return. Absent/short/mismatched hookData
+  // fails the match (our hook burns always carry it).
+  expectedHookData?: `0x${string}`;
+}
+
+// Whether the entry carries a body we can decode at all. An UNDECODABLE body cannot be
+// attributed to anyone; a decodable one that does not match us belongs to someone else.
+function isDecodableMessage(message: `0x${string}` | undefined): boolean {
+  if (!message) return false;
+  try {
+    decodeCctpMessage(message);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The entry whose decoded body is addressed to us. Returns undefined when the
+// response holds only other people's messages — the poller then keeps waiting rather
+// than handing a stranger's message to the mint path.
+function selectMatchingMessage(
+  messages: IrisMessage[],
+  match: CctpMessageMatch,
+): IrisMessage | undefined {
+  return messages.find((entry) => {
+    if (!entry?.message) return false;
+    try {
+      assertCctpMessageMatches(entry.message, match);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 // Base Iris poll cadence for the STANDARD finality tier (threshold 2000). Standard
 // finality on Polygon can take many minutes, so a tight interval would hammer Iris
 // pointlessly for the whole window — 5s is the right cadence there.
+const TERMINAL_IRIS_STATUS = /^(failed|rejected)$/i;
+
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 // Iris poll cadence for the FAST finality tier (threshold 1000). A Fast burn attests
 // in ~10-15s, so the fixed 5s Standard cadence wastes up to ~5s of that window on
@@ -124,6 +169,10 @@ async function pollIris<T>(
   opts: PollOpts | undefined,
   statusLabel: string,
   timeoutLabel: string,
+  // Picks OUR entry out of the response. One transaction can carry several users'
+  // CCTP messages (a 4337 bundle packs strangers' ops), so a caller that can identify
+  // its own message passes a selector; the default keeps the single-message behavior.
+  select: (messages: IrisMessage[]) => IrisMessage | undefined = (messages) => messages[0],
 ): Promise<T> {
   // Explicit interval wins; otherwise pick the tier's base cadence (Fast ~1.5s vs
   // Standard 5s). Only the base poll interval is tier-aware — the transient-error
@@ -199,7 +248,7 @@ async function pollIris<T>(
       }
       if (!transient) {
         transientStreak = 0;
-        const entry = body!.messages?.[0];
+        const entry = select(body!.messages ?? []);
         const resolved = extract(entry);
         if (resolved !== null) return resolved;
         // TERMINAL status: Circle can reject / fail a message that will never
@@ -207,12 +256,27 @@ async function pollIris<T>(
         // wasting the full poll window (default 30 min) on a "timed out" that
         // misrepresents the cause. (Anything else — e.g. "pending_confirmations"
         // — is non-terminal and keeps polling.)
-        if (entry && /^(failed|rejected)$/i.test(entry.status)) {
+        // When OUR entry is absent, a failed/rejected one may still be ours: Iris can
+        // report a terminal status with NO decodable body, which the selector cannot
+        // match on. Such an entry is consulted for the TERMINAL check ONLY (its payload
+        // is never read). Two guards keep a stranger's failure from clearing our cursor:
+        // the response must be UNAMBIGUOUS (one entry), and that entry's body must be
+        // UNDECODABLE — a body that decodes and does not match us is provably not ours.
+        const all = body!.messages ?? [];
+        const soleUnattributable =
+          !entry && all.length === 1 && all[0] !== undefined && !isDecodableMessage(all[0].message)
+            ? all[0]
+            : undefined;
+        const terminal = [entry, soleUnattributable].find(
+          (candidate) => candidate && TERMINAL_IRIS_STATUS.test(candidate.status),
+        );
+        if (terminal) {
           throw new Error(
-            `CCTP attestation failed (Iris status "${entry.status}") for burn ${burnTxHash}.`,
+            `CCTP attestation failed (Iris status "${terminal.status}") for burn ${burnTxHash}.`,
           );
         }
-        // Indexed but not yet done (status e.g. "pending_confirmations").
+        // Indexed but not yet done (status e.g. "pending_confirmations"). Only OUR
+        // entry's status is ours to report — a stranger's would misdescribe our progress.
         onStatus?.(`${entry?.status ?? 'pending'}…`);
       }
     } else if (!networkError && res!.status === 404) {
@@ -269,10 +333,11 @@ async function pollIris<T>(
 // instead (Circle's Forwarding Service submits that mint).
 export async function waitForAttestation(
   burnTxHash: string,
-  opts?: PollOpts & { sourceDomain?: number },
+  opts?: PollOpts & { sourceDomain?: number; match?: CctpMessageMatch },
 ): Promise<AttestationResult> {
   const { starknetDomain } = config.cctp;
   const sourceDomain = opts?.sourceDomain ?? starknetDomain;
+  const match = opts?.match;
   return pollIris<AttestationResult>(
     burnTxHash,
     sourceDomain,
@@ -285,6 +350,7 @@ export async function waitForAttestation(
     opts,
     'Waiting for Circle attestation',
     'waitForAttestation',
+    match ? (messages) => selectMatchingMessage(messages, match) : undefined,
   );
 }
 
@@ -303,6 +369,9 @@ export async function waitForAttestation(
 // on Starknet); `opts.expectedMintRecipient` is the per-account EOA the mint must
 // land on; `opts.expectedDestinationDomain` is the CCTP domain of the chosen bridge-OUT
 // chain (defaults to the default destination's domain — Polygon).
+// Selects Iris's FIRST message: this leg's burn originates on Starknet, where a tx
+// carries exactly one CCTP message (no 4337/relayer batching), so [0] is ours. The
+// EVM-side legs pass a `match` spec instead — see selectMatchingMessage.
 export async function waitForForwardedMint(
   burnTxHash: string,
   opts: PollOpts & {
@@ -313,8 +382,7 @@ export async function waitForForwardedMint(
 ): Promise<ForwardedMintResult> {
   const { starknetDomain } = config.cctp;
   const sourceDomain = opts.sourceDomain ?? starknetDomain;
-  const destinationDomain =
-    opts.expectedDestinationDomain ?? getDefaultEvmCctpDestination().domain;
+  const destinationDomain = opts.expectedDestinationDomain ?? getDefaultEvmCctpDestination().domain;
   return pollIris<ForwardedMintResult>(
     burnTxHash,
     sourceDomain,
@@ -409,14 +477,16 @@ export interface BridgedMintResult {
   attestation?: `0x${string}`;
 }
 
+// Selects Iris's FIRST message: this leg's burn originates on Starknet, where a tx
+// carries exactly one CCTP message (no 4337/relayer batching), so [0] is ours. The
+// EVM-side legs pass a `match` spec instead — see selectMatchingMessage.
 export async function waitForBridgedMint(
   burnTxHash: string,
   opts: WaitForBridgedMintOpts,
 ): Promise<BridgedMintResult> {
   const { starknetDomain } = config.cctp;
   const sourceDomain = opts.sourceDomain ?? starknetDomain;
-  const destinationDomain =
-    opts.destinationDomain ?? getDefaultEvmCctpDestination().domain;
+  const destinationDomain = opts.destinationDomain ?? getDefaultEvmCctpDestination().domain;
 
   // The attested pair, captured the FIRST poll it appears on. The Forwarding-Service
   // shape can later report forwardTxHash with an EMPTY message, so we must remember
@@ -536,6 +606,8 @@ const EVM_ADDR_LEN = 20;
 // actually deducted. minted = amount − feeExecuted (see decodeCctpMintedAmount).
 const OFF_BODY_AMOUNT = MSG_HEADER_LEN + 68;
 const OFF_BODY_FEE_EXECUTED = MSG_HEADER_LEN + 164;
+// hookData is the dynamic tail of BurnMessageV2 (body offset +228 to end).
+const OFF_BODY_HOOK_DATA = MSG_HEADER_LEN + 228;
 const U256_LEN = 32;
 
 // Extract the 32-byte nonce from a CCTP v2 message header (bytes 12–44).
@@ -627,8 +699,19 @@ export function decodeCctpMessage(message: `0x${string}`): DecodedCctpMessage {
   const mintRecipientFull = `0x${fieldHex}` as `0x${string}`;
   // EVM address = last 20 bytes of the 32-byte left-padded mintRecipient field.
   // (148 header + 36 body offset + 32 field − 20 addr = byte 196 = hex index 392.)
-  const mintRecipient = `0x${fieldHex.slice((MINT_RECIPIENT_FIELD_LEN - EVM_ADDR_LEN) * 2)}` as `0x${string}`;
+  const mintRecipient =
+    `0x${fieldHex.slice((MINT_RECIPIENT_FIELD_LEN - EVM_ADDR_LEN) * 2)}` as `0x${string}`;
   return { sourceDomain, destinationDomain, mintRecipient, mintRecipientFull };
+}
+
+// The BurnMessageV2 hookData tail, lowercased 0x-hex ('0x' = present-but-empty).
+// null when the message is non-hex or too short to reach the hookData offset —
+// i.e. nothing attributable to compare against.
+export function decodeCctpHookData(message: `0x${string}`): `0x${string}` | null {
+  const hex = message.startsWith('0x') ? message.slice(2) : message;
+  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) return null;
+  if (hex.length / 2 < OFF_BODY_HOOK_DATA) return null;
+  return `0x${hex.slice(OFF_BODY_HOOK_DATA * 2).toLowerCase()}`;
 }
 
 // Normalize an expected mint recipient (EVM-20 or Starknet felt-32) to the
@@ -660,14 +743,7 @@ function normalizeExpectedRecipient(expected: string): { hex: string; full: bool
 //     = the derived SN account (a felt → compared on the full 32-byte field).
 // `expectedRecipient` is compared case-insensitively; an EVM-20 value matches
 // the decoded 20-byte recipient, a longer (felt) value the full 32-byte field.
-export function assertCctpMessageMatches(
-  message: `0x${string}`,
-  opts: {
-    expectedSourceDomain: number;
-    expectedDestinationDomain: number;
-    expectedRecipient: string;
-  },
-): void {
+export function assertCctpMessageMatches(message: `0x${string}`, opts: CctpMessageMatch): void {
   const decoded = decodeCctpMessage(message);
   const { hex, full } = normalizeExpectedRecipient(opts.expectedRecipient);
   const actual = (full ? decoded.mintRecipientFull : decoded.mintRecipient).slice(2);
@@ -679,6 +755,15 @@ export function assertCctpMessageMatches(
     throw new Error(
       'CCTP message recipient/domain mismatch — refusing to submit (possible attestation tampering).',
     );
+  }
+  // Deliberately NOT the terminal 'recipient/domain mismatch' wording: in a selector
+  // context this only means "a batch-mate's burn to the same recipient", which must
+  // stay resumable — never clear a cursor over it.
+  if (opts.expectedHookData !== undefined) {
+    const hookData = decodeCctpHookData(message);
+    if (hookData !== opts.expectedHookData.toLowerCase()) {
+      throw new Error('CCTP message hookData does not match the expected commitment.');
+    }
   }
 }
 

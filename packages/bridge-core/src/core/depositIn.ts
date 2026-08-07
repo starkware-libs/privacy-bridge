@@ -128,8 +128,7 @@ export function selectEip1559Fees(
   minPriorityFeeWei?: bigint,
 ): { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } {
   const floor = minPriorityFeeWei ?? 0n;
-  const base =
-    estimate.maxPriorityFeePerGas > floor ? estimate.maxPriorityFeePerGas : floor;
+  const base = estimate.maxPriorityFeePerGas > floor ? estimate.maxPriorityFeePerGas : floor;
   const tip = (base * PRIORITY_FEE_MARGIN_NUM) / PRIORITY_FEE_MARGIN_DEN;
   // Base-fee portion of the estimated cap (never negative), + the bumped tip.
   const basePortion =
@@ -238,7 +237,7 @@ function insufficientGasMessage(
 // after a successful mint. waitForAttestation is idempotent on the same burnTx.
 const INFLIGHT_DEPOSIT_KEY = 'pmp.inflightDeposit';
 
-interface InflightDeposit {
+export interface InflightDeposit {
   // Always a 0x-hex burn tx hash (deposit-in is native-gas only).
   burnTx: string;
   sourceDomain: number;
@@ -325,7 +324,7 @@ function clearInflightDeposit(evmAddress: string): void {
 // caller treats it as a FRESH deposit rather than resuming off garbage. The
 // funds, if any, are recoverable from the signature-derived account; a corrupt
 // cursor can't be safely resumed.
-function readInflightDeposit(evmAddress: string): InflightDeposit | null {
+export function readInflightDeposit(evmAddress: string): InflightDeposit | null {
   const record = readInflightDepositMap()[evmAddress.toLowerCase()] ?? null;
   if (record === null) return null;
   if (!isValidInflightDeposit(record)) {
@@ -463,6 +462,31 @@ export function hasAnyInflightTransfer(): boolean {
     // localStorage unavailable (private mode/quota) → no persisted cursor to strand.
   }
   return false;
+}
+
+// Adopt an already-confirmed CCTP burn into the resume cursor, so a caller that
+// submitted the burn OUT OF BAND (e.g. through an injected evmSender whose receipt
+// arrived after the page reloaded) can finish it with resumeOnly instead of burning
+// again. Returns whether the cursor is readable afterwards; false ⇒ the caller must
+// warn rather than assume a resume is possible. Never overwrites a cursor that is
+// already present for this funder, UNLESS it names the same burn — a cursor for a
+// DIFFERENT burn is another live handle and must not be silently reported as adopted.
+export function adoptInflightDepositBurn(
+  evmAddress: string,
+  record: {
+    burnTx: string;
+    sourceDomain: number;
+    amountWei: string;
+    snRecipient: string;
+    evmChainId: number;
+    maxFee?: string;
+    fold?: boolean;
+  },
+): boolean {
+  const existing = readInflightDeposit(evmAddress);
+  if (existing !== null) return existing.burnTx.toLowerCase() === record.burnTx.toLowerCase();
+  if (!isValidInflightDeposit(record)) return false;
+  return writeInflightDepositVerified(evmAddress, record);
 }
 
 // Best-effort cursor write that REPORTS whether it actually landed (mirrors
@@ -611,6 +635,28 @@ async function peekEvmSourceDomain(
   }
 }
 
+// One EVM call — the shape this module builds for the CCTP approve/burn.
+export interface EvmCall {
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value?: bigint;
+}
+
+export interface EvmSendResult {
+  // MINED canonical EVM tx hash of the tx that executed the batch. Never a userOpHash.
+  txHash: `0x${string}`;
+  // false ⇒ mined but reverted ⇒ nothing moved ⇒ the caller may retry fresh.
+  success: boolean;
+}
+
+// Submits `calls` atomically and resolves ONLY once mined, with the canonical tx hash.
+// Contract: resolve ⇒ mined; throw ⇒ either nothing was submitted, or the outcome is
+// unknown — in which case the sender must have durably recorded its own handle first.
+export type EvmSender = (
+  calls: readonly EvmCall[],
+  ctx: { chainId: number; account: `0x${string}`; onStatus?: (s: string) => void },
+) => Promise<EvmSendResult>;
+
 export interface FundFromMetaMaskArgs {
   // The connected MetaMask account that burns USDC + pays the EVM gas.
   evmAddress: string;
@@ -645,6 +691,11 @@ export interface FundFromMetaMaskArgs {
   // deposit, never start one. With nothing to resume this throws NOTHING_TO_RESUME
   // instead of falling through to a fresh approve + depositForBurn.
   resumeOnly?: boolean;
+  // Routes the FRESH approve+burn through the caller's own atomic submitter (e.g. an
+  // ERC-4337 UserOp) instead of EIP-5792 / two wallet txs. Takes priority over the
+  // wallet's atomic-batch capability, which is then never probed. Fresh path only —
+  // a resume finishes off the persisted cursor and never calls it.
+  evmSender?: EvmSender;
   // PART B (single-tx deposit-in fold): when true, the Starknet CCTP mint
   // (receive_message) is NOT submitted as its own tx here — instead the attested
   // {message, attestation} are handed back via onMintFold so the caller folds
@@ -766,7 +817,8 @@ async function waitForBatchStatus(
       const result = await getCallsStatus(walletClient, { id });
       acknowledged = true;
       if (result.status === 'success') return { kind: 'success', receipts: result.receipts };
-      if (result.status === 'failure') return { kind: 'failure', statusCode: String(result.statusCode) };
+      if (result.status === 'failure')
+        return { kind: 'failure', statusCode: String(result.statusCode) };
       // 'pending' (or an unrecognized status) → keep polling until the deadline.
     } catch (error) {
       if (!isUnknownBundleIdError(error)) throw error;
@@ -918,10 +970,20 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     opts?: { detectAlreadyMinted?: boolean; foldBurn?: boolean; resumeOnly?: boolean },
   ): Promise<'minted' | 'already-minted' | 'already-deposited' | 'deferred'> => {
     try {
+      // The burn tx can be a 4337 BUNDLE carrying other users' CCTP messages, so the
+      // poller is told which one is ours instead of taking the first.
+      const match = {
+        expectedSourceDomain: sourceDomain,
+        expectedDestinationDomain: config.cctp.starknetDomain,
+        expectedRecipient: snAddressToBytes32(recipient),
+      };
       const { message, attestation } = await waitForAttestation(burnTx, {
         sourceDomain,
+        match,
         onStatus,
       });
+      // The selector guarantees this message is OURS, so the reads below (mint sizing,
+      // the already-minted nonce probe) can never key off a stranger's message.
       // Size the deposit to what CCTP will ACTUALLY mint (burn − feeExecuted from the
       // attested body), NOT the pre-submit maxFee estimate — on the atomic fold path the
       // mint rides inside the deposit tx, so an over-stated approve/pull reverts (#Bug1).
@@ -983,11 +1045,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
         // domain). Same params + same TERMINAL "recipient/domain mismatch" throw
         // (classified non-transient, cleared as terminal, never resume-looped) as the
         // standalone mint, so both paths share ONE validation contract.
-        assertCctpMessageMatches(message, {
-          expectedSourceDomain: sourceDomain,
-          expectedDestinationDomain: config.cctp.starknetDomain,
-          expectedRecipient: snAddressToBytes32(recipient),
-        });
+        assertCctpMessageMatches(message, match);
         args.onMintFold?.({
           message,
           attestation,
@@ -1174,12 +1232,15 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
     eip1559Fees,
     approveGasUnits,
   ] = await Promise.all([
-    getCapabilities(walletClient, { account, chainId: source.chainId })
-      .then((capabilities) => {
-        const atomicStatus = capabilities?.atomic?.status;
-        return atomicStatus === 'supported' || atomicStatus === 'ready';
-      })
-      .catch(() => false),
+    // An injected evmSender submits the batch itself, so the wallet probe is skipped.
+    args.evmSender
+      ? Promise.resolve(false)
+      : getCapabilities(walletClient, { account, chainId: source.chainId })
+          .then((capabilities) => {
+            const atomicStatus = capabilities?.atomic?.status;
+            return atomicStatus === 'supported' || atomicStatus === 'ready';
+          })
+          .catch(() => false),
     settleRead(
       publicClient.readContract({
         address: source.usdc as `0x${string}`,
@@ -1261,7 +1322,9 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // gas still fails cleanly — guardGas maps the broadcast "insufficient funds" to the
   // same friendly message. The two-tx fallback (self-paying by definition) keeps the
   // preflight.
-  if (!supportsAtomicBatch && nativeBalance < requiredWei) {
+  // An injected evmSender is skipped for the same reason: a paymaster-funded account
+  // legitimately holds zero native token.
+  if (!args.evmSender && !supportsAtomicBatch && nativeBalance < requiredWei) {
     throw new Error(insufficientGasMessage(source, evmAddress, nativeBalance, requiredWei));
   }
 
@@ -1328,7 +1391,26 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // undefined, which — since every atomic outcome either sets it or throws — happens
   // exactly for a non-atomic wallet.
   let burnTx: `0x${string}` | undefined;
-  if (supportsAtomicBatch) {
+  if (args.evmSender) {
+    // The sender owns atomicity and mining; it resolves with the canonical tx hash, so
+    // no status poll or burn-event scan is needed here. A throw is the sender's own
+    // (its contract: nothing submitted, or a handle it durably recorded itself).
+    onStatus?.('Approving + burning USDC in one confirmation…');
+    const res = await args.evmSender([approveCall, burnCall], {
+      chainId: source.chainId,
+      account,
+      onStatus,
+    });
+    if (!res.txHash) {
+      throw new Error(`Batched deposit returned no transaction hash on ${source.chainName}`);
+    }
+    if (!res.success) {
+      throw new Error(
+        `CCTP depositForBurn reverted on ${source.chainName} (tx ${res.txHash}) — nothing moved.`,
+      );
+    }
+    burnTx = res.txHash;
+  } else if (supportsAtomicBatch) {
     onStatus?.('Approving + burning USDC in one confirmation…');
     // Snapshot the source-chain block BEFORE sendCalls so the interleaved burn-event
     // scan inside waitForBatchStatus can find a same-block landing (a public RPC's

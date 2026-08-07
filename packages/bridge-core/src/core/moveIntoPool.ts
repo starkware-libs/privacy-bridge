@@ -33,6 +33,7 @@ import {
   type PrebuiltDepositProof,
 } from './deposit';
 import { fundFromMetaMask, isCctpMessageNonceUsed } from './depositIn';
+import type { EvmSender } from './depositIn';
 import {
   clearPendingPoolDeposit,
   readPendingPoolDeposit,
@@ -64,6 +65,10 @@ export interface MoveIntoPoolArgs {
   provider?: EthereumProvider;
   // Optional EIP-155 source chain for the metamask CCTP burn (threaded to fundFromMetaMask).
   sourceChainId?: number;
+  // Optional atomic submitter for the metamask CCTP approve+burn (e.g. an ERC-4337
+  // UserOp). Threaded to fundFromMetaMask; takes priority over the wallet's own
+  // atomic-batch support and applies to a FRESH burn only.
+  evmSender?: EvmSender;
   // Cross-run RESUME opt-in (C1 fail-closed). A persisted pool-deposit cursor means a
   // PRIOR run already funded this account for a deposit (funds minted to the SN account)
   // — the deposit is the only step left. `resume: true` auto-consumes that cursor (the
@@ -171,6 +176,9 @@ interface FundDepositTokenArgs {
   // continuation must never start a burn.
   resumeOnly: boolean;
   onStatus?: (s: string) => void;
+  // Forwarded to fundFromMetaMask: routes the fresh CCTP approve+burn through the
+  // caller's own atomic submitter.
+  evmSender?: EvmSender;
   // Forwarded to fundFromMetaMask: surface the confirmed EVM burn (hash + explorer URL).
   onBurned?: (info: { burnTxHash: string; explorerUrl?: string }) => void;
   // PART B fold (metamask funding only): defer the Starknet mint and hand its attested
@@ -211,6 +219,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
       onStatus: args.onStatus,
       sourceChainId: args.sourceChainId,
       resumeOnly: args.resumeOnly,
+      evmSender: args.evmSender,
       onBurned: args.onBurned,
       deferMint: args.deferMint,
       onMintFold: args.onMintFold,
@@ -246,7 +255,17 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
 export async function moveIntoPool(
   args: MoveIntoPoolArgs,
 ): Promise<{ depositedNetWei: bigint; deposited: boolean }> {
-  const { signature, funding, amountWei, provider, sourceChainId, resume, onStep, onBurned } = args;
+  const {
+    signature,
+    funding,
+    amountWei,
+    provider,
+    sourceChainId,
+    resume,
+    onStep,
+    onBurned,
+    evmSender,
+  } = args;
   if (amountWei <= 0n) {
     throw new Error('Amount must be greater than zero.');
   }
@@ -400,6 +419,7 @@ export async function moveIntoPool(
         provider,
         sourceChainId,
         resumeOnly,
+        evmSender,
         onBurned: onBurnedOnce,
         onStatus: (m) => emit('deploy', 'running', m),
       });
@@ -638,6 +658,7 @@ export async function moveIntoPool(
         provider,
         sourceChainId,
         resumeOnly,
+        evmSender,
         onBurned: onBurnedOnce,
         onStatus: (m) => emit('deposit', 'running', m),
         // On the fold path defer the mint: fundFromMetaMask returns the attested bytes
