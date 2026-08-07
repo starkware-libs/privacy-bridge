@@ -159,7 +159,7 @@ const { waitForAttestation, managerExecute, switchChain, callContract, attestedM
       vi.fn<
         (
           burnTx: string,
-          opts: { sourceDomain?: number; onStatus?: (s: string) => void },
+          opts: { sourceDomain?: number; onStatus?: (s: string) => void; fast?: boolean },
         ) => Promise<{ message: `0x${string}`; attestation: `0x${string}` }>
       >(),
     managerExecute: vi.fn<
@@ -385,6 +385,46 @@ describe('fundFromMetaMask — happy path (MetaMask on a supported source)', () 
       sourceDomain: AMOY.domain, // EVM source (Amoy = 7), NOT 25
       destDomain: config.cctp.starknetDomain, // Starknet = 25, NOT 7
     });
+  });
+});
+
+// The Iris poll cadence must follow the finality tier the burn RESOLVED to. `fast` is
+// only the config-derived default; an explicit `minFinalityThreshold` overrides the
+// burn's tier without touching it, so a cadence keyed on `fast` polls the wrong tier.
+describe('fundFromMetaMask — Iris poll cadence follows the RESOLVED finality tier', () => {
+  it('an explicit Fast threshold on a Standard-defaulted call polls on the Fast cadence', async () => {
+    // config.cctp.fast is false here, so `fast` says Standard while the burn declares
+    // Fast (1000). Polling Standard would serve a ~10-15s attestation at a coarse 30s
+    // interval, leaving the money in flight for an extra interval each time.
+    await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      minFinalityThreshold: 1000,
+    });
+
+    const burn = writeContract.mock.calls.find((c) => c[0].functionName === 'depositForBurn')![0];
+    expect((burn.args as unknown[])[6]).toBe(1000); // the burn really is Fast
+    expect(waitForAttestation.mock.calls[0][1].fast).toBe(true);
+  });
+
+  it('an explicit Standard threshold on a Fast call polls on the Standard cadence', async () => {
+    // The mirror image: `fast: true` sizes the fee quote, but the burn declares Standard
+    // (2000). Polling Fast would run the flat tight cadence across the whole 30-min
+    // window for an attestation that cannot exist until hard finality.
+    await fundFromMetaMask({
+      evmAddress: EVM_ADDRESS,
+      snRecipient: SN_RECIPIENT,
+      provider: ethProvider,
+      amountWei: AMOUNT,
+      fast: true,
+      minFinalityThreshold: 2000,
+    });
+
+    const burn = writeContract.mock.calls.find((c) => c[0].functionName === 'depositForBurn')![0];
+    expect((burn.args as unknown[])[6]).toBe(2000); // the burn really is Standard
+    expect(waitForAttestation.mock.calls[0][1].fast).toBe(false);
   });
 });
 

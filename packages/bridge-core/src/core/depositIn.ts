@@ -857,6 +857,20 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   }
   minFinalityThreshold ??= fast ? FAST_FINALITY_THRESHOLD : STANDARD_FINALITY;
   maxFee ??= 0n;
+  // Iris poll cadence, derived from the finality threshold the burn RESOLVED to — not
+  // from `fast`, which is only its config-derived default. `args.minFinalityThreshold`
+  // overrides the tier the burn declares WITHOUT touching `fast`, so the two diverge in
+  // both directions, and each mismatch has a real cost:
+  //   Standard `fast` + Fast threshold → the poller sits out coarse 30s intervals for an
+  //     attestation that lands in ~10-15s, leaving the burn in flight for nothing;
+  //   Fast `fast` + Standard threshold → the poller runs the flat tight cadence across
+  //     the whole 30-min window (hundreds of GETs) for an attestation that provably
+  //     cannot exist until hard finality.
+  // Cadence only — this never re-declares the burn's finality, which is already
+  // committed. (bridgeOut's assertQuotedFinalityMatchesBurn guards the same divergence
+  // class on the fee-quote side, where the cost is stranded funds rather than wasted
+  // polls.)
+  const useFastPollCadence = minFinalityThreshold <= FAST_FINALITY_THRESHOLD;
 
   // The Anonymizer/CCTP reverts opaquely if amount <= max_fee (recipient gets 0);
   // reject below-floor here with an actionable error (mirrors the fund-account leg).
@@ -921,6 +935,12 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
       const { message, attestation } = await waitForAttestation(burnTx, {
         sourceDomain,
         onStatus,
+        // Poll Iris on the tier this leg actually burned at (the RESOLVED threshold,
+        // not the config-derived `fast` — see useFastPollCadence). The Standard cadence
+        // is STEPPED (coarse until the pre-finality window elapses), so an unmarked Fast
+        // burn would sit out a coarse interval waiting for an attestation that lands in
+        // seconds. Mirrors bridgeOut's pollKnobs.
+        fast: useFastPollCadence,
       });
       // Size the deposit to what CCTP will ACTUALLY mint (burn − feeExecuted from the
       // attested body), NOT the pre-submit maxFee estimate — on the atomic fold path the

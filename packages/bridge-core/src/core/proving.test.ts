@@ -75,12 +75,14 @@ describe('waitForProvingBlock — recent last tx (waits until buried)', () => {
       return v;
     });
 
-    // Drive the poll loop: bump the head one block then flush the 1s sleep so the
-    // loop's next re-read sees the aged chain. The loop CONTINUES while
-    // `lastTx >= head - DEPTH` (i.e. head <= 108) and exits once head >= 109.
+    // Drive the poll loop: bump the head one block then flush the sleep so the
+    // loop's next re-read sees the aged chain. Advancing by the BACKED-OFF interval
+    // flushes both the tight early polls and the slower later ones. The loop
+    // CONTINUES while `lastTx >= head - DEPTH` (i.e. head <= 108) and exits once
+    // head >= 109.
     for (let i = 0; i < 15 && !settled; i++) {
       head += 1;
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(5_000);
     }
     const finalHead = head;
     const proveAt = await p;
@@ -104,6 +106,112 @@ describe('waitForProvingBlock — recent last tx (waits until buried)', () => {
     for (let i = 1; i < counts.length; i++) {
       expect(counts[i]).toBeLessThanOrEqual(counts[i - 1]);
     }
+    vi.useRealTimers();
+  });
+});
+
+describe('waitForProvingBlock — poll backoff + deadline', () => {
+  // The head never moves, so the loop never exits and its cadence is observable
+  // purely from how far the clock must advance before the next getBlockNumber read.
+  // Call count = 1 initial read + one per completed poll interval.
+  it('backs off from the tight cadence to ~5s after the first two polls', async () => {
+    vi.useFakeTimers();
+    getBlockNumber.mockResolvedValue(105); // 105 - 8 = 97 < 100 → waits forever
+
+    const pending = waitForProvingBlock(provider, 100);
+    // Swallow the eventual deadline throw — this test only inspects the cadence.
+    const settled = pending.catch(() => undefined);
+
+    expect(getBlockNumber).toHaveBeenCalledTimes(1);
+
+    // Polls 1 and 2 are served at the tight 1s cadence.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getBlockNumber).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getBlockNumber).toHaveBeenCalledTimes(3);
+
+    // Poll 3 has backed off: another 1s buys nothing, and the read only lands once
+    // the full 5s interval has elapsed.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getBlockNumber).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(getBlockNumber).toHaveBeenCalledTimes(4);
+
+    // The backoff persists — it is not a one-off.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(getBlockNumber).toHaveBeenCalledTimes(5);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    await settled;
+    vi.useRealTimers();
+  });
+
+  it('caps the wait: throws a named waitForProvingBlock timeout on a stalled chain', async () => {
+    vi.useFakeTimers();
+    // A chain that never produces another block — previously an unbounded hang.
+    getBlockNumber.mockResolvedValue(105);
+
+    const pending = waitForProvingBlock(provider, 100);
+    const rejects = expect(pending).rejects.toThrow(/waitForProvingBlock: timed out after 30 min/);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + 5_000);
+    await rejects;
+    vi.useRealTimers();
+  });
+
+  it('does not give up at 15 min — the deadline tolerates ~200s per block over the nine needed', async () => {
+    vi.useFakeTimers();
+    // The head is stuck for a quarter of an hour, which sustained congestion can look
+    // like. The wait must still be running: giving up here would hard-fail a flow that
+    // a chain producing its nine blocks slowly would have completed.
+    getBlockNumber.mockResolvedValue(105);
+
+    let rejected = false;
+    const pending = waitForProvingBlock(provider, 100).catch(() => {
+      rejected = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    expect(rejected).toBe(false);
+
+    // The head finally advances the nine blocks the anchor needs (100 + 8 + 1).
+    getBlockNumber.mockResolvedValue(109);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await pending;
+    expect(rejected).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('the deadline error names the stuck tx block, the depth and the stalled head', async () => {
+    vi.useFakeTimers();
+    getBlockNumber.mockResolvedValue(105);
+
+    const pending = waitForProvingBlock(provider, 100);
+    const rejects = expect(pending).rejects.toThrow(
+      /block 100.*age 8 blocks deep.*head is still 105/s,
+    );
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + 5_000);
+    await rejects;
+    vi.useRealTimers();
+  });
+
+  it('a chain that ages in time still resolves — the deadline never fires on the happy path', async () => {
+    vi.useFakeTimers();
+    let head = 105;
+    getBlockNumber.mockImplementation(async () => head);
+
+    let settled = false;
+    const pending = waitForProvingBlock(provider, 100).then((v) => {
+      settled = true;
+      return v;
+    });
+    for (let i = 0; i < 15 && !settled; i++) {
+      head += 1;
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    await expect(pending).resolves.toBe(head - PROVING_BLOCK_DEPTH);
     vi.useRealTimers();
   });
 });
@@ -140,7 +248,7 @@ describe('waitForProvingBlock — custom (IMMEDIATE) depth (Part A / Part C prov
     });
     for (let i = 0; i < 20 && !settled; i++) {
       head += 1;
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(5_000);
     }
     const proveAt = await p;
     // Exits once head - 12 > 100, i.e. head >= 113 → proves at head - 12 (>= lastTx).

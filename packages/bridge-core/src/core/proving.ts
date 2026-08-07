@@ -47,6 +47,34 @@ export const IMMEDIATE_PROVING_BLOCK_DEPTH = 12;
 // node-lag retry) share one delay primitive AND can stub it in tests (vi.mock('./proving')).
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// AGING-WAIT CADENCE (waitForProvingBlock). The wait ends only when the chain
+// produces blocks, so the loop asks a question whose answer changes on the order of
+// the block time while polling far faster than that — most reads are pure waste.
+//
+// Backing off is RISK-FREE here because the exit condition is MONOTONIC: once the
+// head passes `lastTxBlockNumber + depth` it stays past it, so a slower poll can
+// never miss the transition, only observe it slightly later. Keep the first couple
+// of polls tight (the common case is a tx that is all but buried already, settled in
+// one or two reads), then back off to roughly the chain's own block cadence.
+const INITIAL_POLL_INTERVAL_MS = 1_000;
+const BACKOFF_POLL_INTERVAL_MS = 5_000;
+// Polls served at INITIAL_POLL_INTERVAL_MS before the backoff engages.
+const INITIAL_POLLS_BEFORE_BACKOFF = 2;
+
+// Deadline for the aging wait. BOUNDED, so a stalled sequencer or a misconfigured
+// provider surfaces a named error instead of hanging the flow forever behind a spinner
+// (the loop previously had neither an attempt cap nor a deadline) — but sized so it can
+// only fire on a chain that is genuinely stuck, never on one that is merely congested.
+// The worst case is a `lastTxBlockNumber` at the head: the loop exits once the head
+// reaches `lastTxBlockNumber + depth + 1`, i.e. NINE blocks at the default depth of 8.
+// Thirty minutes leaves a ~200s per-block tolerance, two orders of magnitude above
+// Starknet's ~2s block time. Fifteen minutes allowed only ~100s per block, which
+// sustained Starknet congestion has historically exceeded — that would hard-fail a flow
+// the previous unbounded loop would eventually have completed. Matches the Iris
+// attestation poll deadline (DEFAULT_POLL_TIMEOUT_MS, polygonMint.ts), so the two long
+// waits in a bridge give up on the same clock.
+const PROVING_WAIT_TIMEOUT_MS = 30 * 60_000;
+
 // The pool's on-chain proof-freshness reverts (privacy.cairo errors, surfaced through
 // submitAndTrack's REVERTED failure_reason). PROOF_EXPIRED = base aged past the 450-block
 // validity window; INVALID_BASE_BLOCK_NUMBER = base not strictly older than the execution
@@ -91,10 +119,12 @@ export async function getCurrentBlock(provider: RpcProvider): Promise<number> {
 //
 // If the account's last tx (e.g. the deploy/approve) is too recent — i.e. it
 // sits within the last `depth` blocks — the prover/indexer (which read COMMITTED
-// state) may not see it yet at the chosen proving block. Busy-wait ~1s/iter until
-// the last tx is buried at least `depth` blocks deep, then return `latest - depth`.
-// Mirrors the demo's `waitForProvingBlock`. Result is clamped to >= 0 for very
-// young chains.
+// state) may not see it yet at the chosen proving block. Poll until the last tx is
+// buried at least `depth` blocks deep, then return `latest - depth`. The poll starts
+// tight and backs off to roughly the chain's block cadence (see
+// INITIAL_POLL_INTERVAL_MS), and is bounded by PROVING_WAIT_TIMEOUT_MS — a stalled
+// chain throws a named error rather than looping forever. Mirrors the demo's
+// `waitForProvingBlock`. Result is clamped to >= 0 for very young chains.
 //
 // This is the ONLY place the aging wait happens, and it only fires BETWEEN
 // DEPENDENT actions (a recent `lastTxBlockNumber` whose committed state the next
@@ -121,10 +151,22 @@ export async function waitForProvingBlock(
 ): Promise<number> {
   let latestBlock = await getCurrentBlock(provider);
   if (lastTxBlockNumber !== undefined && lastTxBlockNumber >= latestBlock - depth) {
+    const deadline = Date.now() + PROVING_WAIT_TIMEOUT_MS;
+    let polls = 0;
     while (lastTxBlockNumber >= latestBlock - depth) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waitForProvingBlock: timed out after ${Math.round(PROVING_WAIT_TIMEOUT_MS / 60_000)} min ` +
+            `waiting for the last tx (block ${lastTxBlockNumber}) to age ${depth} blocks deep ` +
+            `(chain head is still ${latestBlock}). The Starknet node may be stalled or lagging.`,
+        );
+      }
       const remaining = lastTxBlockNumber - (latestBlock - depth) + 1;
       onStatus?.(`Waiting for blocks to age before proving… (~${remaining} more)`);
-      await sleep(1000);
+      polls += 1;
+      await sleep(
+        polls <= INITIAL_POLLS_BEFORE_BACKOFF ? INITIAL_POLL_INTERVAL_MS : BACKOFF_POLL_INTERVAL_MS,
+      );
       latestBlock = await getCurrentBlock(provider);
     }
   }

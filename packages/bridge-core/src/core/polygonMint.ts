@@ -46,15 +46,33 @@ interface IrisResponse {
   messages?: IrisMessage[];
 }
 
-// Base Iris poll cadence for the STANDARD finality tier (threshold 2000). Standard
-// finality on Polygon can take many minutes, so a tight interval would hammer Iris
-// pointlessly for the whole window — 5s is the right cadence there.
+// Iris poll cadence for the STANDARD finality tier (threshold 2000) once an
+// attestation could plausibly exist — tight enough to pick it up promptly.
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 // Iris poll cadence for the FAST finality tier (threshold 1000). A Fast burn attests
 // in ~10-15s, so the fixed 5s Standard cadence wastes up to ~5s of that window on
 // BOTH the attestation and the forwarded-mint poll. Polling ~3x tighter recovers
 // most of that latency without meaningfully loading Iris (the Fast window is short).
 const FAST_POLL_INTERVAL_MS = 1_500;
+
+// STEPPED STANDARD CADENCE. A Standard-tier burn cannot attest before the source
+// chain reaches hard finality, which takes many minutes. Every poll issued inside
+// that window is GUARANTEED to learn nothing but "not yet", so the tight cadence
+// spends hundreds of Iris GETs establishing a foregone conclusion (the return leg —
+// returnIn.ts, which PINS Standard finality — is the worst offender: it is the
+// slowest path and the one that polls the longest).
+//
+// So poll coarsely while the answer is provably "no", then step down to
+// DEFAULT_POLL_INTERVAL_MS to catch the attestation promptly. Two properties make
+// this latency-safe:
+//   - the window below is deliberately SHORTER than the finality lag, so the tight
+//     cadence is already engaged by the time an attestation can appear;
+//   - the loop's exit condition is monotonic (an attestation, once minted, stays
+//     available forever), so polling less often can never MISS it — the only cost is
+//     at most one coarse interval of added latency, and only if finality lands early.
+// The overall poll deadline (DEFAULT_POLL_TIMEOUT_MS) is unchanged.
+const STANDARD_PREFINALITY_POLL_INTERVAL_MS = 30_000;
+const STANDARD_PREFINALITY_WINDOW_MS = 10 * 60_000;
 // Standard CCTP finality on Polygon can take many minutes; allow up to 30.
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60_000;
 
@@ -97,9 +115,14 @@ interface PollOpts {
   // otherwise the interval is derived from the finality tier via `fast` below.
   intervalMs?: number;
   // Finality tier of the burn, threaded from the caller (fundAccountFromPool /
-  // cashOut already know config.cctp.fast). When no explicit `intervalMs` is given,
-  // Fast polls at FAST_POLL_INTERVAL_MS (~1.5s) and Standard at DEFAULT_POLL_INTERVAL_MS
-  // (5s). Only selects the base cadence — the transient (5xx/429) backoff is unchanged.
+  // cashOut / fundFromMetaMask already know config.cctp.fast). When no explicit
+  // `intervalMs` is given, Fast polls flat at FAST_POLL_INTERVAL_MS (its whole window
+  // is short) while Standard uses the STEPPED cadence above. Only selects the base
+  // cadence — the transient (5xx/429) backoff is unchanged.
+  //
+  // Threading this accurately MATTERS now that Standard steps: a Fast burn left
+  // unmarked would be polled on the Standard schedule and wait out a coarse interval
+  // for an attestation that lands in seconds.
   fast?: boolean;
   timeoutMs?: number;
   backoffBaseMs?: number;
@@ -112,7 +135,8 @@ interface PollOpts {
 
 // Generic Iris poller: GET the same /v2/messages/{sourceDomain}?transactionHash=
 // URL on a loop until `extract` returns a non-null value, retrying 404 (not yet
-// indexed) at the base interval and transient 5xx/429 with exponential backoff +
+// indexed) at the tier's base interval (Fast flat, Standard STEPPED — see
+// STANDARD_PREFINALITY_POLL_INTERVAL_MS) and transient 5xx/429 with exponential backoff +
 // jitter, all bounded by a single deadline. `extract` inspects the first message
 // entry and returns the resolved value (done) or null (keep polling); it may also
 // throw a TERMINAL error to short-circuit. `timeoutLabel` names the throw on
@@ -125,11 +149,6 @@ async function pollIris<T>(
   statusLabel: string,
   timeoutLabel: string,
 ): Promise<T> {
-  // Explicit interval wins; otherwise pick the tier's base cadence (Fast ~1.5s vs
-  // Standard 5s). Only the base poll interval is tier-aware — the transient-error
-  // backoff bounds (base/cap) below are unchanged for both tiers.
-  const intervalMs =
-    opts?.intervalMs ?? (opts?.fast ? FAST_POLL_INTERVAL_MS : DEFAULT_POLL_INTERVAL_MS);
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
   // Clamp the effective backoff base to ≥ 1ms (NIT, B-logic audit): a degenerate
   // `backoffBaseMs: 0` override would make the transient (5xx/429) branch compute
@@ -147,19 +166,33 @@ async function pollIris<T>(
   const base = irisUrl.replace(/\/+$/, '');
   const url = `${base}/v2/messages/${sourceDomain}?transactionHash=${burnTxHash}`;
 
-  const deadline = Date.now() + timeoutMs;
+  const start = Date.now();
+  const deadline = start + timeoutMs;
   let attempt = 0;
   // Number of CONSECUTIVE transient-HTTP responses — drives the backoff
   // exponent. Reset whenever Iris responds non-transiently (ok or 404).
   let transientStreak = 0;
+  // Set once Iris reports the message ATTESTED. From that point the pre-finality
+  // rationale for the coarse Standard cadence no longer holds — whatever the caller
+  // is still waiting for (the Forwarding Service's destination mint) lands in
+  // seconds — so the cadence steps down immediately, however little time has elapsed.
+  let attested = false;
+
+  // Base cadence for the NEXT poll. An explicit `intervalMs` ALWAYS wins (tests
+  // inject a tiny value); Fast is flat; Standard steps from coarse to tight once the
+  // pre-finality window has elapsed or the attestation has been observed.
+  const nextPollInterval = (): number => {
+    if (opts?.intervalMs !== undefined) return opts.intervalMs;
+    if (opts?.fast) return FAST_POLL_INTERVAL_MS;
+    if (attested || Date.now() - start >= STANDARD_PREFINALITY_WINDOW_MS) {
+      return DEFAULT_POLL_INTERVAL_MS;
+    }
+    return STANDARD_PREFINALITY_POLL_INTERVAL_MS;
+  };
+
   for (;;) {
     attempt += 1;
     onStatus?.(`${statusLabel} (attempt ${attempt})…`);
-
-    // Interval to wait before the NEXT poll. Defaults to the base poll interval
-    // (404 / pending / ok-but-not-done); a transient 5xx/429 (or a caught network
-    // error, below) overrides it with an exponential backoff + jitter delay.
-    let waitMs = intervalMs;
 
     // A thrown network error (DNS hiccup, connection reset, CORS preflight
     // failure, Wi-Fi drop) is caught here and classified exactly like a transient
@@ -200,6 +233,9 @@ async function pollIris<T>(
       if (!transient) {
         transientStreak = 0;
         const entry = body!.messages?.[0];
+        // Cadence step-down signal (see `attested` above) — read off the SAME status
+        // field the terminal-status check below uses, so no extra request is needed.
+        if (entry?.status === 'complete') attested = true;
         const resolved = extract(entry);
         if (resolved !== null) return resolved;
         // TERMINAL status: Circle can reject / fail a message that will never
@@ -227,6 +263,12 @@ async function pollIris<T>(
       // Genuine non-retryable HTTP error (400/401/403, …) — throw as before.
       throw new Error(`Iris poll failed: HTTP ${res!.status}`);
     }
+
+    // Interval to wait before the NEXT poll. Resolved HERE, after the response has
+    // been classified, so an attestation seen on THIS poll steps the cadence down
+    // before we sleep on it. A transient 5xx/429 (or a caught network error)
+    // overrides it below with an exponential backoff + jitter delay.
+    let waitMs = nextPollInterval();
 
     if (transient) {
       // Back off exponentially (base · 2^streak, capped) with full jitter and keep

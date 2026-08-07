@@ -695,6 +695,9 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     opts?: { detectAlreadyClaimed?: boolean },
   ): Promise<ReturnBurnResult> => {
     try {
+      // No `fast` knob by design: assertFeeFreeReturn PINS this leg to
+      // STANDARD_FINALITY, so the burn provably cannot attest for many minutes and
+      // the poller's stepped Standard cadence (polygonMint.ts) is exactly right here.
       const { message, attestation } = await waitForAttestation(burnTx, {
         sourceDomain: record.sourceDomain,
         onStatus,

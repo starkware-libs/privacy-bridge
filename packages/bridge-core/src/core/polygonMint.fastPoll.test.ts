@@ -102,7 +102,7 @@ describe('fast-aware poll cadence', () => {
     expect(sleeps).not.toContain(5_000);
   });
 
-  it('Standard tier keeps the 5s cadence (never hammers Iris on the slow tier)', async () => {
+  it('Standard tier never uses the Fast cadence (it must not hammer Iris on the slow tier)', async () => {
     const sleeps: number[] = [];
     fetchMock
       .mockResolvedValueOnce(res(404, { error: 'not found' }))
@@ -117,7 +117,6 @@ describe('fast-aware poll cadence', () => {
     });
 
     expect(result.forwardTxHash).toBe(FORWARD_TX);
-    expect(sleeps).toContain(5_000);
     expect(sleeps).not.toContain(1_500);
   });
 
@@ -156,6 +155,112 @@ describe('fast-aware poll cadence', () => {
     });
 
     expect(sleeps).toContain(1_500);
+  });
+});
+
+describe('stepped Standard cadence (pre-finality window)', () => {
+  // A Standard-tier burn cannot attest until the source chain finalizes, so the
+  // poller opens on a coarse cadence and steps down to 5s once an attestation could
+  // plausibly exist. Driven with fake timers: the injected sleep advances the clock,
+  // which is what the poller measures elapsed time against.
+  const NOT_FOUND = { error: 'not found' };
+
+  // Run a Standard-tier attestation poll that NEVER resolves, collecting every sleep
+  // until the poll deadline throws. The sleep sequence IS the cadence schedule.
+  async function collectStandardCadence(): Promise<number[]> {
+    const sleeps: number[] = [];
+    fetchMock.mockResolvedValue(res(404, NOT_FOUND));
+    await expect(
+      waitForAttestation(BURN_TX, {
+        fast: false,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          vi.advanceTimersByTime(ms);
+        },
+      }),
+    ).rejects.toThrow(/timed out/);
+    return sleeps;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('opens at the coarse 30s cadence instead of polling flat at 5s', async () => {
+    const sleeps = await collectStandardCadence();
+
+    // The whole pre-finality window (10 min) is served at 30s — 20 polls, where the
+    // flat 5s cadence would have spent 120.
+    expect(sleeps.slice(0, 20)).toEqual(Array(20).fill(30_000));
+  });
+
+  it('steps down to the 5s cadence once the pre-finality window has elapsed', async () => {
+    const sleeps = await collectStandardCadence();
+
+    // Poll 21 lands exactly at the 10-min boundary and is already tight.
+    expect(sleeps[20]).toBe(5_000);
+    expect(sleeps.slice(20).every((ms) => ms === 5_000)).toBe(true);
+    // The step is a real reduction in total requests over the 30-min deadline.
+    expect(sleeps.length).toBeLessThan(30 * 60_000 / 5_000);
+  });
+
+  it('keeps the 30-min poll deadline untouched', async () => {
+    const sleeps = await collectStandardCadence();
+
+    // 20 coarse polls (10 min) + the tight remainder must add up to the full window.
+    const totalMs = sleeps.reduce((sum, ms) => sum + ms, 0);
+    expect(totalMs).toBeGreaterThanOrEqual(30 * 60_000 - 5_000);
+    expect(totalMs).toBeLessThanOrEqual(30 * 60_000);
+  });
+
+  it('steps down as soon as Iris reports the message attested, without waiting out the window', async () => {
+    // A resumed fund-out: the attestation is already complete on the first read but
+    // the Forwarding Service has not submitted the mint yet. That remaining wait is
+    // seconds, not minutes, so the coarse cadence must NOT apply to it.
+    const sleeps: number[] = [];
+    fetchMock
+      .mockResolvedValueOnce(
+        res(200, { messages: [{ status: 'complete', message: MESSAGE, attestation: ATTESTATION }] }),
+      )
+      .mockResolvedValue(
+        res(200, {
+          messages: [{ status: 'complete', message: '', attestation: '', forwardTxHash: FORWARD_TX }],
+        }),
+      );
+
+    const result = await waitForBridgedMint(BURN_TX, {
+      fast: false,
+      expectedMintRecipient: EXPECTED_RECIPIENT,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        vi.advanceTimersByTime(ms);
+      },
+    });
+
+    expect(result.forwardTxHash).toBe(FORWARD_TX);
+    expect(sleeps).toEqual([5_000]);
+  });
+
+  it('does NOT step the Fast tier — it stays flat at the tight cadence', async () => {
+    const sleeps: number[] = [];
+    fetchMock.mockResolvedValue(res(404, NOT_FOUND));
+
+    await expect(
+      waitForAttestation(BURN_TX, {
+        fast: true,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          vi.advanceTimersByTime(ms);
+        },
+      }),
+    ).rejects.toThrow(/timed out/);
+
+    expect(sleeps.every((ms) => ms === 1_500)).toBe(true);
+    expect(sleeps).not.toContain(30_000);
   });
 });
 

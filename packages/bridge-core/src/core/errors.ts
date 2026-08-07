@@ -32,8 +32,14 @@
 // Circle serves those mid-attestation, so they are RESUMABLE (the burn is
 // replayable by burnTxHash), never terminal (defense-in-depth for auto-resume —
 // pollIris already retries them in-loop).
+// `waitForProvingBlock: timed out` is the aging-wait DEADLINE (proving.ts): the chain
+// head failed to advance the nine blocks the proof anchor needs within the window —
+// a STALLED OR LAGGING NODE, not a rejected operation. It throws BEFORE anything is
+// proven or submitted, so no funds have moved and a retry is a clean replay of the
+// same step (by which time the head has usually advanced). That is exactly the
+// pre-submit replayable class the orchestrator's step-retry loop exists for.
 const TRANSIENT_RE =
-  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network error|fetch failed|failed to fetch|empty body \(expected JSON\)|was not valid JSON|\b(429|50[234])\b|temporarily unavailable|rate limit/i;
+  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|waitForProvingBlock: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network error|fetch failed|failed to fetch|empty body \(expected JSON\)|was not valid JSON|\b(429|50[234])\b|temporarily unavailable|rate limit/i;
 
 // A handful of unambiguously TERMINAL markers that must NEVER be retried even
 // if some transient keyword happens to appear in the same message.

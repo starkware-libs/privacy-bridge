@@ -28,6 +28,20 @@ describe('isTransientError', () => {
     });
   });
 
+  describe('proving-block aging-wait deadline timeout is TRANSIENT', () => {
+    it('classifies the waitForProvingBlock deadline timeout as transient (stalled node → replayable)', () => {
+      // The EXACT message proving.ts throws. It fires BEFORE anything is proven or
+      // submitted — the chain head merely failed to advance the nine blocks the
+      // anchor needs — so the step is a clean replay, not a terminal failure.
+      expect(
+        isTransientError(
+          'waitForProvingBlock: timed out after 30 min waiting for the last tx (block 100) to ' +
+            'age 8 blocks deep (chain head is still 105). The Starknet node may be stalled or lagging.',
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('anchored HTTP status codes (FIX 3)', () => {
     it('classifies a live Iris 5xx poll error as transient', () => {
       expect(isTransientError('Iris attestation poll failed: HTTP 503')).toBe(true);
