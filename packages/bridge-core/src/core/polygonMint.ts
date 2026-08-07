@@ -51,6 +51,12 @@ export interface CctpMessageMatch {
   expectedSourceDomain: number;
   expectedDestinationDomain: number;
   expectedRecipient: string;
+  // Exact BurnMessageV2 hookData the burn carried (0x-hex, lowercased on compare).
+  // Required where domains + recipient cannot tell same-recipient burns apart — every
+  // return burn mints to the SHARED inbound anonymizer, so only the burn-bound
+  // commitment in hookData is unique per return. Absent/short/mismatched hookData
+  // fails the match (our hook burns always carry it).
+  expectedHookData?: `0x${string}`;
 }
 
 // Whether the entry carries a body we can decode at all. An UNDECODABLE body cannot be
@@ -600,6 +606,8 @@ const EVM_ADDR_LEN = 20;
 // actually deducted. minted = amount − feeExecuted (see decodeCctpMintedAmount).
 const OFF_BODY_AMOUNT = MSG_HEADER_LEN + 68;
 const OFF_BODY_FEE_EXECUTED = MSG_HEADER_LEN + 164;
+// hookData is the dynamic tail of BurnMessageV2 (body offset +228 to end).
+const OFF_BODY_HOOK_DATA = MSG_HEADER_LEN + 228;
 const U256_LEN = 32;
 
 // Extract the 32-byte nonce from a CCTP v2 message header (bytes 12–44).
@@ -696,6 +704,16 @@ export function decodeCctpMessage(message: `0x${string}`): DecodedCctpMessage {
   return { sourceDomain, destinationDomain, mintRecipient, mintRecipientFull };
 }
 
+// The BurnMessageV2 hookData tail, lowercased 0x-hex ('0x' = present-but-empty).
+// null when the message is non-hex or too short to reach the hookData offset —
+// i.e. nothing attributable to compare against.
+export function decodeCctpHookData(message: `0x${string}`): `0x${string}` | null {
+  const hex = message.startsWith('0x') ? message.slice(2) : message;
+  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) return null;
+  if (hex.length / 2 < OFF_BODY_HOOK_DATA) return null;
+  return `0x${hex.slice(OFF_BODY_HOOK_DATA * 2).toLowerCase()}`;
+}
+
 // Normalize an expected mint recipient (EVM-20 or Starknet felt-32) to the
 // matching decoded field for comparison. Returns the lowercased hex body (no
 // 0x) plus which decoded field to compare against:
@@ -725,14 +743,7 @@ function normalizeExpectedRecipient(expected: string): { hex: string; full: bool
 //     = the derived SN account (a felt → compared on the full 32-byte field).
 // `expectedRecipient` is compared case-insensitively; an EVM-20 value matches
 // the decoded 20-byte recipient, a longer (felt) value the full 32-byte field.
-export function assertCctpMessageMatches(
-  message: `0x${string}`,
-  opts: {
-    expectedSourceDomain: number;
-    expectedDestinationDomain: number;
-    expectedRecipient: string;
-  },
-): void {
+export function assertCctpMessageMatches(message: `0x${string}`, opts: CctpMessageMatch): void {
   const decoded = decodeCctpMessage(message);
   const { hex, full } = normalizeExpectedRecipient(opts.expectedRecipient);
   const actual = (full ? decoded.mintRecipientFull : decoded.mintRecipient).slice(2);
@@ -744,6 +755,15 @@ export function assertCctpMessageMatches(
     throw new Error(
       'CCTP message recipient/domain mismatch — refusing to submit (possible attestation tampering).',
     );
+  }
+  // Deliberately NOT the terminal 'recipient/domain mismatch' wording: in a selector
+  // context this only means "a batch-mate's burn to the same recipient", which must
+  // stay resumable — never clear a cursor over it.
+  if (opts.expectedHookData !== undefined) {
+    const hookData = decodeCctpHookData(message);
+    if (hookData !== opts.expectedHookData.toLowerCase()) {
+      throw new Error('CCTP message hookData does not match the expected commitment.');
+    }
   }
 }
 

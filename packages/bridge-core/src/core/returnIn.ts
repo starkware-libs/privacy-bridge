@@ -79,12 +79,19 @@ import {
 
 // Identifies OUR return message in an Iris response. The return burn is submitted by
 // the builder relayer, which batches several users' ops into ONE transaction, so the
-// response can hold strangers' CCTP messages.
-function returnMessageMatch(sourceDomain: number, inboundAnonymizer?: string): CctpMessageMatch {
+// response can hold strangers' CCTP messages — including OTHER RETURNS, which share our
+// domains AND our mintRecipient (the one inbound anonymizer). Only the burn-bound
+// commitment in hookData is unique per return, so it is the required discriminator.
+function returnMessageMatch(
+  sourceDomain: number,
+  inboundAnonymizer: string | undefined,
+  commitment: string,
+): CctpMessageMatch {
   return {
     expectedSourceDomain: sourceDomain,
     expectedDestinationDomain: config.cctp.starknetDomain,
     expectedRecipient: snAddressToBytes32(inboundAnonymizer ?? config.inboundAnonymizerAddress),
+    expectedHookData: encodeCommitmentHookData(BigInt(commitment)),
   };
 }
 
@@ -717,7 +724,7 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     try {
       const { message, attestation } = await waitForAttestation(burnTx, {
         sourceDomain: record.sourceDomain,
-        match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer),
+        match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer, record.commitment),
         onStatus,
       });
       // Resume-only: the folded claim (mint INSIDE it) may already have landed on a
@@ -1489,7 +1496,7 @@ export async function recoverBridgeIn(args: RecoverBridgeInArgs): Promise<Recove
   try {
     ({ message, attestation } = await waitForAttestation(record.burnTx, {
       sourceDomain: record.sourceDomain,
-      match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer),
+      match: returnMessageMatch(record.sourceDomain, record.inboundAnonymizer, record.commitment),
       onStatus,
     }));
   } catch (err) {
