@@ -79,8 +79,12 @@ public packages, so a plain `pnpm install` needs a token in your **user-level** 
 deliberately does not expand `${ENV}` in credential lines from a committed `.npmrc`. One-time setup:
 
 ```
-npm config set "//npm.pkg.github.com/:_authToken" "$(gh auth token)"
+echo "//npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN" >> ~/.npmrc
 ```
+
+The token needs the **`read:packages`** scope. `gh auth token` supplies it only if the CLI was
+granted that scope — the default login is not, and the SDK tarball 403s until you run
+`gh auth refresh -s read:packages`.
 
 CI writes the same line from `secrets.GITHUB_TOKEN`. See `.npmrc` for the full note.
 
