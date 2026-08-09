@@ -47,8 +47,8 @@ export interface StarknetPayoutArgs {
 }
 
 // The stages a UI renders for a Starknet payout. There is no attest or mint leg — the
-// pool pays the recipient in the SAME transaction — so the proof and its submission are
-// the only phases worth showing.
+// pool pays the recipient in the SAME transaction — so this is the whole flow: prove it,
+// hand it to the relay, wait for the chain.
 export type StarknetPayoutStep = ProvenPoolActionPhase;
 export type StarknetPayoutStepStatus = 'running' | 'done';
 
@@ -229,12 +229,18 @@ async function runStarknetPayout(
     // above and then fails at proof-build. Re-check once the real fee is known, still
     // before any proving.
     onPoolFee: assertAffordable,
-    // 'prove' completes when 'submit' begins; 'submit' completes below, once the tx is
-    // tracked — never on submission alone.
+    // Each phase completes as the next begins; the last one completes below, once the tx
+    // is tracked — never on submission alone.
     onPhase: (phase) => {
       if (phase === 'submit') onStep?.('prove', 'done');
+      if (phase === 'confirm') onStep?.('submit', 'done');
       onStep?.(phase, 'running');
     },
+    // The pool is the only consumer of this action, and note discovery, balances and
+    // deployment checks all read at `pre_confirmed` — so the recipient's note is
+    // spendable as soon as the tx is pre-confirmed. Waiting for L2 (as the CCTP paths
+    // must, for Circle's attestation) is most of the wall-clock for no one's benefit.
+    until: 'PRE_CONFIRMED',
     label: kind === 'withdraw' ? 'withdrawal' : 'private transfer',
     // No InvokeExternal: the pool pays the recipient directly. Note selection and the
     // change note are handled by autoSelectNotes + surplusTo; a first-time private
@@ -245,7 +251,7 @@ async function runStarknetPayout(
     },
   });
 
-  if (confirmed) onStep?.('submit', 'done');
+  if (confirmed) onStep?.('confirm', 'done');
   return { txHash, recipient, amount, confirmed };
 }
 
