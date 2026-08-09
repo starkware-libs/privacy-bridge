@@ -67,6 +67,16 @@ export interface ProvenPoolActionArgs {
 // and proving it, then submitting and tracking it.
 export type ProvenPoolActionPhase = 'prove' | 'submit';
 
+// A caller's pre-prove refusal, raised from `onPoolFee`. Deterministic local
+// arithmetic: a rebuild re-runs it to the same answer, so the retry path rethrows this
+// untouched instead of reporting a submit failure and burning another paymaster build.
+export class PoolActionRefused extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'PoolActionRefused';
+  }
+}
+
 export interface ProvenPoolActionResult {
   txHash: string;
   // False when the tx was submitted but submitAndTrack timed out before
@@ -211,7 +221,15 @@ export async function proveAndSubmitPoolAction(
         feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
       }
     }
-    onPoolFee?.(feeWithdraw?.amount ?? 0n);
+    if (onPoolFee) {
+      try {
+        onPoolFee(feeWithdraw?.amount ?? 0n);
+      } catch (err) {
+        throw new PoolActionRefused(err instanceof Error ? err.message : String(err), {
+          cause: err,
+        });
+      }
+    }
 
     // Resolve the proving block + build+prove. The stale-nonce submit retry re-enters here;
     // once resolvedProvingBlock is pinned it rebuilds at the SAME block (no re-age).
@@ -299,6 +317,10 @@ export async function proveAndSubmitPoolAction(
     // in-flight action (it reverted atomically) — let it propagate so the caller writes no
     // resume state for something that never happened.
     if (txHash && !isRevertedOrRejected(err)) return { txHash, confirmed: false };
+    // A caller's refusal is settled arithmetic, not a transient — retrying would re-run
+    // the paymaster build only to reach the same answer, behind a misleading
+    // "Submit failed … retrying" line.
+    if (err instanceof PoolActionRefused) throw err;
     // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
     // same-anchor re-prove would just node-lag again.
     if (isNodeLagError(err)) throw err;

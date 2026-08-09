@@ -516,6 +516,10 @@ describe('sendPrivateToStarknet — AVNU paymaster path (fee baked into the proo
     ).rejects.toThrow(/not enough for this transfer plus the .* privacy fee/);
     expect(transfers.executeWithInvocation).not.toHaveBeenCalled();
     expect(mSubmitAndTrack).not.toHaveBeenCalled();
+    // Settled arithmetic — the rebuild retry must not re-run the paymaster build or
+    // invalidate the proof-nonce cache behind a misleading "submit failed" line.
+    expect(avnuBuild).toHaveBeenCalledOnce();
+    expect(transfers.invalidateProofNonceCache).not.toHaveBeenCalled();
   });
 
   it('allows a send that leaves room for the baked fee', async () => {
