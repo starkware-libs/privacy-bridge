@@ -47,6 +47,18 @@ const ALREADY_REGISTERED_REVERT = 'NON_ZERO_VALUE';
 // "not registered" so the caller falls through to a real register attempt
 // (which is itself guarded against the write-once revert).
 export async function isRegistered(address: string): Promise<boolean> {
+  return (await readPoolRegistration(address)) === 'registered';
+}
+
+// 'unknown' = the read itself failed, which is NOT the same as "not registered".
+export type PoolRegistration = 'registered' | 'unregistered' | 'unknown';
+
+// Registration state of any address, distinguishing an unregistered account from an
+// unreadable answer. Callers that turn this into a user-facing refusal need that
+// distinction — telling someone their recipient isn't on the pool when the RPC merely
+// failed sends them chasing the wrong problem. `isRegistered` folds both into false,
+// which is the right default for the idempotent register step but not for a gate.
+export async function readPoolRegistration(address: string): Promise<PoolRegistration> {
   try {
     const result = await getRpcProvider().callContract({
       contractAddress: config.poolAddress,
@@ -54,9 +66,9 @@ export async function isRegistered(address: string): Promise<boolean> {
       calldata: [address],
     });
     const publicKey = result[0];
-    return publicKey !== undefined && BigInt(publicKey) !== 0n;
+    return publicKey !== undefined && BigInt(publicKey) !== 0n ? 'registered' : 'unregistered';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 

@@ -15,6 +15,8 @@ Value flows (see the `src/api.ts` header and `packages/bridge-core/README.md`):
 - `fundAccountFromPool` — pool → a derived per-account Polygon EOA (burn → attest → mint), the BUY path.
 - `returnToPool` — deposit wallet → pool via CCTP burn-with-hook (the inbound/RETURN path).
 - `cashOut` — pool → the user's own EVM wallet.
+- `withdrawToStarknet` / `sendPrivateToStarknet` — pool → a Starknet address, or → another pool
+  identity with the value staying inside the pool. One proven `apply_actions`, no CCTP leg.
 
 Bridging uses **Circle CCTP V2** (cross-chain USDC burn/mint + attestation). The RETURN path is
 built on the pool's `privacy_compute` / `ComputeAndInvoke` mechanism, in a **single transaction**:
