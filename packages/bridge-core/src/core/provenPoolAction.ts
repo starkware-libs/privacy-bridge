@@ -57,6 +57,10 @@ export interface ProvenPoolActionArgs {
   // status line. A rebuild retry re-fires 'prove' — a tracker should read that as the
   // phase being live again, not as a new phase.
   onPhase?: (phase: ProvenPoolActionPhase) => void;
+  // Fires with the pool fee that will be baked into the proof (0 when none is), before
+  // anything is built. Throwing here aborts the action pre-prove — the seam for a caller
+  // whose affordability check can only be settled once the fee is known.
+  onPoolFee?: (poolFeeRaw: bigint) => void;
 }
 
 // The two phases of a proven pool action a UI can meaningfully distinguish: building
@@ -78,8 +82,18 @@ export interface ProvenPoolActionResult {
 export async function proveAndSubmitPoolAction(
   opts: ProvenPoolActionArgs,
 ): Promise<ProvenPoolActionResult> {
-  const { transfers, account, provider, viewingKey, label, tokenOps, invoke, onStatus, onPhase } =
-    opts;
+  const {
+    transfers,
+    account,
+    provider,
+    viewingKey,
+    label,
+    tokenOps,
+    invoke,
+    onStatus,
+    onPhase,
+    onPoolFee,
+  } = opts;
 
   // Proving anchor — a from-pool action PROVES BY SPENDING A PRE-EXISTING POOL NOTE, so the
   // proof MUST age past whatever committed that note. Crucially, that note can be from THIS
@@ -197,6 +211,7 @@ export async function proveAndSubmitPoolAction(
         feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
       }
     }
+    onPoolFee?.(feeWithdraw?.amount ?? 0n);
 
     // Resolve the proving block + build+prove. The stale-nonce submit retry re-enters here;
     // once resolvedProvingBlock is pinned it rebuilds at the SAME block (no re-age).

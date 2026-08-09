@@ -23,6 +23,7 @@ import {
 } from '../derivation/index';
 import { config } from './config';
 import { getRpcProvider, makeAccount } from './provider';
+import { isDeployed } from './deploy';
 import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
 import { discoverPrivateBalance, formatUsdcCents } from './discover';
 import { readPoolRegistration } from './register';
@@ -103,17 +104,14 @@ export function normalizeStarknetRecipient(recipient: string): string {
 // node must not be reported as an unreachable recipient (and must not wave one through).
 export type RecipientDeployment = 'deployed' | 'undeployed' | 'unknown';
 
-// Starknet RPC's "there is no contract at this address" error. Anything else is a
-// failure to look, not an answer.
-const CONTRACT_NOT_FOUND_RE = /contract not found|20:\s*contract not found/i;
-
+// `isDeployed` owns the definitive CONTRACT_NOT_FOUND classification (RpcError type,
+// code 20, or the canonical message) and RE-THROWS anything ambiguous, so the only
+// thing to add here is naming that ambiguity rather than letting it propagate.
 export async function readRecipientDeployment(address: string): Promise<RecipientDeployment> {
   try {
-    const classHash = await getRpcProvider().getClassHashAt(address);
-    return classHash && BigInt(classHash) !== 0n ? 'deployed' : 'undeployed';
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return CONTRACT_NOT_FOUND_RE.test(message) ? 'undeployed' : 'unknown';
+    return (await isDeployed(address)) ? 'deployed' : 'undeployed';
+  } catch {
+    return 'unknown';
   }
 }
 
@@ -199,14 +197,18 @@ async function runStarknetPayout(
     feeAmountPromise ?? Promise.resolve(0n),
     discoverPrivateBalance({ account, viewingKey }),
   ]);
-  if (poolBalance < amount) {
+  const action = kind === 'transfer' ? 'transfer' : 'withdrawal';
+  const assertAffordable = (poolFeeRaw: bigint): void => {
+    if (poolBalance >= amount + poolFeeRaw) return;
+    const balance = `${formatUsdcCents(poolBalance, config.depositToken.decimals)} ${config.depositToken.symbol}`;
     throw new Error(
-      `Your private balance is ${formatUsdcCents(poolBalance, config.depositToken.decimals)} ` +
-        `${config.depositToken.symbol} — not enough for this ${
-          kind === 'transfer' ? 'transfer' : 'withdrawal'
-        }.`,
+      poolFeeRaw > 0n
+        ? `Your private balance is ${balance} — not enough for this ${action} plus the ` +
+            `${formatUsdcCents(poolFeeRaw, config.depositToken.decimals)} ${config.depositToken.symbol} privacy fee.`
+        : `Your private balance is ${balance} — not enough for this ${action}.`,
     );
-  }
+  };
+  assertAffordable(0n);
 
   // STRK protocol fee: the MANAGER approves it up front (manager-paid submit).
   let lastTxBlockNumber: number | undefined;
@@ -222,6 +224,11 @@ async function runStarknetPayout(
     viewingKey,
     lastTxBlockNumber,
     onStatus,
+    // Under the AVNU paymaster the pool fee is a withdraw baked into the SAME proof,
+    // drawn from the same notes — so a send of the whole balance clears the pre-flight
+    // above and then fails at proof-build. Re-check once the real fee is known, still
+    // before any proving.
+    onPoolFee: assertAffordable,
     // 'prove' completes when 'submit' begins; 'submit' completes below, once the tx is
     // tracked — never on submission alone.
     onPhase: (phase) => {

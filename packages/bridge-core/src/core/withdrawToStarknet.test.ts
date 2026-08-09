@@ -501,6 +501,34 @@ describe('sendPrivateToStarknet — AVNU paymaster path (fee baked into the proo
     expect(result.txHash).toBe(TX_HASH);
   });
 
+  // The baked fee is a withdraw from the SAME notes, so a send of the whole balance
+  // clears an amount-only pre-flight and then fails at proof-build. The affordability
+  // check re-runs once the real fee is known, still before anything is proven.
+  it('refuses a whole-balance send once the baked fee is known, before proving', async () => {
+    discoverPrivateBalance.mockResolvedValue(10_000_000n); // 10 USDC
+
+    await expect(
+      sendPrivateToStarknet({
+        resolveSignature,
+        amount: 10_000_000n, // the entire balance — leaves nothing for the fee
+        recipient: RECIPIENT,
+      }),
+    ).rejects.toThrow(/not enough for this transfer plus the .* privacy fee/);
+    expect(transfers.executeWithInvocation).not.toHaveBeenCalled();
+    expect(mSubmitAndTrack).not.toHaveBeenCalled();
+  });
+
+  it('allows a send that leaves room for the baked fee', async () => {
+    discoverPrivateBalance.mockResolvedValue(10_000_000n);
+
+    const result = await sendPrivateToStarknet({
+      resolveSignature,
+      amount: 9_000_000n,
+      recipient: RECIPIENT,
+    });
+    expect(result.txHash).toBe(TX_HASH);
+  });
+
   it('skips the pool-fee read entirely — the fee rides in the proof', async () => {
     await sendPrivateToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT });
     expect(fetchPoolFeeAmount).not.toHaveBeenCalled();
