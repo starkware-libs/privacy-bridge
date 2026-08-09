@@ -37,18 +37,15 @@
 // or the raw signature. (The old H/claim_secret module — claim-commitment.ts — is
 // UNUSED by this flow now; it stays for the record but nothing here imports it.)
 
-import type { Account, Call, constants } from 'starknet';
-import {
-  createPrivateTransfers,
-  IndexerDiscoveryProvider,
-  Open,
-} from '@starkware-libs/starknet-privacy-sdk';
+import type { Account, Call } from 'starknet';
+import { Open } from '@starkware-libs/starknet-privacy-sdk';
 import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
   RETURN_DAPP_NAME,
 } from '../derivation/index';
+import { makePoolTransfers } from './poolClient';
 import { config } from './config';
 import { encodeCctpBytes } from './cctpBytes';
 import { assertReturnCctpMessage } from './snMint';
@@ -218,17 +215,7 @@ export async function buildAndProveClaim(args: ClaimToPoolArgs): Promise<ProvenC
     feeApproveBlock = await approvePoolFee(feeAmount);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   // Proving anchor — parity with proveAndSubmitBridgeOut (bridgeOut.ts). MANAGER path
   // with a non-zero fee: the fee-approve block is a FRESH tx the claim's proof must

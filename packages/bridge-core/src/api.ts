@@ -15,6 +15,10 @@
  *   deriveAccountWallet    — derive fresh per-account Polygon EOA
  *   fundAccountFromPool    — withdraw from pool → CCTP burn → Polygon EOA (BUY path steps 1-2)
  *   returnToPool           — CCTP burn Polygon → pool (return path)
+ *
+ * Starknet-native exits (one proven tx, no CCTP):
+ *   withdrawToStarknet     — pool → a Starknet address
+ *   sendPrivateToStarknet  — pool → another pool identity, value never leaves the pool
  */
 
 // Re-export the underlying engines so callers can also access low-level types/fns.
@@ -30,6 +34,7 @@ export * from './core/poolFee';
 export * from './core/residual';
 export * from './core/bridgeTransferStatus';
 export * from './core/bridgeOut';
+export * from './core/withdrawToStarknet';
 export * from './core/bridgeBack';
 export * from './core/unclaimedReturns';
 export * from './core/bridgeFunding';

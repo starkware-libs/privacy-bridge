@@ -21,6 +21,8 @@ Two entry points only (`exports` map = `{".", "./react"}` — no deep imports):
 | `fundAccountFromPool(args: FundAccountFromPoolArgs)` | pool → derived per-account Polygon EOA (burn → attest → mint) |
 | `cashOut(args: CashOutArgs)` | pool → user's own EVM wallet |
 | `returnToPool(args: ReturnToPoolArgs)` | deposit wallet → pool (burn → claim → poke) |
+| `withdrawToStarknet(args: StarknetPayoutArgs)` | pool → any Starknet address (one proven tx, no CCTP) |
+| `sendPrivateToStarknet(args: StarknetPayoutArgs)` | pool → another pool identity; the value never leaves the pool |
 
 Plus the lower-level building blocks these compose (`registerWithPool`, `depositToPool`,
 `ensureAccountDeployed`, `bridgeOut`/`bridgeOutToWallet`, `returnBurnToPool`/`claimToPool`,

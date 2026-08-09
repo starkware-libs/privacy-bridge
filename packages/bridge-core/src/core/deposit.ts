@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import type { Account, Call, constants } from 'starknet';
-import {
-  createPrivateTransfers,
-  IndexerDiscoveryProvider,
-  type PrivateTransfersInterface,
-} from '@starkware-libs/starknet-privacy-sdk';
+import type { Account, Call } from 'starknet';
+import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
+import { makePoolTransfers } from './poolClient';
 import { config } from './config';
 import { formatUsdcCents } from './discover';
 import { getRpcProvider, makeAccount } from './provider';
@@ -297,23 +294,6 @@ async function approvePoolSpend(
   return waitForBlockNumber(provider, transaction_hash);
 }
 
-// The pool-deposit PrivateTransfers client (SDK proof builder + indexer discovery) —
-// shared by depositToPool and the prove-ahead path so both wire it identically (same
-// prover, chain, indexer, pool). Kept in one place so a wiring change can't drift between
-// the two entry points.
-function makeDepositTransfers(account: Account, viewingKey: bigint): PrivateTransfersInterface {
-  return createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider: new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress),
-    poolContractAddress: config.poolAddress,
-  });
-}
-
 // Convert an AVNU paymaster `fee_action` into the deposit-token fee withdraw to bake into
 // the proof, or undefined for a zero/absent fee. Shared by the inline submit (attempt)
 // and the prove-ahead path. sponsored_private pays the fee in pool_fee_token (→ the
@@ -432,7 +412,7 @@ export async function buildDepositProofAhead(args: {
   onStatus?.('Selecting proving block…');
   const provingBlockId = await waitForProvingBlock(provider, anchor, onStatus, provingDepth);
 
-  const transfers = makeDepositTransfers(account, viewingKey);
+  const transfers = makePoolTransfers(account, viewingKey);
 
   const { call, proofDetails } = await proveDepositAt(transfers, {
     depositorAddress: account.address,
@@ -507,7 +487,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     lastTxBlockNumber = await approvePoolSpend(account, approveCall);
   }
 
-  const transfers = makeDepositTransfers(account, viewingKey);
+  const transfers = makePoolTransfers(account, viewingKey);
 
   await proveAndSubmitDeposit(
     transfers,

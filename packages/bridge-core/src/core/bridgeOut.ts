@@ -16,12 +16,8 @@
 // In-memory only — never log/persist the viewing key, claim_secret, account_nonce,
 // or the per-account Polygon EOA private key.
 
-import type { Account, Call, constants } from 'starknet';
-import {
-  createPrivateTransfers,
-  IndexerDiscoveryProvider,
-  type PrivateTransfersInterface,
-} from '@starkware-libs/starknet-privacy-sdk';
+import type { Account } from 'starknet';
+import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
 import {
   computeClaimH,
   deriveClaimSecret,
@@ -44,28 +40,15 @@ export type ResolveDepositWalletFn = (
   accountIndex: number,
   channel?: string,
 ) => Promise<string>;
+import { makePoolTransfers } from './poolClient';
 import { config, resolveEvmCctpDestination } from './config';
 import { u256Calldata } from './deposit';
 import { getRpcProvider, makeAccount } from './provider';
-import { isRevertedOrRejected, sanitizeErrorMessage, submitAndTrack } from './tx';
-import { humanizeFinality } from './errorMessages';
+import { sanitizeErrorMessage } from './tx';
 import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
 import { discoverPrivateBalance } from './discover';
 import { assertStorageWritable } from './storageProbe';
-import {
-  submitProvenCall,
-  paymasterBuildLeg,
-  paymasterExecuteLeg,
-  type PaymasterBuildCtx,
-} from './proven-submit';
-import {
-  waitForProvingBlock,
-  getCurrentBlock,
-  isNodeLagError,
-  PROVING_BLOCK_DEPTH,
-} from './proving';
-import { submitReusingProofOnNodeLag } from './nodeLagRetry';
-import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
+import { proveAndSubmitPoolAction } from './provenPoolAction';
 import { deriveAccountNonce } from '../derivation/index';
 import { isTerminalAttestFailure, waitForBridgedMint } from './polygonMint';
 import {
@@ -277,17 +260,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
     lastTxBlockNumber = await approvePoolFee(feeAmount);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   const burnTxHash = await proveAndSubmitBridgeOut({
     transfers,
@@ -982,17 +955,7 @@ export async function bridgeOutToWallet(
     lastTxBlockNumber = await approvePoolFee(feeAmount);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   const burnTxHash = await proveAndSubmitBridgeOut({
     transfers,
@@ -1346,27 +1309,13 @@ export async function cashOut(args: CashOutArgs): Promise<CashOutResult> {
   return { burnTxHash, destination: dest, forwardTxHash, amountNet };
 }
 
-// A post-send throw from submitAndTrack means send() already put the burn tx on
-// Starknet, so it is genuinely IN-FLIGHT (Iris can poll its hash) — UNLESS the
-// throw is a DEFINITIVE on-chain failure: an execution REVERT or a REJECTED
-// finality. A reverted withdraw+burn reverts ATOMICALLY — no CCTP burn happens
-// and the funds stay in the pool — so returning that hash as a successful burn
-// would make fundAccountFromPool consume the index + persist a resume cursor for
-// a burn that never occurred: the account is bricked (the index is spent, the
-// resume path always skips the burn, and attest polls a non-existent burn to a
-// 30-min timeout that reads as "resumable"). So only a NON-revert/reject post-send
-// throw (a tracking timeout) is returnable; a REVERTED/REJECTED propagates as a
-// fresh-path terminal error and NO cursor is written. isRevertedOrRejected
-// (core/tx.ts) matches submitAndTrack's literal REVERTED/REJECTED words — shared
-// with bridgeBack.ts's + deposit.ts's identical guards.
-
 interface ProveAndSubmitArgs {
   transfers: PrivateTransfersInterface;
   account: Account;
   provider: ReturnType<typeof getRpcProvider>;
   anonymizer: string;
-  // Viewing key — read-only capability used ONLY by the prove-early quiescence gate
-  // to discover the account's note-id set at two blocks (never logged/persisted).
+  // Read-only capability used ONLY by the prove-early quiescence gate (never logged
+  // or persisted).
   viewingKey: bigint;
   amount: bigint;
   mintRecipient: bigint;
@@ -1379,10 +1328,16 @@ interface ProveAndSubmitArgs {
   onStatus?: (s: string) => void;
 }
 
-// Build the withdraw+invoke action, prove it against an aged block, and submit.
-// On a submit failure (commonly a stale cached pool nonce), invalidate the SDK's
-// proof-nonce cache and rebuild/re-prove once. Mirrors deposit.ts/register.ts.
-// Returns the submitted burn tx hash.
+// Withdraw to the Anonymizer + ONE InvokeExternal -> Anonymizer.privacy_invoke(Buy),
+// proven and submitted via the shared pool-action prover. Returns the burn tx hash.
+//
+// A post-send throw from submitAndTrack means send() already put the burn tx on
+// Starknet, so it is genuinely IN-FLIGHT (Iris can poll its hash) — UNLESS the throw
+// is a DEFINITIVE on-chain failure (REVERTED / REJECTED), in which case the
+// withdraw+burn reverted ATOMICALLY: no CCTP burn happened and the funds stayed in
+// the pool. Returning that hash as a successful burn would make fundAccountFromPool
+// consume the account index + persist a resume cursor for a burn that never occurred,
+// bricking the account. proveAndSubmitPoolAction owns that distinction.
 async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string> {
   const {
     transfers,
@@ -1395,297 +1350,41 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     maxFee,
     minFinalityThreshold,
     destDomain,
+    lastTxBlockNumber,
     onStatus,
   } = opts;
-  // Proving anchor — a from-pool withdraw PROVES BY SPENDING A PRE-EXISTING POOL NOTE, so
-  // the proof MUST age past whatever committed that note. Crucially, that note can be from
-  // THIS session: a user who ran Move Into Pool and then Move From Pool within
-  // ~PROVING_BLOCK_DEPTH blocks (~a few seconds) has a freshly-deposited note not yet buried
-  // in the tree. If we prove at `latest − depth` WITHOUT aging, the base block can predate
-  // that note's commitment → the pool `apply_actions` reverts on-chain (a failed first
-  // attempt until the chain advances). So we ALWAYS seed an anchor and age
-  // PROVING_BLOCK_DEPTH (=8) past it, on BOTH paths.
-  //
-  // MANAGER path: opts.lastTxBlockNumber is the manager's STRK fee-approve block committed
-  // THIS run — which is ≥ any earlier same-session deposit, so aging past it buries the
-  // deposit too. Seed from it.
-  //
-  // AVNU-PAYMASTER path: opts.lastTxBlockNumber is undefined (approvePoolFee is a NO-OP
-  // under a paymaster — poolFee.ts:39 — because the pool fee is BAKED INTO THE PROOF as a
-  // withdraw to the AVNU forwarder, NOT a separate on-chain approve). With no fee-approve tx
-  // to seed from, seed the anchor from the CURRENT HEAD: aging PROVING_BLOCK_DEPTH past the
-  // live head guarantees the base includes everything committed before the withdraw started,
-  // including a same-session deposit.
-  //
-  // Follow-up (deferred): a faster safe path would thread the caller's freshest COMMITTED
-  // pool-deposit block into this leg (the established paymaster-aging pattern — see the
-  // "Every proof-carrying leg needs a proving-block AGING ANCHOR … thread the caller's
-  // freshest committed dependency" lesson in .claude/rules/code-style.md), so a withdraw
-  // that spends only OLD, already-buried notes needn't wait the full window.
-  //
-  // Captured ONCE — a failed submit commits no new block. The anchor is reused verbatim by
-  // the one-shot rebuild retry (never re-anchored to a newer head, which would force a fresh
-  // full aging wait for nothing).
-  const anchor = opts.lastTxBlockNumber ?? (await getCurrentBlock(provider));
-
-  // AVNU-relay-in-flight flag (mirrors deposit.ts). Set by paymasterExecuteLeg's
-  // onRelayStart, fired AFTER any signMessage, right before executeTransaction. Once
-  // set, the AVNU relayer may already have broadcast the proven withdraw+burn, so a
-  // throw from that point on is AMBIGUOUS — a blind retry would re-prove over the SAME
-  // notes and request a SECOND pool withdrawal / CCTP burn (double-burn, saved only by
-  // pool nullifiers; live-observed 2026-07-03: a spurious execute error 156 over a burn
-  // that actually landed). We fail closed instead of retrying. A throw BEFORE it fires
-  // (build/prove/nonce) submitted nothing and stays safe to retry.
-  let paymasterSubmissionStarted = false;
-
-  // Prove-early optimisation (now the default — no flag): a withdraw that spends only OLD,
-  // already-buried notes needn't wait the ~8-block (~16s) aging window.
-  // Prove at `latest − IMMEDIATE_PROVING_BLOCK_DEPTH` (12 — clears the sequencer's ~10-block
-  // get_block_hash floor) with NO aging wait. The SDK compiler pins note discovery+selection
-  // to provingBlockId, so a fresh (not-yet-buried) note is INVISIBLE at that base → the
-  // build/prove FAILS CLOSED pre-submit (compile-time "Insufficient balance", or a prove-step
-  // error if the indexer returns a "latest tagged N" snapshot). On ANY such failure we fall
-  // back ONCE to today's aging path (the immediate build+prove catch below). build+prove
-  // PRECEDES submit, so that fallback is always pre-`onRelayStart` — it can NEVER re-fire
-  // after a relay has broadcast the burn. Captured ONCE (NOT via waitForProvingBlock(
-  // undefined,12), which would re-read `latest` on a rebuild).
-  //
-  // QUIESCENCE GATE (usability, over the fail-closed backstop above): prove-early is only SAFE
-  // when the account committed NO state in the ~12-block window — otherwise the stale
-  // `latest − 12` view can reuse an already-consumed write-once slot, and the SDK still builds
-  // a VALID proof that reverts ON-CHAIN (`NON_ZERO_VALUE`), escaping the pre-submit catch into
-  // the fail-closed submit path (a hard fail the user must rerun). So we only take the immediate
-  // path when the account is provably QUIESCENT: its spendable note-id set is IDENTICAL at
-  // `immediateBase` and at head. Any addition OR removal (spend) ⇒ age (today's path). Compare
-  // by id SET, not count — a spent-with-no-change note is a removal a max-of-count gate would
-  // miss. The withdraw draws from the deposit token; the baked paymaster fee withdraw draws from
-  // the SAME token, so one token covers both legs. FAIL-SAFE: wrap the two reads so ANY failure
-  // (indexer down, or a historical numeric block_ref unsupported) degrades to aging — never
-  // aborts the withdraw (this is a pre-relay read; failure is safe/retryable). Worst case = the
-  // ~8-block aging wait we do today. Shared with bridgeBack.ts's return claim — see proveEarly.ts.
-  const tokens = [BigInt(config.depositToken.address)];
-  const { eligible: immediateEligible, immediateBase } = await checkProveEarlyQuiescence({
+  const { txHash } = await proveAndSubmitPoolAction({
+    transfers,
+    account,
     provider,
-    snAddress: account.address,
     viewingKey,
-    tokens,
+    lastTxBlockNumber,
     onStatus,
+    label: 'withdraw + burn',
+    // The pool runs Withdraw BEFORE the InvokeExternal, so the Anonymizer already holds
+    // the USDC when privacy_invoke approves + deposit_for_burn. privacy_invoke returns an
+    // empty span (nothing returns to the pool); change goes back as a private note.
+    tokenOps: (t) => {
+      t.withdraw({ recipient: anonymizer, amount });
+    },
+    invoke: () => ({
+      contractAddress: anonymizer,
+      // privacy_invoke(params: BuyParams). The canonical OutboundAnonymizer takes a FLAT
+      // BuyParams (no enum wrapper), so BuyParams serialises as
+      // [mint_recipient(u256), amount(u256), max_fee(u256), min_finality_threshold(u32),
+      //  destination_domain(u32)] → 8 felts (6 u256-halves + 2 u32; NO leading
+      //  discriminant). `destDomain` (the LAST felt) is the CCTP domain of the chosen
+      //  bridge-OUT chain, so Circle mints on that chain. The selector is supplied by the
+      //  pool's InvokeExternal (privacy_invoke), so the calldata carries only the
+      //  entrypoint args.
+      calldata: [
+        ...u256Calldata(mintRecipient),
+        ...u256Calldata(amount),
+        ...u256Calldata(maxFee),
+        minFinalityThreshold.toString(),
+        destDomain.toString(),
+      ],
+    }),
   });
-  // Pinned once the proving block is decided (immediate OR aged) so the submit-phase
-  // stale-nonce retry rebuilds+re-proves at the SAME block — never re-aging, never re-running
-  // the immediate probe (which would risk a post-relay re-fire). The OFF path leaves this
-  // undefined and re-selects via waitForProvingBlock on each attempt (today's behaviour).
-  let resolvedProvingBlock: number | string | undefined;
-
-  // Build + prove the withdraw + burn at an explicit proving block. PROVE-ONLY
-  // (createProofInvocation + executeWithInvocation both precede submit), so any throw here is
-  // pre-relay and safe to retry / fall back from.
-  const buildAndProve = async (
-    provingBlockId: number | string,
-    feeWithdraw: { recipient: string; amount: bigint } | undefined,
-  ) => {
-    onStatus?.('Building withdraw + burn…');
-    // The pool runs Withdraw BEFORE the InvokeExternal, so the Anonymizer
-    // already holds the USDC when privacy_invoke approves + deposit_for_burn.
-    // privacy_invoke returns an empty span (nothing returns to the pool);
-    // surplus (selected-note change) goes back to the submitter as a note.
-    const builder = transfers
-      .build({
-        autoSetup: true,
-        autoDiscover: { notes: 'refresh', channels: 'refresh' },
-        autoSelectNotes: 'naive',
-      })
-      .surplusTo(account.address)
-      .with(config.depositToken.address, (t) => {
-        t.withdraw({ recipient: anonymizer, amount });
-        // Bake the AVNU pool fee in as a withdraw to the forwarder (paymaster path).
-        // Drawn from the user's notes alongside the account amount; surplusTo returns change.
-        if (feeWithdraw) t.withdraw({ recipient: feeWithdraw.recipient, amount: feeWithdraw.amount });
-      })
-      .invoke(() => ({
-        contractAddress: anonymizer,
-        // privacy_invoke(params: BuyParams). The canonical OutboundAnonymizer takes
-        // a FLAT BuyParams (no enum wrapper), so BuyParams serialises as
-        // [mint_recipient(u256), amount(u256), max_fee(u256),
-        //  min_finality_threshold(u32), destination_domain(u32)] → 8 felts (6 u256-halves
-        //  + 2 u32; NO leading discriminant). `destDomain` (the LAST felt) is the CCTP
-        //  domain of the chosen bridge-OUT chain, so Circle mints on that chain
-        //  (Polygon 7/Base 6/Arbitrum 3/Ethereum 0/Optimism 2). No commitment_h:
-        //  the per-account H is no longer emitted on-chain (it lives client-side + on
-        //  the return leg only). The selector is supplied by the pool's InvokeExternal
-        //  (privacy_invoke), so the calldata carries only the entrypoint args.
-        calldata: [
-          ...u256Calldata(mintRecipient),
-          ...u256Calldata(amount),
-          ...u256Calldata(maxFee),
-          minFinalityThreshold.toString(),
-          destDomain.toString(),
-        ],
-      }));
-
-    const invocation = await builder.createProofInvocation({ provingBlockId });
-
-    onStatus?.('Generating proof (this can take a few seconds)…');
-    const { callAndProof } = await transfers.executeWithInvocation(invocation, provingBlockId);
-
-    // Manager-paid: submitProvenCall sends the proven call from the MANAGER,
-    // forwarding the proof + proof facts (the derived account's identity rides in
-    // the calldata). Bridge the SDK's Call through the app's Call type (separate
-    // starknet copies).
-    const proofDetails = callAndProof.proof.proofFacts?.length
-      ? { proof: callAndProof.proof.data, proofFacts: callAndProof.proof.proofFacts }
-      : {};
-    const call = callAndProof.call as unknown as Call;
-    return { call, proofDetails };
-  };
-
-  // Returns void: the burn tx hash is captured into the function-scoped
-  // `burnTxHash` below (C4) so the retry guard can inspect it after a throw.
-  const attempt = async (): Promise<void> => {
-    // PAYMASTER path: the pool fee must be baked into the proof as a withdraw to the
-    // AVNU forwarder (AVNU 165 otherwise). buildTransaction FIRST to learn the fee, then
-    // inject it into the SAME USDC `.with()` block as the account withdraw — both draw from
-    // the user's private notes (mirrors deposit.ts).
-    let paymasterCtx: PaymasterBuildCtx | undefined;
-    let feeWithdraw: { recipient: string; amount: bigint } | undefined;
-    if (config.paymaster) {
-      onStatus?.('Requesting pool fee from paymaster…');
-      paymasterCtx = await paymasterBuildLeg(account); // apply_action (no user call)
-      const fa = paymasterCtx.feeAction;
-      if (fa && BigInt(fa.amount || '0') !== 0n) {
-        if (BigInt(fa.token) !== BigInt(config.depositToken.address)) {
-          throw new Error(
-            `AVNU pool fee is in ${fa.token}, not the deposit token ${config.depositToken.address}. ` +
-              'Use AVNU_FEE_MODE=sponsored_private with the deposit token as the pool fee token.',
-          );
-        }
-        feeWithdraw = { recipient: fa.recipient, amount: BigInt(fa.amount) };
-      }
-    }
-
-    // Resolve the proving block + build+prove. The stale-nonce submit retry re-enters here;
-    // once resolvedProvingBlock is pinned (ON path) it rebuilds at the SAME block (no re-age).
-    let built: Awaited<ReturnType<typeof buildAndProve>>;
-    if (immediateEligible && resolvedProvingBlock === undefined) {
-      // Quiescent + first attempt: prove immediately at latest−12; on ANY failure age ONCE.
-      // proveWithImmediateFallback's catch is catch-ALL (not a string match): a "latest
-      // tagged N" indexer surfaces the shortfall at the prove step, not compile — a narrow
-      // catch would hard-fail the withdraw.
-      const { result, provingBlockId } = await proveWithImmediateFallback({
-        provider,
-        immediateBase,
-        resolveAgingAnchor: () => anchor,
-        onStatus,
-        buildAndProveAt: (blockId) => buildAndProve(blockId, feeWithdraw),
-      });
-      built = result;
-      resolvedProvingBlock = provingBlockId;
-    } else if (resolvedProvingBlock !== undefined) {
-      // Submit-phase retry on the ON path: reuse the SAME proving block (no re-age).
-      built = await buildAndProve(resolvedProvingBlock, feeWithdraw);
-    } else {
-      // Not quiescent (recent in-window activity / discovery failed): today's aging path,
-      // unchanged. resolvedProvingBlock stays undefined here so every attempt re-selects via
-      // waitForProvingBlock (today's behaviour).
-      onStatus?.('Selecting proving block…');
-      const provingBlockId = await waitForProvingBlock(provider, anchor, onStatus, PROVING_BLOCK_DEPTH);
-      built = await buildAndProve(provingBlockId, feeWithdraw);
-    }
-
-    onStatus?.('Submitting withdraw + burn…');
-    // Capture the burn tx hash from the submit callback's own result — it's the
-    // value Iris polls. Declared outside `attempt` so that if submitAndTrack throws
-    // AFTER send() already succeeded (tracking timeout), the first hash is preserved
-    // and the retry guard below can return it instead of re-submitting.
-    //
-    // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this
-    // attempt's relay/hash state between lag retries). A non-lag error rethrows into the
-    // outer catch below unchanged. See nodeLagRetry.ts.
-    const runSubmit = async (): Promise<void> => {
-      await submitAndTrack(
-        provider,
-        async () => {
-          // Paymaster path: AVNU's relayer submits the proven apply_action (the fee
-          // withdraw is already baked into the proof). Manager path: submitProvenCall
-          // passes explicit resourceBounds so account.execute skips the proof-less fee
-          // estimate that would revert the proven apply_actions — see proven-submit.ts.
-          const res = paymasterCtx
-            ? await paymasterExecuteLeg(account, built.call, built.proofDetails, paymasterCtx, {
-                // Flip only when the AVNU relay actually starts (after any signMessage) —
-                // a pre-relay throw relays nothing and stays safely retryable.
-                onRelayStart: () => {
-                  paymasterSubmissionStarted = true;
-                },
-              })
-            : await submitProvenCall(provider, account, built.call, built.proofDetails);
-          burnTxHash = res.transaction_hash;
-          return res;
-        },
-        {
-          until: 'ACCEPTED_ON_L2',
-          onStatus: ({ finality }) =>
-            onStatus?.(`Submitting withdraw + burn (${humanizeFinality(finality)})…`),
-        },
-      );
-    };
-    await submitReusingProofOnNodeLag(runSubmit, {
-      resetRelayState: () => {
-        paymasterSubmissionStarted = false;
-        burnTxHash = '';
-      },
-      onStatus,
-    });
-  };
-
-  // burnTxHash is hoisted here so the retry guard can inspect it.
-  let burnTxHash = '';
-  try {
-    await attempt();
-  } catch (err) {
-    // If burnTxHash was already set the submit SUCCEEDED but submitAndTrack timed
-    // out waiting for ACCEPTED_ON_L2. The burn IS in-flight on Starknet — return
-    // its hash so Iris can be polled for it. Do NOT re-submit (would double-burn).
-    // But a REVERTED/REJECTED throw is NOT an in-flight burn (the withdraw+burn
-    // reverted atomically, no CCTP burn) — let it propagate so NO resume cursor is
-    // written for a burn that never happened.
-    if (burnTxHash && !isRevertedOrRejected(err)) return burnTxHash;
-    // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
-    // same-anchor re-prove would just node-lag again. Before the fail-closed guard so it
-    // also covers the manager path (mirrors bridgeBack).
-    if (isNodeLagError(err)) throw err;
-    // AMBIGUITY GUARD (paymaster path): fail closed ONLY when the AVNU relay is
-    // in-flight AND no tx hash was obtained (executeTransaction threw) — the relayer
-    // may have broadcast the burn anyway (live-observed: a spurious error 156 over a
-    // burn that landed), we cannot find it (AVNU's error carries no hash; the SDK has
-    // no nullifier/tx lookup), and re-proving over the same notes would DOUBLE the
-    // pool withdrawal / CCTP burn. A KNOWN hash is observable, not ambiguous: a
-    // tracking timeout returned it above (Iris polls it); reaching here with a hash
-    // means the burn was tracked to terminal REVERTED/REJECTED — an atomic no-burn
-    // (notes unspent), safe to rebuild + retry exactly like the manager path.
-    if (paymasterSubmissionStarted && !burnTxHash) throw err;
-    // Falling through to the rebuild retry: a hash reaching here is definitively dead
-    // (REVERTED/REJECTED) — clear it so a retry that fails WITHOUT its own hash can't
-    // resurrect the dead one as a live burn via the retry guard below.
-    burnTxHash = '';
-    transfers.invalidateProofNonceCache();
-    onStatus?.(`Submit failed (${sanitizeErrorMessage(err)}); retrying…`);
-    // Do NOT re-anchor to head: the failed submit committed no new block, so the
-    // original (already-captured) `anchor` is still the correct proving anchor.
-    // Re-waiting the full PROVING_BLOCK_DEPTH window here would needlessly stall the
-    // retry (and a code-52 already recovers in-call in managerExecute).
-    try {
-      await attempt();
-    } catch (retryErr) {
-      // Same guard as the first attempt: if the RETRY's send() already succeeded
-      // (burnTxHash set) but submitAndTrack then timed out, the burn IS in-flight
-      // on Starknet — return its hash so Iris can be polled. An un-guarded throw
-      // here would reject bridgeOut AFTER the burn landed, so the caller's failure
-      // path would never persist the resume cursor and a later run could re-burn
-      // (double pool withdrawal). Do NOT re-submit. A REVERTED/REJECTED retry is
-      // NOT in-flight (reverted atomically) — propagate it so no cursor is written.
-      if (burnTxHash && !isRevertedOrRejected(retryErr)) return burnTxHash;
-      throw retryErr;
-    }
-  }
-  return burnTxHash;
+  return txHash;
 }
