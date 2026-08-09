@@ -53,13 +53,33 @@ export interface ProvenPoolActionArgs {
   // this run (the AVNU-paymaster path, where the pool fee rides in the proof).
   lastTxBlockNumber: number | undefined;
   onStatus?: (s: string) => void;
+  // Fires as each phase BEGINS, for callers that render a step tracker rather than a
+  // status line. A rebuild retry re-fires 'prove' — a tracker should read that as the
+  // phase being live again, not as a new phase.
+  onPhase?: (phase: ProvenPoolActionPhase) => void;
+}
+
+// The two phases of a proven pool action a UI can meaningfully distinguish: building
+// and proving it, then submitting and tracking it.
+export type ProvenPoolActionPhase = 'prove' | 'submit';
+
+export interface ProvenPoolActionResult {
+  txHash: string;
+  // False when the tx was submitted but submitAndTrack timed out before
+  // ACCEPTED_ON_L2. The hash is real and the action is in flight, but nothing has
+  // witnessed it — a caller that reports success unconditionally would announce a
+  // withdrawal that might still revert.
+  confirmed: boolean;
 }
 
 // Build the action, prove it against a suitable block, and submit it. On a submit
 // failure (commonly a stale cached pool nonce) invalidate the SDK's proof-nonce cache
-// and rebuild/re-prove once. Returns the submitted tx hash.
-export async function proveAndSubmitPoolAction(opts: ProvenPoolActionArgs): Promise<string> {
-  const { transfers, account, provider, viewingKey, label, tokenOps, invoke, onStatus } = opts;
+// and rebuild/re-prove once.
+export async function proveAndSubmitPoolAction(
+  opts: ProvenPoolActionArgs,
+): Promise<ProvenPoolActionResult> {
+  const { transfers, account, provider, viewingKey, label, tokenOps, invoke, onStatus, onPhase } =
+    opts;
 
   // Proving anchor — a from-pool action PROVES BY SPENDING A PRE-EXISTING POOL NOTE, so the
   // proof MUST age past whatever committed that note. Crucially, that note can be from THIS
@@ -124,6 +144,7 @@ export async function proveAndSubmitPoolAction(opts: ProvenPoolActionArgs): Prom
     provingBlockId: number | string,
     feeWithdraw: { recipient: string; amount: bigint } | undefined,
   ) => {
+    onPhase?.('prove');
     onStatus?.(`Building ${label}…`);
     const builder = transfers
       .build({
@@ -211,6 +232,7 @@ export async function proveAndSubmitPoolAction(opts: ProvenPoolActionArgs): Prom
       built = await buildAndProve(provingBlockId, feeWithdraw);
     }
 
+    onPhase?.('submit');
     onStatus?.(`Submitting ${label}…`);
     // Retry the SAME built proof on full-node lag, no re-prove (resetRelayState clears this
     // attempt's relay/hash state between lag retries). A non-lag error rethrows into the
@@ -261,7 +283,7 @@ export async function proveAndSubmitPoolAction(opts: ProvenPoolActionArgs): Prom
     // re-submit (would double-spend the notes). But a REVERTED/REJECTED throw is NOT an
     // in-flight action (it reverted atomically) — let it propagate so the caller writes no
     // resume state for something that never happened.
-    if (txHash && !isRevertedOrRejected(err)) return txHash;
+    if (txHash && !isRevertedOrRejected(err)) return { txHash, confirmed: false };
     // Exhausted node-lag: propagate, never rebuild — the node is still behind, so a
     // same-anchor re-prove would just node-lag again.
     if (isNodeLagError(err)) throw err;
@@ -287,9 +309,9 @@ export async function proveAndSubmitPoolAction(opts: ProvenPoolActionArgs): Prom
       // Same guard as the first attempt: a retry whose send() succeeded before
       // submitAndTrack timed out IS in-flight — return its hash rather than throwing after
       // the action landed. A REVERTED/REJECTED retry is not in-flight — propagate it.
-      if (txHash && !isRevertedOrRejected(retryErr)) return txHash;
+      if (txHash && !isRevertedOrRejected(retryErr)) return { txHash, confirmed: false };
       throw retryErr;
     }
   }
-  return txHash;
+  return { txHash, confirmed: true };
 }

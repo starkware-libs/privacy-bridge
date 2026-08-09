@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import type { Account, Call, constants } from 'starknet';
-import {
-  createPrivateTransfers,
-  IndexerDiscoveryProvider,
-  type PrivateTransfersInterface,
-} from '@starkware-libs/starknet-privacy-sdk';
+import type { Account, Call } from 'starknet';
+import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
+import { makePoolTransfers } from './poolClient';
 import { config } from './config';
 import { getRpcProvider } from './provider';
 import { sanitizeErrorMessage, submitAndTrack } from './tx';
@@ -118,17 +115,7 @@ export async function registerWithPool(args: RegisterArgs): Promise<void> {
     if (approveBlock !== undefined) lastTxBlockNumber = approveBlock;
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   await proveAndSubmitRegister(transfers, account, provider, lastTxBlockNumber, onStatus, onTx);
 

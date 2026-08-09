@@ -73,12 +73,16 @@ interface RecordedOps {
   withdraws: { recipient?: string; amount?: bigint }[];
   transfers: { recipient?: string; amount?: bigint }[];
   invoked: boolean;
+  // How many token blocks (`.with(token, …)`) the action opened. The baked paymaster fee
+  // must join the action's OWN block, not a second one.
+  withBlocks: number;
 }
 let ops: RecordedOps;
 
 function makeBuilder() {
   const builder: Record<string, unknown> = {};
   builder.with = vi.fn((_token: string, fn?: (t: typeof builder) => unknown) => {
+    ops.withBlocks += 1;
     if (fn) fn(builder);
     return builder;
   });
@@ -106,8 +110,13 @@ vi.mock('@starkware-libs/starknet-privacy-sdk', () => ({
   IndexerDiscoveryProvider: class {},
 }));
 
+const { getClassHashAt } = vi.hoisted(() => ({
+  getClassHashAt: vi.fn(
+    async (_address: string) => '0x2794ce20e5f2ff0d40e632cb53845b9f4e526ebd8471983f7dbd355b721d5a',
+  ),
+}));
 vi.mock('./provider', () => ({
-  getRpcProvider: () => ({ callContract: vi.fn() }),
+  getRpcProvider: () => ({ callContract: vi.fn(), getClassHashAt }),
   makeAccount: () => account,
 }));
 
@@ -122,11 +131,15 @@ vi.mock('./proving', () => ({
 
 // Not quiescent ⇒ the aging path, which keeps the prove-early probe out of these
 // tests (it has its own suite in bridgeOut.test.ts).
+const { discoverPrivateBalance } = vi.hoisted(() => ({
+  discoverPrivateBalance: vi.fn(async () => 10_000_000n), // 10 USDC
+}));
 vi.mock('./discover', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./discover')>()),
   discoverNoteIdsAtBlock: vi.fn(async (args: { blockIdentifier: unknown }) =>
     typeof args.blockIdentifier === 'number' ? ['1'] : ['1', '2'],
   ),
+  discoverPrivateBalance,
 }));
 
 vi.mock('./tx', () => ({
@@ -143,15 +156,27 @@ vi.mock('./tx', () => ({
 }));
 
 // Manager path with nothing to approve: keeps the fee leg out of these assertions.
-vi.mock('./poolFee', () => ({
+const { fetchPoolFeeAmount, approvePoolFee } = vi.hoisted(() => ({
   fetchPoolFeeAmount: vi.fn(async () => 0n),
   approvePoolFee: vi.fn(async () => 1),
 }));
+vi.mock('./poolFee', () => ({ fetchPoolFeeAmount, approvePoolFee }));
 
 const { readPoolRegistration } = vi.hoisted(() => ({
   readPoolRegistration: vi.fn(async (_address: string) => 'registered' as const),
 }));
 vi.mock('./register', () => ({ readPoolRegistration }));
+
+const { avnuBuild, avnuExecute } = vi.hoisted(() => ({ avnuBuild: vi.fn(), avnuExecute: vi.fn() }));
+vi.mock('./avnuPaymaster', () => ({
+  buildTransaction: avnuBuild,
+  executeTransaction: avnuExecute,
+  toAvnuCall: (c: { contractAddress: string; entrypoint: string; calldata?: string[] }) => ({
+    to: c.contractAddress,
+    selector: c.entrypoint,
+    calldata: (c.calldata ?? []).map(String),
+  }),
+}));
 
 vi.mock('./config', async (importOriginal) => {
   const actual = (await importOriginal()) as { config: Record<string, unknown> };
@@ -172,17 +197,22 @@ import {
   withdrawToStarknet,
 } from './withdrawToStarknet';
 import { submitAndTrack } from './tx';
+import { config } from './config';
 
 const mSubmitAndTrack = vi.mocked(submitAndTrack);
 const resolveSignature = vi.fn(async () => SIGNATURE);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  ops = { withdraws: [], transfers: [], invoked: false };
+  ops = { withdraws: [], transfers: [], invoked: false, withBlocks: 0 };
   transfers.build.mockImplementation(() => makeBuilder());
   execute.mockResolvedValue({ transaction_hash: TX_HASH });
   readPoolRegistration.mockResolvedValue('registered');
   resolveSignature.mockResolvedValue(SIGNATURE);
+  getClassHashAt.mockResolvedValue(
+    '0x2794ce20e5f2ff0d40e632cb53845b9f4e526ebd8471983f7dbd355b721d5a',
+  );
+  discoverPrivateBalance.mockResolvedValue(10_000_000n);
 });
 
 afterEach(() => {
@@ -199,7 +229,11 @@ describe('normalizeStarknetRecipient', () => {
   it.each([
     ['an empty string', '   '],
     ['a non-hex string', 'not-an-address'],
-    ['an EVM address pasted into the Starknet field', '0xzz997970C51812dc3A010C7d01b50e0d17dc79C8'],
+    [
+      'a decimal felt, which is not hex',
+      '3141592653589793238462643383279502884197169399375105820974944',
+    ],
+    ['a bare numeral with no 0x', '123'],
     ['an over-long felt', `0x${'f'.repeat(65)}`],
   ])('rejects %s', (_label, value) => {
     expect(() => normalizeStarknetRecipient(value)).toThrow(/Starknet address/);
@@ -236,6 +270,7 @@ describe('withdrawToStarknet', () => {
       txHash: TX_HASH,
       recipient: normalizeStarknetRecipient(RECIPIENT),
       amount: AMOUNT,
+      confirmed: true,
     });
   });
 
@@ -269,6 +304,97 @@ describe('withdrawToStarknet', () => {
     await withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT });
     sinks.assertNeverLeaked(SIGNATURE, '0xsnpk');
     sinks.restore();
+  });
+
+  // A 20-byte EVM address is a perfectly well-formed felt, so no amount of format
+  // checking catches it — only asking the chain whether an account lives there does.
+  // This is the likeliest way to lose a withdrawal on this path.
+  it('refuses an EVM address pasted into the Starknet field', async () => {
+    getClassHashAt.mockRejectedValue(new Error('Contract not found'));
+
+    await expect(
+      withdrawToStarknet({
+        resolveSignature,
+        amount: AMOUNT,
+        recipient: '0x5A997970C51812dc3A010C7d01b50e0d17dc79C8',
+      }),
+    ).rejects.toThrow(/No account is deployed/);
+    expect(resolveSignature).not.toHaveBeenCalled();
+    expect(mSubmitAndTrack).not.toHaveBeenCalled();
+  });
+
+  it('refuses rather than guesses when the deployment read fails', async () => {
+    getClassHashAt.mockRejectedValue(new Error('fetch failed'));
+
+    await expect(
+      withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT }),
+    ).rejects.toThrow(/Couldn't check that Starknet address/);
+    expect(mSubmitAndTrack).not.toHaveBeenCalled();
+  });
+
+  // The manager pays real gas for the fee approve, so an unaffordable amount must be
+  // refused before it, not discovered at proof-build several seconds later.
+  it('refuses an amount above the private balance before approving the pool fee', async () => {
+    discoverPrivateBalance.mockResolvedValue(1_000_000n); // 1 USDC
+
+    await expect(
+      withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT }),
+    ).rejects.toThrow(/not enough for this withdrawal/);
+    expect(approvePoolFee).not.toHaveBeenCalled();
+    expect(mSubmitAndTrack).not.toHaveBeenCalled();
+  });
+
+  it('reports each phase to a step tracker, and submit only once tracked', async () => {
+    const onStep = vi.fn();
+    await withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT, onStep });
+
+    expect(onStep.mock.calls).toEqual([
+      ['prove', 'running'],
+      ['prove', 'done'],
+      ['submit', 'running'],
+      ['submit', 'done'],
+    ]);
+  });
+
+  it('does not report submit as done when tracking timed out', async () => {
+    const onStep = vi.fn();
+    mSubmitAndTrack.mockImplementationOnce(
+      async (_provider: unknown, send: () => Promise<{ transaction_hash: string }>) => {
+        await send();
+        throw new Error('timed out waiting for ACCEPTED_ON_L2');
+      },
+    );
+
+    await withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT, onStep });
+    expect(onStep).not.toHaveBeenCalledWith('submit', 'done');
+  });
+
+  it('reports a tracked submit as confirmed', async () => {
+    const result = await withdrawToStarknet({
+      resolveSignature,
+      amount: AMOUNT,
+      recipient: RECIPIENT,
+    });
+    expect(result.confirmed).toBe(true);
+  });
+
+  // submitAndTrack throws AFTER send() succeeded (a tracking timeout): the hash is real
+  // and the action is in flight, so the payout must be returned — but not as witnessed.
+  it('returns an in-flight payout unconfirmed rather than throwing over it', async () => {
+    mSubmitAndTrack.mockImplementationOnce(
+      async (_provider: unknown, send: () => Promise<{ transaction_hash: string }>) => {
+        await send();
+        throw new Error('timed out waiting for ACCEPTED_ON_L2');
+      },
+    );
+
+    const result = await withdrawToStarknet({
+      resolveSignature,
+      amount: AMOUNT,
+      recipient: RECIPIENT,
+    });
+    expect(result.txHash).toBe(TX_HASH);
+    expect(result.confirmed).toBe(false);
   });
 });
 
@@ -321,5 +447,63 @@ describe('sendPrivateToStarknet', () => {
     await sendPrivateToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT });
     sinks.assertNeverLeaked(SIGNATURE, '0xsnpk');
     sinks.restore();
+  });
+});
+
+// The only place in the codebase where a pool `transfer` and a fee `withdraw` share one
+// token block: bridgeOut's paymaster suite only ever exercises withdraw + withdraw, so
+// the note-selection deficit for this combination is otherwise unpinned.
+describe('sendPrivateToStarknet — AVNU paymaster path (fee baked into the proof)', () => {
+  const FORWARDER = '0xFEEFWD';
+  const FEE = 148056n; // ~0.148 USDC pool fee, in the deposit token
+  const realPaymaster = config.paymaster;
+
+  beforeEach(() => {
+    (config as { paymaster: typeof config.paymaster }).paymaster = {
+      endpoint: 'https://pm.test',
+      apiKey: 'KEY',
+      feeMode: 'sponsored_private',
+      poolFeeToken: '',
+    };
+    avnuBuild.mockResolvedValue({
+      type: 'apply_action',
+      fee_action: {
+        type: 'withdraw',
+        recipient: FORWARDER,
+        token: config.depositToken.address,
+        amount: `0x${FEE.toString(16)}`,
+      },
+    });
+    avnuExecute.mockResolvedValue({ tracking_id: 'trk', transaction_hash: TX_HASH });
+  });
+  afterEach(() => {
+    (config as { paymaster: typeof config.paymaster }).paymaster = realPaymaster;
+  });
+
+  it('bakes the fee in as a withdraw beside the transfer, in ONE token block, via AVNU', async () => {
+    const result = await sendPrivateToStarknet({
+      resolveSignature,
+      amount: AMOUNT,
+      recipient: RECIPIENT,
+    });
+
+    expect(avnuBuild).toHaveBeenCalledOnce();
+    expect(ops.transfers).toEqual([
+      { recipient: normalizeStarknetRecipient(RECIPIENT), amount: AMOUNT },
+    ]);
+    expect(ops.withdraws).toEqual([{ recipient: FORWARDER, amount: FEE }]);
+    // Both draw from the same notes and share the surplus — a second block would split
+    // the deficit and mis-select.
+    expect(ops.withBlocks).toBe(1);
+    // AVNU's relayer submitted the proven leg; the manager was not used.
+    expect(avnuExecute).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.txHash).toBe(TX_HASH);
+  });
+
+  it('skips the pool-fee read entirely — the fee rides in the proof', async () => {
+    await sendPrivateToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT });
+    expect(fetchPoolFeeAmount).not.toHaveBeenCalled();
+    expect(approvePoolFee).not.toHaveBeenCalled();
   });
 });

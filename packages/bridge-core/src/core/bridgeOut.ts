@@ -16,12 +16,8 @@
 // In-memory only — never log/persist the viewing key, claim_secret, account_nonce,
 // or the per-account Polygon EOA private key.
 
-import type { Account, constants } from 'starknet';
-import {
-  createPrivateTransfers,
-  IndexerDiscoveryProvider,
-  type PrivateTransfersInterface,
-} from '@starkware-libs/starknet-privacy-sdk';
+import type { Account } from 'starknet';
+import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
 import {
   computeClaimH,
   deriveClaimSecret,
@@ -44,6 +40,7 @@ export type ResolveDepositWalletFn = (
   accountIndex: number,
   channel?: string,
 ) => Promise<string>;
+import { makePoolTransfers } from './poolClient';
 import { config, resolveEvmCctpDestination } from './config';
 import { u256Calldata } from './deposit';
 import { getRpcProvider, makeAccount } from './provider';
@@ -263,17 +260,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
     lastTxBlockNumber = await approvePoolFee(feeAmount);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   const burnTxHash = await proveAndSubmitBridgeOut({
     transfers,
@@ -968,17 +955,7 @@ export async function bridgeOutToWallet(
     lastTxBlockNumber = await approvePoolFee(feeAmount);
   }
 
-  const discoveryProvider = new IndexerDiscoveryProvider(config.indexerUrl, config.poolAddress);
-  const transfers = createPrivateTransfers({
-    account,
-    viewingKeyProvider: { getViewingKey: async () => viewingKey },
-    provingProvider: {
-      url: config.proverUrl,
-      chainId: config.chainId as constants.StarknetChainId,
-    },
-    discoveryProvider,
-    poolContractAddress: config.poolAddress,
-  });
+  const transfers = makePoolTransfers(account, viewingKey);
 
   const burnTxHash = await proveAndSubmitBridgeOut({
     transfers,
@@ -1376,7 +1353,7 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     lastTxBlockNumber,
     onStatus,
   } = opts;
-  return proveAndSubmitPoolAction({
+  const { txHash } = await proveAndSubmitPoolAction({
     transfers,
     account,
     provider,
@@ -1409,4 +1386,5 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
       ],
     }),
   });
+  return txHash;
 }
