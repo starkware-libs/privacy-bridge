@@ -323,6 +323,38 @@ describe('withdrawToStarknet', () => {
     expect(mSubmitAndTrack).not.toHaveBeenCalled();
   });
 
+  // A counterfactual account is indistinguishable on-chain from a typo, so the caller
+  // has to say so deliberately — but once it has, the check must get out of the way.
+  it('sends to an undeployed address when the caller opts in', async () => {
+    getClassHashAt.mockRejectedValue(new Error('Contract not found'));
+
+    const result = await withdrawToStarknet({
+      resolveSignature,
+      amount: AMOUNT,
+      recipient: RECIPIENT,
+      allowUndeployedRecipient: true,
+    });
+    expect(result.txHash).toBe(TX_HASH);
+  });
+
+  it('does not even ask about deployment when the caller opts in', async () => {
+    await withdrawToStarknet({
+      resolveSignature,
+      amount: AMOUNT,
+      recipient: RECIPIENT,
+      allowUndeployedRecipient: true,
+    });
+    expect(getClassHashAt).not.toHaveBeenCalled();
+  });
+
+  it('still refuses an undeployed address by DEFAULT', async () => {
+    getClassHashAt.mockRejectedValue(new Error('Contract not found'));
+
+    await expect(
+      withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT }),
+    ).rejects.toThrow(/No account is deployed/);
+  });
+
   it('refuses rather than guesses when the deployment read fails', async () => {
     getClassHashAt.mockRejectedValue(new Error('fetch failed'));
 

@@ -44,6 +44,14 @@ export interface StarknetPayoutArgs {
   // Step-tracker feed: fires (step,'running') as each phase begins and (step,'done')
   // as it completes. 'submit' only reports done once the tx is tracked.
   onStep?: (step: StarknetPayoutStep, status: StarknetPayoutStepStatus, detail?: string) => void;
+  // Send to an address with no account deployed at it. OFF by default: a plain ERC-20
+  // transfer accepts any felt, so the usual reason a recipient has no class hash is a
+  // typo or an EVM address pasted into the field, and those funds are unrecoverable.
+  //
+  // A counterfactual account — pre-computed, funded before it is deployed — is the
+  // legitimate case, and it is indistinguishable on-chain from the mistake. So the
+  // caller must assert it deliberately; there is no way for this function to tell.
+  allowUndeployedRecipient?: boolean;
 }
 
 // The stages a UI renders for a Starknet payout. There is no attest or mint leg — the
@@ -163,8 +171,9 @@ async function runStarknetPayout(
     if (registration === 'unknown') {
       throw new Error("Couldn't check whether that address is on the privacy pool — try again.");
     }
-  } else {
-    // Registration implies an account, so this is the public path's equivalent gate.
+  } else if (!args.allowUndeployedRecipient) {
+    // Registration implies an account, so this is the public path's equivalent gate —
+    // unless the caller has taken responsibility for a counterfactual recipient.
     await assertRecipientReachable(recipient);
   }
 
