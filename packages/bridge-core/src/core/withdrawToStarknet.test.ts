@@ -353,7 +353,22 @@ describe('withdrawToStarknet', () => {
       ['prove', 'done'],
       ['submit', 'running'],
       ['submit', 'done'],
+      ['confirm', 'running'],
+      ['confirm', 'done'],
     ]);
+  });
+
+  // The pool is the only consumer of a Starknet payout, and everything that reads its
+  // effects reads at pre_confirmed — so waiting for L2 is pure latency here. The CCTP
+  // paths must NOT inherit this: Circle cannot attest a burn before it is committed.
+  it('tracks only to PRE_CONFIRMED, unlike the CCTP burn', async () => {
+    await withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT });
+
+    expect(mSubmitAndTrack).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({ until: 'PRE_CONFIRMED' }),
+    );
   });
 
   it('does not report submit as done when tracking timed out', async () => {
@@ -366,7 +381,7 @@ describe('withdrawToStarknet', () => {
     );
 
     await withdrawToStarknet({ resolveSignature, amount: AMOUNT, recipient: RECIPIENT, onStep });
-    expect(onStep).not.toHaveBeenCalledWith('submit', 'done');
+    expect(onStep).not.toHaveBeenCalledWith('confirm', 'done');
   });
 
   it('reports a tracked submit as confirmed', async () => {

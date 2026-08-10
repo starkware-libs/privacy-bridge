@@ -53,8 +53,7 @@ const CLAIM_SECRET = 20694527014572858572094016694989303135392559171940120823275
 // mocked computeClaimH return so these wiring tests pin HOW bridgeOut threads H
 // into the calldata; the REAL recipe is exercised by the integration test below
 // and by packages/bridge-core/src/derivation/claim-commitment.test.ts.
-const COMMITMENT_H =
-  1184640639497699140437908751684073211882192473677451888065106092277727692916n;
+const COMMITMENT_H = 1184640639497699140437908751684073211882192473677451888065106092277727692916n;
 
 // Per-account Polygon EOA fixture. The address is a real 20-byte EVM hex; its u256
 // form is the address left-padded to 32 bytes (= the numeric value of the addr).
@@ -163,7 +162,8 @@ vi.mock('../derivation/index', () => ({
 // ---------------------------------------------------------------------------
 let withdrawArgs: { recipient: string; amount: bigint } | undefined;
 const withdrawCalls: { recipient: string; amount: bigint }[] = [];
-let invokeCallback: ((ctx: { poolAddress: string }) => { contractAddress: string; calldata: unknown[] }) | undefined;
+let invokeCallback:
+  ((ctx: { poolAddress: string }) => { contractAddress: string; calldata: unknown[] }) | undefined;
 let invokeResult: { contractAddress: string; calldata: unknown[] } | undefined;
 let surplusToArg: string | undefined;
 const withTokens: string[] = [];
@@ -209,8 +209,9 @@ vi.mock('@starkware-libs/starknet-privacy-sdk', () => ({
 // Stub for the injected deposit-wallet resolver (no longer a module mock — bridgeOut
 // now accepts resolveDepositWallet as a parameter). Returns DEPOSIT_WALLET so the
 // test pins that the burn targets the WALLET, not the bare EOA.
-const resolveDepositWallet = vi.fn(async (_signature: string, _bidIndex: number): Promise<string> =>
-  '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+const resolveDepositWallet = vi.fn(
+  async (_signature: string, _bidIndex: number): Promise<string> =>
+    '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
 );
 
 // ---------------------------------------------------------------------------
@@ -254,7 +255,9 @@ vi.mock('./proving', () => ({
 // existing prove-early tests green). Per-test overrides key on args.blockIdentifier
 // (numeric immediateBase vs the 'pre_confirmed' head) to model an in-window add/spend.
 const { discoverNoteIdsAtBlockSpy } = vi.hoisted(() => ({
-  discoverNoteIdsAtBlockSpy: vi.fn(async (_args: { blockIdentifier: unknown }): Promise<string[]> => ['1', '2']),
+  discoverNoteIdsAtBlockSpy: vi.fn(
+    async (_args: { blockIdentifier: unknown }): Promise<string[]> => ['1', '2'],
+  ),
 }));
 // Single ./discover mock (merged): origin's prove-early note-id spy + our
 // fee-buffer balance reader. importOriginal keeps formatUsdcCents/formatTokenAmount
@@ -268,10 +271,12 @@ vi.mock('./discover', async (importOriginal) => ({
 vi.mock('./tx', () => ({
   READ_BLOCK: 'latest',
   sanitizeErrorMessage: (e: unknown) => String(e),
-  submitAndTrack: vi.fn(async (_provider: unknown, send: () => Promise<{ transaction_hash: string }>) => {
-    const r = await send();
-    return { transactionHash: r.transaction_hash, blockNumber: 1 };
-  }),
+  submitAndTrack: vi.fn(
+    async (_provider: unknown, send: () => Promise<{ transaction_hash: string }>) => {
+      const r = await send();
+      return { transactionHash: r.transaction_hash, blockNumber: 1 };
+    },
+  ),
   // Real regex (dedupe sweep moved this into tx.ts): proveAndSubmitBridgeOut's retry
   // guard classifies REVERTED/REJECTED via this predicate.
   isRevertedOrRejected: (err: unknown) =>
@@ -360,7 +365,13 @@ function asBig(x: unknown): bigint {
 
 describe('bridgeOut — fee-buffer gate (Phase 3)', () => {
   const bid = () =>
-    bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
   it('rejects a withdraw that would leave less than the fee-buffer', async () => {
     // balance exactly covers the bid but leaves nothing for the return fee.
@@ -394,19 +405,37 @@ describe('bridgeOut — fee-buffer gate (Phase 3)', () => {
 
 describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () => {
   it('derives the per-account EOA from the signature + accountIndex', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(derivePolygonEoa).toHaveBeenCalledWith(SIGNATURE, ACCOUNT_INDEX, undefined);
   });
 
   it('withdraws the fixed denomination D to the Anonymizer (pool runs Withdraw first)', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(withdrawArgs).toBeDefined();
     expect(withdrawArgs!.recipient).toBe(ANONYMIZER);
     expect(withdrawArgs!.amount).toBe(AMOUNT);
   });
 
   it('emits exactly ONE InvokeExternal, targeting the Anonymizer', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(invokeCallback).toBeDefined();
     expect(invokeResult).toBeDefined();
     expect(invokeResult!.contractAddress).toBe(ANONYMIZER);
@@ -448,7 +477,13 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
 
   it('appends the CHOSEN destination CCTP domain as the LAST Buy felt (Polygon 7 AND Base 6)', async () => {
     // Default (no destChainId) → Polygon domain 7.
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(invokeResult!.calldata).toHaveLength(8);
     expect(asBig(invokeResult!.calldata[7])).toBe(7n);
 
@@ -480,7 +515,13 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
   });
 
   it('defaults to Standard finality (2000) and zero fee when unset', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     const cd = invokeResult!.calldata;
     const u256 = (lo: unknown, hi: unknown) => asBig(lo) + (asBig(hi) << 128n);
     expect(u256(cd[4], cd[5])).toBe(0n); // max_fee default 0
@@ -488,7 +529,13 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
   });
 
   it('computes H over claim_secret + amount + sn_domain(25), bound to claim_secret (no channel_key)', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     // claim_secret = deriveClaimSecret(viewingKey, accountNonce)
     expect(deriveClaimSecret).toHaveBeenCalledWith(VIEWING_KEY, ACCOUNT_NONCE);
     // H bound to the SAME claim_secret, amount D, and sn_domain = 25.
@@ -518,7 +565,13 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
   });
 
   it('returns change to the submitter account as a private note (surplusTo)', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(surplusToArg).toBe(account.address);
   });
 
@@ -530,11 +583,9 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
     // frozen vector — the same number the Cairo claim recomputes. H is no longer
     // carried in the burn calldata (the burn no longer emits it), but it is still
     // produced + returned for the M10 return leg, which makes that leg reproducible.
-    const actual = await vi.importActual<typeof import('../derivation/index')>(
-      '../derivation/index',
-    );
-    const FROZEN_H =
-      1184640639497699140437908751684073211882192473677451888065106092277727692916n;
+    const actual =
+      await vi.importActual<typeof import('../derivation/index')>('../derivation/index');
+    const FROZEN_H = 1184640639497699140437908751684073211882192473677451888065106092277727692916n;
 
     deriveViewingKey.mockReturnValueOnce(VIEWING_KEY);
     deriveClaimSecret.mockImplementationOnce(actual.deriveClaimSecret);
@@ -559,7 +610,13 @@ describe('bridgeOut — withdraw + InvokeExternal shape (frozen interface)', () 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     const logged = [...logSpy.mock.calls, ...errSpy.mock.calls, ...warnSpy.mock.calls]
       .flat()
       .map((a) => String(a))
@@ -683,6 +740,18 @@ describe('bridgeOutToWallet — Leg B cash-out (withdraw + decoy-H burn)', () =>
     expect(surplusToArg).toBe(account.address);
   });
 
+  // The Starknet-native payouts track only to PRE_CONFIRMED; the CCTP burn must NOT —
+  // Circle's attestation service cannot see a burn that is not committed on L2.
+  it('tracks the burn to ACCEPTED_ON_L2, not merely pre-confirmed', async () => {
+    await bridgeOutToWallet({ signature: SIGNATURE, amount: AMOUNT, destination: DEST_ADDRESS });
+
+    expect(submitAndTrack as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({ until: 'ACCEPTED_ON_L2' }),
+    );
+  });
+
   it('does NOT derive a per-account Polygon EOA (no account index/nonce for a cash-out)', async () => {
     await bridgeOutToWallet({ signature: SIGNATURE, amount: AMOUNT, destination: DEST_ADDRESS });
     expect(derivePolygonEoa).not.toHaveBeenCalled();
@@ -703,7 +772,12 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
     };
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
-      fee_action: { type: 'withdraw', recipient: FORWARDER, token: config.depositToken.address, amount: `0x${FEE.toString(16)}` },
+      fee_action: {
+        type: 'withdraw',
+        recipient: FORWARDER,
+        token: config.depositToken.address,
+        amount: `0x${FEE.toString(16)}`,
+      },
     });
     avnuExecute.mockResolvedValue({ tracking_id: 'trk', transaction_hash: BURN_TX_HASH });
   });
@@ -712,7 +786,13 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
   });
 
   it('bakes the pool fee in as a SECOND withdraw to the forwarder and submits via AVNU (not the manager)', async () => {
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     // buildTransaction ran (apply_action) BEFORE proving to learn the fee.
     expect(avnuBuild).toHaveBeenCalledOnce();
@@ -744,7 +824,13 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
     discoverNoteIdsAtBlockSpy.mockImplementation(async (args: { blockIdentifier: unknown }) =>
       args.blockIdentifier === 'pre_confirmed' ? ['1', '2'] : ['1'],
     );
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
     expect(waitForProvingBlockSpy).toHaveBeenCalled();
     const lastCall = waitForProvingBlockSpy.mock.calls.at(-1)!;
     // No fee-approve tx → the anchor is seeded from the live head (getCurrentBlock spy = 7).
@@ -757,10 +843,21 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
   it('throws if the AVNU fee token is not the deposit token', async () => {
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
-      fee_action: { type: 'withdraw', recipient: FORWARDER, token: '0xdeadbeef', amount: `0x${FEE.toString(16)}` },
+      fee_action: {
+        type: 'withdraw',
+        recipient: FORWARDER,
+        token: '0xdeadbeef',
+        amount: `0x${FEE.toString(16)}`,
+      },
     });
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/not the deposit token/i);
     expect(avnuExecute).not.toHaveBeenCalled();
   });
@@ -782,7 +879,13 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
     );
 
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/156|burn amount exceeds limit/i);
 
     // The critical assertion: the AVNU relay (executeTransaction) must run EXACTLY ONCE.
@@ -801,13 +904,24 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
       if (buildCalls === 1) throw new Error('stale pool nonce (pre-relay)');
       return {
         type: 'apply_action',
-        fee_action: { type: 'withdraw', recipient: FORWARDER, token: config.depositToken.address, amount: `0x${FEE.toString(16)}` },
+        fee_action: {
+          type: 'withdraw',
+          recipient: FORWARDER,
+          token: config.depositToken.address,
+          amount: `0x${FEE.toString(16)}`,
+        },
       };
     });
     avnuExecute.mockReset();
     avnuExecute.mockResolvedValue({ tracking_id: 'trk', transaction_hash: BURN_TX_HASH });
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     expect(avnuBuild).toHaveBeenCalledTimes(2); // first threw pre-relay; retry rebuilt
@@ -828,7 +942,13 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
       },
     );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     // Fail closed on unknown status = NO re-submit; the landed hash is returned so the
     // caller persists the cursor and Iris polls it (the pre-existing C4 contract).
@@ -858,7 +978,13 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
       .mockResolvedValueOnce({ tracking_id: 'trk', transaction_hash: '0xfirstreverted' })
       .mockResolvedValueOnce({ tracking_id: 'trk', transaction_hash: '0xretryok' });
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     // A tracked revert moved NO value — the one-shot rebuild retry must fire (relay
     // called twice) and the retry's landed hash is the result. The over-reaching guard
@@ -884,14 +1010,22 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
     avnuExecute.mockReset();
     avnuExecute
       .mockResolvedValueOnce({ tracking_id: 'trk', transaction_hash: '0xfirstreverted' })
-      .mockRejectedValueOnce(new Error('AVNU paymaster_executeTransaction error (code 156): spurious'));
+      .mockRejectedValueOnce(
+        new Error('AVNU paymaster_executeTransaction error (code 156): spurious'),
+      );
 
     // The REVERTED hash is definitively dead; the retry obtained NO hash. bridgeOut
     // must REJECT (ambiguous retry) — not resolve with the dead '0xfirstreverted' as
     // if it were a live burn (which would persist a cursor for a burn that never
     // happened and brick the account).
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/156/);
     expect(avnuExecute).toHaveBeenCalledTimes(2);
   });
@@ -1083,7 +1217,9 @@ describe('bridgeOut/bridgeOutToWallet — quotedFinalityThreshold burn-boundary 
         quotedFinalityThreshold: 1000, // …but the fee was quoted for Fast
         resolveDepositWallet,
       }),
-    ).rejects.toThrow(/finality tier mismatch|quoted for finality threshold 1000 but the burn declares 2000/i);
+    ).rejects.toThrow(
+      /finality tier mismatch|quoted for finality threshold 1000 but the burn declares 2000/i,
+    );
 
     // Fail-closed BEFORE any irreversible work: no proof built, no burn submitted.
     expect(transfers.build).not.toHaveBeenCalled();
@@ -1144,7 +1280,13 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
 
   // (A) immediate build+prove SUCCEEDS → prove at immediateBase, NO aging wait.
   it('(A) proves at latest−12 and does NOT age when the buried notes cover the withdraw', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(execMock()).toHaveBeenCalledTimes(1);
     expect(execMock().mock.calls[0]![1]).toBe(IMMEDIATE_BASE);
@@ -1159,11 +1301,20 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
     execMock()
       .mockRejectedValueOnce(new Error('Insufficient balance for token 0xUSDC: need 5 have 3'))
       .mockResolvedValue({
-        callAndProof: { call: { contractAddress: ANONYMIZER, calldata: [] }, proof: { data: [], proofFacts: [] } },
+        callAndProof: {
+          call: { contractAddress: ANONYMIZER, calldata: [] },
+          proof: { data: [], proofFacts: [] },
+        },
       });
     const submitMock = submitAndTrack as ReturnType<typeof vi.fn>;
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     // Exactly one aged fallback, anchored at the live head (no fee-approve tx → anchor 7).
@@ -1184,11 +1335,20 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
     execMock()
       .mockRejectedValueOnce(new Error('prover gateway 503 (network)'))
       .mockResolvedValue({
-        callAndProof: { call: { contractAddress: ANONYMIZER, calldata: [] }, proof: { data: [], proofFacts: [] } },
+        callAndProof: {
+          call: { contractAddress: ANONYMIZER, calldata: [] },
+          proof: { data: [], proofFacts: [] },
+        },
       });
     const submitMock = submitAndTrack as ReturnType<typeof vi.fn>;
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     expect(waitForProvingBlockSpy).toHaveBeenCalledTimes(1);
@@ -1210,7 +1370,13 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
       throw new Error('code: 52 invalid transaction nonce');
     });
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     // No aging on either the first attempt or the retry — the pinned immediateBase is reused.
@@ -1233,7 +1399,12 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
     };
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
-      fee_action: { type: 'withdraw', recipient: '0xFEEFWD', token: config.depositToken.address, amount: '0x0' },
+      fee_action: {
+        type: 'withdraw',
+        recipient: '0xFEEFWD',
+        token: config.depositToken.address,
+        amount: '0x0',
+      },
     });
     avnuExecute.mockReset();
     avnuExecute.mockRejectedValue(
@@ -1241,7 +1412,13 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
     );
 
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/156|burn amount exceeds limit/i);
 
     // Fail closed: exactly one relay attempt; the immediate prove succeeded so no aged fallback.
@@ -1258,7 +1435,13 @@ describe('proveAndSubmitBridgeOut — immediate prove (unconditional default)', 
       args.blockIdentifier === 'pre_confirmed' ? ['1', '2', '3'] : ['1', '2'],
     );
 
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(waitForProvingBlockSpy).toHaveBeenCalledTimes(1);
     expect(waitForProvingBlockSpy.mock.calls[0]![1]).toBe(7);
@@ -1297,7 +1480,13 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
   // (A) id-sets EQUAL at immediateBase vs head → quiescent → prove at
   // immediateBase, NO aging wait. (The default spy already returns equal sets.)
   it('(A) quiescent (equal id-sets) → proves at latest−12, does NOT age', async () => {
-    await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     // The gate read BOTH blocks: numeric immediateBase (0) and the head ('pre_confirmed').
     expect(discoverNoteIdsAtBlockSpy).toHaveBeenCalledTimes(2);
@@ -1317,7 +1506,13 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
       args.blockIdentifier === 'pre_confirmed' ? ['1', '2', '3'] : ['1', '2'],
     );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     // Aging path: head anchor (7), aging depth (8); immediateBase never used to prove.
@@ -1338,7 +1533,13 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
       args.blockIdentifier === 'pre_confirmed' ? ['1', '2'] : ['1', '2', '3'],
     );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     expect(waitForProvingBlockSpy).toHaveBeenCalledTimes(1);
@@ -1352,9 +1553,17 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
   // block_ref unsupported) → degrade to aging; the withdraw PROCEEDS (no abort/hang).
   it('(E) a gate discovery read throws → degrades to aging, withdraw proceeds', async () => {
     discoverNoteIdsAtBlockSpy.mockReset();
-    discoverNoteIdsAtBlockSpy.mockRejectedValue(new Error('indexer historical block_ref unsupported'));
+    discoverNoteIdsAtBlockSpy.mockRejectedValue(
+      new Error('indexer historical block_ref unsupported'),
+    );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     // No abort: the burn still lands via the aging path.
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
@@ -1378,15 +1587,28 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
     };
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
-      fee_action: { type: 'withdraw', recipient: '0xFEEFWD', token: config.depositToken.address, amount: '0x0' },
+      fee_action: {
+        type: 'withdraw',
+        recipient: '0xFEEFWD',
+        token: config.depositToken.address,
+        amount: '0x0',
+      },
     });
     avnuExecute.mockReset();
     avnuExecute.mockRejectedValue(
-      new Error('AVNU paymaster_executeTransaction error (code 156): Burn amount exceeds limit / NON_ZERO_VALUE'),
+      new Error(
+        'AVNU paymaster_executeTransaction error (code 156): Burn amount exceeds limit / NON_ZERO_VALUE',
+      ),
     );
 
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/156|burn amount exceeds limit/i);
 
     // Fail closed: exactly ONE relay attempt (no double-burn re-submit).
@@ -1396,7 +1618,9 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
     expect(waitForProvingBlockSpy).not.toHaveBeenCalled();
     // The code-156 / NON_ZERO_VALUE class is NOT auto-retryable — classifier unchanged.
     expect(
-      isTransientError(new Error('AVNU paymaster_executeTransaction error (code 156): NON_ZERO_VALUE')),
+      isTransientError(
+        new Error('AVNU paymaster_executeTransaction error (code 156): NON_ZERO_VALUE'),
+      ),
     ).toBe(false);
   });
 
@@ -1415,13 +1639,24 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
     };
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
-      fee_action: { type: 'withdraw', recipient: '0xFEEFWD', token: config.depositToken.address, amount: '0x0' },
+      fee_action: {
+        type: 'withdraw',
+        recipient: '0xFEEFWD',
+        token: config.depositToken.address,
+        amount: '0x0',
+      },
     });
     avnuExecute.mockReset();
     avnuExecute.mockRejectedValue(new Error(NODE_LAG_MSG)); // node never catches up
 
     await expect(
-      bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet }),
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
     ).rejects.toThrow(/block hash mismatch/i);
 
     // 1 initial + 6 (MAX_NODE_LAG_RETRIES) = 7 attempts, all the SAME proof.
@@ -1448,7 +1683,13 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
       args.blockIdentifier === 'pre_confirmed' ? ['1', '2'] : ['1'],
     );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     // The gate read both blocks and detected the inequality.
@@ -1476,7 +1717,13 @@ describe('proveAndSubmitBridgeOut — prove-early quiescence gate (collision pre
       args.blockIdentifier === 'pre_confirmed' ? ['1', '3'] : ['1', '2'],
     );
 
-    const res = await bridgeOut({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX, accountNonce: ACCOUNT_NONCE, amount: AMOUNT, resolveDepositWallet });
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
 
     expect(res.burnTxHash).toBe(BURN_TX_HASH);
     // The gate read both blocks and detected the id-set change despite the equal length.

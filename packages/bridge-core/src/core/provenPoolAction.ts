@@ -61,11 +61,25 @@ export interface ProvenPoolActionArgs {
   // anything is built. Throwing here aborts the action pre-prove — the seam for a caller
   // whose affordability check can only be settled once the fee is known.
   onPoolFee?: (poolFeeRaw: bigint) => void;
+  // How far to track the submitted tx before reporting success.
+  //
+  // 'ACCEPTED_ON_L2' (the default) is required when something downstream reads the tx
+  // from a COMMITTED view — the CCTP burn is the case that matters: Circle's attestation
+  // service will not see it before then.
+  //
+  // 'PRE_CONFIRMED' is right for an action whose only consumer is the pool itself. Note
+  // discovery, balances and deployment checks all read at `pre_confirmed` (READ_BLOCK),
+  // so a pool action's effects are visible — and its notes spendable — as soon as it is
+  // pre-confirmed. Waiting for L2 there buys nobody anything and is most of the
+  // user-visible latency.
+  until?: 'PRE_CONFIRMED' | 'ACCEPTED_ON_L2';
 }
 
-// The two phases of a proven pool action a UI can meaningfully distinguish: building
-// and proving it, then submitting and tracking it.
-export type ProvenPoolActionPhase = 'prove' | 'submit';
+// The phases of a proven pool action a UI can meaningfully distinguish: building and
+// proving it, handing it to the relay, and waiting for the chain to accept it. Split
+// three ways because the relay and the chain fail — and take time — for different
+// reasons, and a single "submitting" step hides which one a user is waiting on.
+export type ProvenPoolActionPhase = 'prove' | 'submit' | 'confirm';
 
 // A caller's pre-prove refusal, raised from `onPoolFee`. Deterministic local
 // arithmetic: a rebuild re-runs it to the same answer, so the retry path rethrows this
@@ -103,6 +117,7 @@ export async function proveAndSubmitPoolAction(
     onStatus,
     onPhase,
     onPoolFee,
+    until = 'ACCEPTED_ON_L2',
   } = opts;
 
   // Proving anchor — a from-pool action PROVES BY SPENDING A PRE-EXISTING POOL NOTE, so the
@@ -288,10 +303,13 @@ export async function proveAndSubmitPoolAction(
               })
             : await submitProvenCall(provider, account, built.call, built.proofDetails);
           txHash = res.transaction_hash;
+          // The relay has the tx and handed back its hash; everything after this is the
+          // chain reaching `until`.
+          onPhase?.('confirm');
           return res;
         },
         {
-          until: 'ACCEPTED_ON_L2',
+          until,
           onStatus: ({ finality }) =>
             onStatus?.(`Submitting ${label} (${humanizeFinality(finality)})…`),
         },
