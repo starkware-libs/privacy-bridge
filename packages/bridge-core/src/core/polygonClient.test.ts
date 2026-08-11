@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { createPublicClient, custom, encodeAbiParameters, type PublicClient } from 'viem';
+import {
+  createPublicClient,
+  custom,
+  decodeFunctionData,
+  encodeAbiParameters,
+  encodeFunctionResult,
+  multicall3Abi,
+  type PublicClient,
+} from 'viem';
 import { readUsdcBalance, sumErc20Balances } from './polygonClient';
 
 // A viem client whose transport answers eth_call with a canned uint256 result,
@@ -35,7 +43,7 @@ describe('readUsdcBalance', () => {
 // A client that returns a DIFFERENT balance per token, keyed by the `to`
 // (token contract) address of the eth_call — so we can assert a per-token sum
 // across an arbitrary token list (the generic multi-token helper).
-let blocksAskedSink: string[] | null = null;
+let aggregate3CallsSink: string[] | null = null;
 
 function multiTokenClient(byToken: Record<string, bigint>): PublicClient {
   const lowered = Object.fromEntries(
@@ -44,11 +52,28 @@ function multiTokenClient(byToken: Record<string, bigint>): PublicClient {
   return createPublicClient({
     transport: custom({
       async request({ method, params }) {
-        if (method === 'eth_blockNumber') return '0x64';
         if (method === 'eth_call') {
-          const [call, blockTag] = params as [{ to?: string }, string];
-          blocksAskedSink?.push(blockTag);
+          const [call] = params as [{ to?: string; data?: `0x${string}` }];
           const to = (call.to ?? '').toLowerCase();
+          // The sum arrives as ONE aggregate3 call to the canonical Multicall3 —
+          // decode the inner calls and answer each from the per-token table, exactly
+          // as the deployed contract would.
+          if (to === '0xca11bde05977b3631167028862be2a173976ca11') {
+            aggregate3CallsSink?.push(call.data ?? '0x');
+            const { args } = decodeFunctionData({ abi: multicall3Abi, data: call.data! });
+            const innerCalls = args![0] as readonly { target: string }[];
+            return encodeFunctionResult({
+              abi: multicall3Abi,
+              functionName: 'aggregate3',
+              result: innerCalls.map((inner) => ({
+                success: true,
+                returnData: encodeAbiParameters(
+                  [{ type: 'uint256' }],
+                  [lowered[inner.target.toLowerCase()] ?? 0n],
+                ),
+              })),
+            });
+          }
           const wei = lowered[to] ?? 0n;
           return encodeAbiParameters([{ type: 'uint256' }], [wei]);
         }
@@ -103,28 +128,30 @@ describe('sumErc20Balances', () => {
 });
 
 describe('sumErc20Balances — atomicity and dedupe', () => {
-  it('pins every balance read to ONE explicit block, never "latest"', async () => {
+  it('fetches ALL balances in ONE aggregate3 eth_call — the atomicity boundary', async () => {
     // The summed tokens are stations the SAME funds pass through (in-place
-    // conversions), so reads answered at different "latest"s can count one chunk of
-    // money once per token. One pinned block makes the sum a statement about a
-    // single state root, however viem chunks or retries the calls.
-    blocksAskedSink = [];
+    // conversions). N separate reads can straddle a conversion tx and count one chunk
+    // of money once per token; a single aggregate3 is one EVM execution at one state
+    // root, and enters any outer batch as ONE entry that can never be split.
+    aggregate3CallsSink = [];
     const client = multiTokenClient({ [TOKEN_A]: 1n, [TOKEN_B]: 2n, [TOKEN_C]: 4n });
-    await sumErc20Balances(client, [TOKEN_A, TOKEN_B, TOKEN_C], '0x000000000000000000000000000000000000dEaD');
-    expect(blocksAskedSink.length).toBe(3);
-    expect(new Set(blocksAskedSink).size).toBe(1);
-    expect(blocksAskedSink[0]).not.toBe('latest');
-    blocksAskedSink = null;
+    const total = await sumErc20Balances(
+      client,
+      [TOKEN_A, TOKEN_B, TOKEN_C],
+      '0x000000000000000000000000000000000000dEaD',
+    );
+    expect(total).toBe(7n);
+    expect(aggregate3CallsSink.length).toBe(1);
+    aggregate3CallsSink = null;
   });
 
-  it('honors a caller-pinned blockNumber without fetching its own', async () => {
-    blocksAskedSink = [];
-    const client = multiTokenClient({ [TOKEN_A]: 1n });
-    await sumErc20Balances(client, [TOKEN_A], '0x000000000000000000000000000000000000dEaD', {
-      blockNumber: 0x42n,
-    });
-    expect(blocksAskedSink).toEqual(['0x42']);
-    blocksAskedSink = null;
+  it('works on a client built without a chain (explicit multicall3 address)', async () => {
+    // Callers and tests pass minimal clients; the canonical Multicall3 address is
+    // byte-identical across Polygon/Amoy, so the read must not require client.chain.
+    const client = multiTokenClient({ [TOKEN_B]: 9n });
+    expect(
+      await sumErc20Balances(client, [TOKEN_B], '0x000000000000000000000000000000000000dEaD'),
+    ).toBe(9n);
   });
 
   it('counts a repeated address ONCE, however it is cased', async () => {
@@ -140,10 +167,10 @@ describe('sumErc20Balances — atomicity and dedupe', () => {
   });
 
   it('returns 0n for an all-falsy token list without any network round trip', async () => {
-    blocksAskedSink = [];
+    aggregate3CallsSink = [];
     const client = multiTokenClient({});
     expect(await sumErc20Balances(client, ['', ''], '0x000000000000000000000000000000000000dEaD')).toBe(0n);
-    expect(blocksAskedSink).toEqual([]);
-    blocksAskedSink = null;
+    expect(aggregate3CallsSink).toEqual([]);
+    aggregate3CallsSink = null;
   });
 });
