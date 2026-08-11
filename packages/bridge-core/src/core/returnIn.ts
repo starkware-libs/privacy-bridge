@@ -65,7 +65,7 @@ import {
 } from '../derivation/index';
 import { claimToPool, buildAndProveClaim, submitProvenClaim } from './bridgeBack';
 import { assertStorageWritable } from './storageProbe';
-import { markNonRetryable } from './errors';
+import { markNonRetryable, nothingToResumeError } from './errors';
 import { sleep } from './proving';
 import {
   clearPendingReturnBurn,
@@ -1157,6 +1157,12 @@ export interface ReturnToPoolArgs {
   // Fires (step,'running') before each leg and (step,'done'|'error') after; the app
   // maps these to its Step/StepStatus UI. Presentation only — no window here.
   onStep?: (step: ReturnStep, status: ReturnStepStatus, detail?: string) => void;
+  // CONTINUE ONLY (unattended watcher / Continue button): finish a return whose burn is
+  // already committed, never start one. Acts on an existing cursor or a pending record
+  // that resolves landed; with neither it throws NOTHING_TO_RESUME instead of falling
+  // through to prepareFreshReturn. Also skips the stale-balance heuristic — see the
+  // guard at the fresh-path entry and the heuristic's own condition.
+  resume?: boolean;
 }
 
 export interface ReturnToPoolResult {
@@ -1190,6 +1196,7 @@ export interface ReturnToPoolResult {
 //   - resume with a consumed CCTP nonce: the folded claim already landed → skip the
 //     claim (returnBurnToPool signals alreadyClaimed) and clear the cursor;
 //   - fresh: prepareFreshReturn() sizes + burns, then claims.
+//   - resume: true — finish-only; both the fresh path and the stale re-validation are off.
 // The cursor is CLEARED after the claim (the claim stage is its documented owner).
 export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPoolResult> {
   const {
@@ -1202,6 +1209,7 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     onStaleCursorCleared,
     destChainId,
     onStep,
+    resume,
   } = args;
   const minFinalityThreshold = args.minFinalityThreshold ?? STANDARD_FINALITY;
   const maxFee = args.maxFee ?? 0n;
@@ -1321,7 +1329,13 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
   // the balance verdict is not final on its own (a second sale's proceeds can land at ≈ the
   // frozen amount), so a would-be clear first chain-verifies the cursor's own burn. An
   // unverifiable read keeps the cursor and fails transient, never the re-burning path.
-  if (cursor && readReturnableBalance && !promoted && cursor.proven !== true) {
+  //
+  // SKIPPED on `resume` — the whole check exists to decide whether to ABANDON the cursor for
+  // a fresh re-burn, and a resume has no fresh path to abandon it to. Left running it could
+  // only drop the cursor's burnTx (the one handle on a committed burn) or stall an unattended
+  // resume on an unverifiable read. Cursor invalidation still has an owner: an ordinary
+  // (non-resume) call runs the full check and clears a burn the chain proves never happened.
+  if (cursor && readReturnableBalance && !promoted && !resume && cursor.proven !== true) {
     const remaining = await readReturnableBalance();
     const frozen = BigInt(cursor.amount);
     if (remaining + STALE_RETURN_DUST_TOLERANCE >= frozen) {
@@ -1389,9 +1403,24 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     // wallet's USDC is already in CCTP. Refuse before the prep runs: it converts balances
     // and marks the account as returning, which is misleading work to do for a burn we may
     // be about to refuse anyway (returnBurnToPool guards again, but only after all of it).
+    //
+    // Past the batch deadline a FRESH run is released to burn again — that release is what
+    // stops a submit that never reached the relayer from blocking retries forever. A resume
+    // has nothing to be released to, so for it the refusal stands as long as the record does:
+    // an unresolved record still points at a burn that may be on chain, and answering
+    // NOTHING_TO_RESUME over one would tell an unattended watcher to stop looking.
     const unresolved = readPendingReturnBurn(evmAddress);
-    if (unresolved && isPendingBurnExecutable(unresolved)) {
+    if (unresolved && (resume || isPendingBurnExecutable(unresolved))) {
       const err = unresolvedSubmissionError(unresolved);
+      emit('cctp', 'error', err.message);
+      throw err;
+    }
+
+    // RESUME-ONLY STOP. Everything past this line can START a return — prepareFreshReturn
+    // converts pUSD in place, signs, and burns — so one guard at the fresh-path entry makes
+    // "a continue can never start a burn" true by construction.
+    if (resume) {
+      const err = nothingToResumeError('There is no in-flight return to continue for this wallet.');
       emit('cctp', 'error', err.message);
       throw err;
     }
