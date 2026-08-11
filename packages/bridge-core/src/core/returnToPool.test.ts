@@ -133,6 +133,7 @@ vi.mock('./config', async (importOriginal) => {
 import { encodeAbiParameters, encodeEventTopics } from 'viem';
 
 import { config, getEvmCctpSource } from './config';
+import { isNonRetryable, isTransientError } from './errors';
 import { TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn';
 import {
   returnToPool,
@@ -172,6 +173,17 @@ const EXPECTED_COMMITMENT = deriveInboundCommitment({
   userAddr: BigInt(SN_ADDRESS),
   userPrivateKey: VIEWING_KEY,
   inboundAddr: BigInt(INBOUND),
+  sourceDomain: POLYGON_DOMAIN,
+  nonce: ACCOUNT_NONCE,
+});
+
+// The commitment a burn bound against a PREVIOUS InboundAnonymizer deployment — what a
+// pre-redeploy cursor carries, and what a fresh derivation would never reproduce.
+const PRIOR_INBOUND = '0xdead0000beef';
+const PRIOR_COMMITMENT = deriveInboundCommitment({
+  userAddr: BigInt(SN_ADDRESS),
+  userPrivateKey: VIEWING_KEY,
+  inboundAddr: BigInt(PRIOR_INBOUND),
   sourceDomain: POLYGON_DOMAIN,
   nonce: ACCOUNT_NONCE,
 });
@@ -224,10 +236,10 @@ function burnedCursor(overrides: Partial<ReturnCursor> = {}): ReturnCursor {
 
 // A genuinely-encoded TokenMessengerV2 DepositForBurn log, so the chain-verify decodes it
 // for real rather than matching a substring.
-function depositForBurnLog(commitment: bigint) {
+function depositForBurnLog(commitment: bigint, address?: string) {
   const source = getEvmCctpSource(config.polygon.chainId)!;
   return {
-    address: source.tokenMessenger as `0x${string}`,
+    address: (address ?? source.tokenMessenger) as `0x${string}`,
     topics: encodeEventTopics({
       abi: TOKEN_MESSENGER_EVENT_ABI,
       eventName: 'DepositForBurn',
@@ -260,12 +272,25 @@ function depositForBurnLog(commitment: bigint) {
   };
 }
 
-function seedBurnReceipt(hash: string, commitment: bigint): void {
+function burnReceipt(
+  commitment: bigint,
+  opts: { status?: string; address?: string } = {},
+): Record<string, unknown> {
+  return {
+    transactionHash: CURSOR_BURN_TX,
+    status: opts.status ?? '0x1',
+    logs: [depositForBurnLog(commitment, opts.address)],
+  };
+}
+
+// Answers the two eth_* reads the chain-verify makes, for CURSOR_BURN_TX only. Both
+// default to null (nothing on chain).
+function stubEthReads(opts: { receipt?: unknown; tx?: unknown } = {}): void {
   request.mockImplementation(async (args: { method: string; params?: unknown[] }) => {
-    if (args.method !== 'eth_getTransactionReceipt') return null;
-    const asked = String(args.params?.[0] ?? '').toLowerCase();
-    if (asked !== hash.toLowerCase()) return null;
-    return { transactionHash: hash, status: '0x1', logs: [depositForBurnLog(commitment)] };
+    if (String(args.params?.[0] ?? '').toLowerCase() !== CURSOR_BURN_TX.toLowerCase()) return null;
+    if (args.method === 'eth_getTransactionReceipt') return opts.receipt ?? null;
+    if (args.method === 'eth_getTransactionByHash') return opts.tx ?? null;
+    return null;
   });
 }
 
@@ -441,7 +466,7 @@ describe('returnToPool — FUND-SAFETY', () => {
     // losing its burnTx and stranding the CCTP burn.
     seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
     readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
-    seedBurnReceipt(CURSOR_BURN_TX, EXPECTED_COMMITMENT);
+    stubEthReads({ receipt: burnReceipt(EXPECTED_COMMITMENT) });
     const onStaleCursorCleared = vi.fn();
 
     const result = await run({ onStaleCursorCleared });
@@ -452,6 +477,71 @@ describe('returnToPool — FUND-SAFETY', () => {
     expect(result.ranFreshBurn).toBe(false);
     expect(result.amountReturned).toBe(FRESH_AMOUNT);
     expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] matches the CURSOR\'s commitment, not a fresh derivation (pre-redeploy cursor is KEPT)', async () => {
+    // The cursor's burn bound a commitment derived against the OLD InboundAnonymizer. An
+    // implementation that re-derived the commitment from current config would find no match
+    // and destroy a cursor whose burn is on chain.
+    seedCursor(
+      burnedCursor({
+        amount: FRESH_AMOUNT.toString(),
+        commitment: PRIOR_COMMITMENT.toString(),
+        inboundAnonymizer: PRIOR_INBOUND,
+      }),
+    );
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    stubEthReads({ receipt: burnReceipt(PRIOR_COMMITMENT) });
+    const onStaleCursorCleared = vi.fn();
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(result.ranFreshBurn).toBe(false);
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a mined receipt whose hookData is a DIFFERENT commitment is UNKNOWN, never a clear', async () => {
+    // Ambiguous evidence, not absence: a drift in the hookData wire format would otherwise
+    // turn every real burn into "never happened" and re-burn it.
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    stubEthReads({ receipt: burnReceipt(PRIOR_COMMITMENT) });
+    const onStaleCursorCleared = vi.fn();
+
+    await expect(run({ onStaleCursorCleared })).rejects.toThrow(/verify/i);
+
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a DepositForBurn from a FOREIGN TokenMessenger is UNKNOWN, never a clear', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    stubEthReads({
+      receipt: burnReceipt(EXPECTED_COMMITMENT, {
+        address: '0x00000000000000000000000000000000000000ff',
+      }),
+    });
+    const onStaleCursorCleared = vi.fn();
+
+    await expect(run({ onStaleCursorCleared })).rejects.toThrow(/verify/i);
+
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a REVERTED receipt is true absence → clears and reports it', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    stubEthReads({ receipt: burnReceipt(EXPECTED_COMMITMENT, { status: '0x0' }) });
+    const onStaleCursorCleared = vi.fn();
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(result.ranFreshBurn).toBe(true);
+    expect(onStaleCursorCleared).toHaveBeenCalledTimes(1);
   });
 
   it('[stale-cursor CHAIN-VERIFY] a receipt-ABSENT burnTx still clears, and reports it via onStaleCursorCleared', async () => {
@@ -466,18 +556,74 @@ describe('returnToPool — FUND-SAFETY', () => {
     expect(onStaleCursorCleared).toHaveBeenCalledTimes(1);
   });
 
-  it('[stale-cursor CHAIN-VERIFY] a receipt read that THROWS is UNKNOWN — cursor preserved, no clear, no callback', async () => {
+  it('[stale-cursor CHAIN-VERIFY] a null receipt whose TX EXISTS (unmined / lagging node) preserves the cursor', async () => {
+    // The SDK's own RPC is a different endpoint from the app's, so a lagging pool can serve
+    // "balance full + no receipt" for a burn that is really in the mempool. Clearing there
+    // is the double-burn.
     seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
     readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
-    request.mockRejectedValue(new Error('polygon rpc down'));
+    stubEthReads({ receipt: null, tx: { hash: CURSOR_BURN_TX, blockNumber: null } });
     const onStaleCursorCleared = vi.fn();
 
     await expect(run({ onStaleCursorCleared })).rejects.toThrow(/verify/i);
 
     expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
     expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a receipt read that THROWS is UNKNOWN — cursor preserved, no clear, no callback, TRANSIENT', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    request.mockRejectedValue(new Error('polygon rpc down'));
+    const onStaleCursorCleared = vi.fn();
+
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    // The consumer branches on isTransientError to show the resumable "funds are safe" card
+    // instead of a hard failure — a wording-only change must fail here.
+    expect(err).toBeInstanceOf(Error);
+    expect(isTransientError(err)).toBe(true);
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
     expect(submitGaslessBatch).not.toHaveBeenCalled();
     expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] an unsupported evmChainId fails NON-RETRYABLE and names the chain', async () => {
+    // Permanent and deterministic (a chain row dropped from EVM_CCTP_SOURCES): telling the
+    // user to try again would loop forever.
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString(), evmChainId: 999_999 }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('999999');
+    expect(isTransientError(err)).toBe(false);
+    expect(isNonRetryable(err)).toBe(true);
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a THROWING onStaleCursorCleared cannot strand the run after the clear', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn(() => {
+      throw new Error('consumer blew up');
+    });
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(result.ranFreshBurn).toBe(true);
+    expect(prepareFreshReturn).toHaveBeenCalledTimes(1);
   });
 
   it('[stale-cursor CHAIN-VERIFY] a `proven` cursor skips the heuristic entirely — no balance read, no receipt read', async () => {

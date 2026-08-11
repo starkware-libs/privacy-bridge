@@ -393,23 +393,36 @@ function writeInflightReturnVerified(evmAddress: string, record: InflightReturn)
   return !!persisted && persisted.burnTx === record.burnTx && persisted.phase === record.phase;
 }
 
-// Chain evidence about a cursor's own burn tx. 'unknown' means the read failed and proves
-// nothing — it must never be read as absence.
-type CursorBurnVerdict = 'found' | 'not-found' | 'unknown';
+// Chain evidence about a cursor's own burn tx. 'unknown' covers a failed read AND an
+// ambiguous answer — neither is absence. 'unsupported-chain' is permanent: there is no
+// RPC left to ask.
+type CursorBurnVerdict = 'found' | 'not-found' | 'unknown' | 'unsupported-chain';
 
-// One eth_getTransactionReceipt on the cursor's own hash (no log range, so range-capped
+// eth_getTransactionReceipt on the cursor's own hash (no log range, so range-capped
 // providers work). The hookData commitment comes from the CURSOR, never a fresh
 // derivation — a cursor predating an InboundAnonymizer redeploy carries a different one.
-// Absence is a null RESULT; every throw is 'unknown'.
+//
+// Only two answers are absence: a REVERTED receipt, and a hash no node has ever seen. A
+// mined receipt without our DepositForBurn is ambiguous (an address or wire-format drift
+// would otherwise re-burn every real burn), and a null receipt for a tx that DOES exist is
+// merely unmined — this RPC is a different endpoint from the caller's balance reader, so a
+// lagging pool can serve "balance full, no receipt" for a burn sitting in the mempool.
 async function verifyCursorBurnOnChain(cursor: InflightReturn): Promise<CursorBurnVerdict> {
   const source = getEvmCctpSource(cursor.evmChainId);
-  if (!source) return 'unknown';
+  if (!source) return 'unsupported-chain';
   try {
-    const receipt = await evmClientForSource(source).request({
+    const client = evmClientForSource(source);
+    const hash = cursor.burnTx as `0x${string}`;
+    const receipt = await client.request({
       method: 'eth_getTransactionReceipt',
-      params: [cursor.burnTx as `0x${string}`],
+      params: [hash],
     });
-    if (!receipt) return 'not-found';
+    if (!receipt) {
+      const tx = await client.request({ method: 'eth_getTransactionByHash', params: [hash] });
+      return tx ? 'unknown' : 'not-found';
+    }
+    const status = String((receipt as { status?: unknown }).status ?? '');
+    if (status !== '0x1') return status === '0x0' ? 'not-found' : 'unknown';
     const wantHookData = encodeCommitmentHookData(BigInt(cursor.commitment)).toLowerCase();
     const burns = parseEventLogs({
       abi: TOKEN_MESSENGER_EVENT_ABI,
@@ -421,7 +434,7 @@ async function verifyCursorBurnOnChain(cursor: InflightReturn): Promise<CursorBu
         log.address.toLowerCase() === source.tokenMessenger.toLowerCase() &&
         log.args.hookData?.toLowerCase() === wantHookData,
     );
-    return matched ? 'found' : 'not-found';
+    return matched ? 'found' : 'unknown';
   } catch {
     return 'unknown';
   }
@@ -1313,9 +1326,22 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
     const frozen = BigInt(cursor.amount);
     if (remaining + STALE_RETURN_DUST_TOLERANCE >= frozen) {
       const verdict = await verifyCursorBurnOnChain(cursor);
+      if (verdict === 'unsupported-chain') {
+        const err = markNonRetryable(
+          new Error(
+            `Cannot verify the in-flight return burn: EVM chain ${cursor.evmChainId} is not supported by this build. ` +
+              'Your resume point is kept, but retrying will not help — contact support.',
+          ),
+        );
+        emit('cctp', 'error', err.message);
+        throw err;
+      }
       if (verdict === 'unknown') {
+        // Worded to satisfy isTransientError: the consumer branches on it to show the
+        // resumable "your funds are safe" card instead of a hard failure.
         const err = new Error(
-          'Could not verify the in-flight return burn on chain — your resume point is kept. Try again in a moment.',
+          'Could not verify the in-flight return burn on chain — verification is temporarily unavailable. ' +
+            'Your resume point is kept; try again in a moment.',
         );
         emit('cctp', 'error', err.message);
         throw err;
@@ -1323,7 +1349,11 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
       if (verdict === 'not-found') {
         clearInflightReturn(evmAddress);
         cursor = null;
-        onStaleCursorCleared?.();
+        try {
+          onStaleCursorCleared?.();
+        } catch {
+          // A consumer's bookkeeping must not strand the fresh path behind an already-done clear.
+        }
       }
     }
   }
