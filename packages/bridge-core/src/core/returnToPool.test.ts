@@ -41,6 +41,7 @@ const {
   PROVEN,
   getLogs,
   getBlockNumber,
+  request,
 } = vi.hoisted(() => {
   // Opaque proven-claim artifact buildAndProveClaim hands submitProvenClaim — the
   // orchestrator treats it as a black box, so a sentinel is enough to assert it is
@@ -61,6 +62,9 @@ const {
     claimToPool: vi.fn(async () => ({ claimTxHash: '0xc1a1m' })),
     getLogs: vi.fn(async () => [] as unknown[]),
     getBlockNumber: vi.fn(async () => 1_000n),
+    // eth_* JSON-RPC seam. Default: the burn tx has NO receipt (absent), which is the
+    // "genuinely stale cursor" case the balance heuristic was written for.
+    request: vi.fn(async (_args: { method: string; params?: unknown[] }) => null as unknown),
     // The folded claim: build the proof (commits the CCTP message) then submit it.
     buildAndProveClaim: vi.fn(async () => PROVEN),
     submitProvenClaim: vi.fn(async () => '0xc1a1m'),
@@ -118,7 +122,7 @@ vi.mock('viem', async (importOriginal) => {
   const mod = await importOriginal<typeof import('viem')>();
   return {
     ...mod,
-    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber })),
+    createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber, request })),
   };
 });
 vi.mock('./config', async (importOriginal) => {
@@ -126,7 +130,10 @@ vi.mock('./config', async (importOriginal) => {
   return { ...mod, config: { ...mod.config, inboundAnonymizerAddress: '0x49abc' } };
 });
 
-import { config } from './config';
+import { encodeAbiParameters, encodeEventTopics } from 'viem';
+
+import { config, getEvmCctpSource } from './config';
+import { TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn';
 import {
   returnToPool,
   INFLIGHT_RETURN_KEY,
@@ -191,6 +198,7 @@ interface ReturnCursor {
   commitment: string;
   evmChainId: number;
   inboundAnonymizer?: string;
+  proven?: true;
 }
 function seedCursor(record: ReturnCursor): void {
   localStorage.setItem(INFLIGHT_RETURN_KEY, JSON.stringify({ [EVM_ADDRESS.toLowerCase()]: record }));
@@ -200,16 +208,65 @@ function readCursor(): ReturnCursor | undefined {
   if (!raw) return undefined;
   return (JSON.parse(raw) as Record<string, ReturnCursor>)[EVM_ADDRESS.toLowerCase()];
 }
+const CURSOR_BURN_TX = '0x0ab12cd34e';
+
 function burnedCursor(overrides: Partial<ReturnCursor> = {}): ReturnCursor {
   return {
     accountIndex: ACCOUNT_INDEX,
-    burnTx: '0x0ab12cd34e',
+    burnTx: CURSOR_BURN_TX,
     sourceDomain: POLYGON_DOMAIN,
     amount: FRESH_AMOUNT.toString(),
     commitment: EXPECTED_COMMITMENT.toString(),
     evmChainId: config.polygon.chainId,
     ...overrides,
   };
+}
+
+// A genuinely-encoded TokenMessengerV2 DepositForBurn log, so the chain-verify decodes it
+// for real rather than matching a substring.
+function depositForBurnLog(commitment: bigint) {
+  const source = getEvmCctpSource(config.polygon.chainId)!;
+  return {
+    address: source.tokenMessenger as `0x${string}`,
+    topics: encodeEventTopics({
+      abi: TOKEN_MESSENGER_EVENT_ABI,
+      eventName: 'DepositForBurn',
+      args: {
+        burnToken: '0x0000000000000000000000000000000000000001',
+        depositor: DEPOSIT_WALLET.toLowerCase() as `0x${string}`,
+        minFinalityThreshold: 2000,
+      },
+    }),
+    data: encodeAbiParameters(
+      [
+        { name: 'amount', type: 'uint256' },
+        { name: 'mintRecipient', type: 'bytes32' },
+        { name: 'destinationDomain', type: 'uint32' },
+        { name: 'destinationTokenMessenger', type: 'bytes32' },
+        { name: 'destinationCaller', type: 'bytes32' },
+        { name: 'maxFee', type: 'uint256' },
+        { name: 'hookData', type: 'bytes' },
+      ],
+      [
+        FRESH_AMOUNT,
+        `0x${INBOUND_FIELD64}`,
+        config.cctp.starknetDomain,
+        `0x${'00'.repeat(32)}`,
+        `0x${INBOUND_FIELD64}`,
+        0n,
+        `0x${commitment.toString(16).padStart(64, '0')}`,
+      ],
+    ),
+  };
+}
+
+function seedBurnReceipt(hash: string, commitment: bigint): void {
+  request.mockImplementation(async (args: { method: string; params?: unknown[] }) => {
+    if (args.method !== 'eth_getTransactionReceipt') return null;
+    const asked = String(args.params?.[0] ?? '').toLowerCase();
+    if (asked !== hash.toLowerCase()) return null;
+    return { transactionHash: hash, status: '0x1', logs: [depositForBurnLog(commitment)] };
+  });
 }
 
 function run(overrides: Partial<Parameters<typeof returnToPool>[0]> = {}) {
@@ -244,6 +301,8 @@ beforeEach(() => {
   }));
   // Default: the wallet is DRAINED (consistent cursor) so a resume is honored.
   readReturnableBalance = vi.fn(async () => 0n);
+  // Default: no receipt for any hash — the burn is absent from chain.
+  request.mockImplementation(async () => null);
   claimToPool.mockResolvedValue({ claimTxHash: '0xc1a1m' });
   buildAndProveClaim.mockResolvedValue(PROVEN);
   submitProvenClaim.mockResolvedValue('0xc1a1m');
@@ -374,6 +433,66 @@ describe('returnToPool — FUND-SAFETY', () => {
     // Sized to the REAL balance (2_000_000n), NOT the frozen 1n.
     expect(result.amountReturned).toBe(2_000_000n);
     expect(result.ranFreshBurn).toBe(true);
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a cursor whose burnTx IS on chain is KEPT even when the balance says "never burned"', async () => {
+    // The money path: a second sale's proceeds can land at ≈ the frozen amount, so the
+    // balance heuristic alone would clear a cursor whose burn is provably on-chain —
+    // losing its burnTx and stranding the CCTP burn.
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    seedBurnReceipt(CURSOR_BURN_TX, EXPECTED_COMMITMENT);
+    const onStaleCursorCleared = vi.fn();
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(submitGaslessBatch).not.toHaveBeenCalled();
+    expect(waitForAttestation).toHaveBeenCalledWith(CURSOR_BURN_TX, expect.anything());
+    expect(result.ranFreshBurn).toBe(false);
+    expect(result.amountReturned).toBe(FRESH_AMOUNT);
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a receipt-ABSENT burnTx still clears, and reports it via onStaleCursorCleared', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(prepareFreshReturn).toHaveBeenCalledTimes(1);
+    expect(result.ranFreshBurn).toBe(true);
+    expect(onStaleCursorCleared).toHaveBeenCalledTimes(1);
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a receipt read that THROWS is UNKNOWN — cursor preserved, no clear, no callback', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString() }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    request.mockRejectedValue(new Error('polygon rpc down'));
+    const onStaleCursorCleared = vi.fn();
+
+    await expect(run({ onStaleCursorCleared })).rejects.toThrow(/verify/i);
+
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(submitGaslessBatch).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] a `proven` cursor skips the heuristic entirely — no balance read, no receipt read', async () => {
+    seedCursor(burnedCursor({ amount: FRESH_AMOUNT.toString(), proven: true }));
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const result = await run({ onStaleCursorCleared });
+
+    expect(readReturnableBalance).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(result.ranFreshBurn).toBe(false);
+    expect(result.amountReturned).toBe(FRESH_AMOUNT);
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
   });
 
   it('[resume] a cursor whose wallet is DRAINED is KEPT → attest-only resume, folded claim (no fresh burn)', async () => {
