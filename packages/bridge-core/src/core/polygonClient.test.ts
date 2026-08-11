@@ -38,6 +38,8 @@ describe('readUsdcBalance', () => {
 // A client that returns a DIFFERENT balance per token, keyed by the `to`
 // (token contract) address of the eth_call — so we can assert a per-token sum
 // across an arbitrary token list (the generic multi-token helper).
+let blocksAskedSink: string[] | null = null;
+
 function multiTokenClient(byToken: Record<string, bigint>): PublicClient {
   const lowered = Object.fromEntries(
     Object.entries(byToken).map(([addr, wei]) => [addr.toLowerCase(), wei]),
@@ -45,8 +47,11 @@ function multiTokenClient(byToken: Record<string, bigint>): PublicClient {
   return createPublicClient({
     transport: custom({
       async request({ method, params }) {
+        if (method === 'eth_blockNumber') return '0x64';
         if (method === 'eth_call') {
-          const to = ((params as [{ to?: string }])[0]?.to ?? '').toLowerCase();
+          const [call, blockTag] = params as [{ to?: string }, string];
+          blocksAskedSink?.push(blockTag);
+          const to = (call.to ?? '').toLowerCase();
           const wei = lowered[to] ?? 0n;
           return encodeAbiParameters([{ type: 'uint256' }], [wei]);
         }
@@ -97,5 +102,51 @@ describe('sumErc20Balances', () => {
       '0x000000000000000000000000000000000000dEaD',
     );
     expect(total).toBe(42n);
+  });
+});
+
+describe('sumErc20Balances — atomicity and dedupe', () => {
+  it('pins every balance read to ONE explicit block, never "latest"', async () => {
+    // The summed tokens are stations the SAME funds pass through (in-place
+    // conversions), so reads answered at different "latest"s can count one chunk of
+    // money once per token. One pinned block makes the sum a statement about a
+    // single state root, however viem chunks or retries the calls.
+    blocksAskedSink = [];
+    const client = multiTokenClient({ [TOKEN_A]: 1n, [TOKEN_B]: 2n, [TOKEN_C]: 4n });
+    await sumErc20Balances(client, [TOKEN_A, TOKEN_B, TOKEN_C], '0x000000000000000000000000000000000000dEaD');
+    expect(blocksAskedSink.length).toBe(3);
+    expect(new Set(blocksAskedSink).size).toBe(1);
+    expect(blocksAskedSink[0]).not.toBe('latest');
+    blocksAskedSink = null;
+  });
+
+  it('honors a caller-pinned blockNumber without fetching its own', async () => {
+    blocksAskedSink = [];
+    const client = multiTokenClient({ [TOKEN_A]: 1n });
+    await sumErc20Balances(client, [TOKEN_A], '0x000000000000000000000000000000000000dEaD', {
+      blockNumber: 0x42n,
+    });
+    expect(blocksAskedSink).toEqual(['0x42']);
+    blocksAskedSink = null;
+  });
+
+  it('counts a repeated address ONCE, however it is cased', async () => {
+    // Token addresses often come from independent config keys; two keys pointing at
+    // one contract must not double that balance — a silent error in the user's favour.
+    const client = multiTokenClient({ [TOKEN_B]: 5n });
+    const total = await sumErc20Balances(
+      client,
+      [TOKEN_B, TOKEN_B.toLowerCase(), TOKEN_B],
+      '0x000000000000000000000000000000000000dEaD',
+    );
+    expect(total).toBe(5n);
+  });
+
+  it('returns 0n for an all-falsy token list without any network round trip', async () => {
+    blocksAskedSink = [];
+    const client = multiTokenClient({});
+    expect(await sumErc20Balances(client, ['', ''], '0x000000000000000000000000000000000000dEaD')).toBe(0n);
+    expect(blocksAskedSink).toEqual([]);
+    blocksAskedSink = null;
   });
 });
