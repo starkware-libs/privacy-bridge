@@ -57,8 +57,10 @@ export interface DepositForBurnLog {
 // the outer error's shortMessage stays generic.
 const RANGE_CAP_HINTS: readonly RegExp[] = [
   /block range/i,
+  /\d+ blocks? (range|request|limit|window)/i,
   /range is too (large|wide)/i,
   /exceeds? (the )?maximum (block )?range/i,
+  /(larger|wider) (block )?ranges?/i,
   /query returned more than \d+ results/i,
   /response size exceeded/i,
   /too many (logs|results)/i,

@@ -62,15 +62,13 @@ function fakeClient(logsFor: (p: GetLogsArgs) => unknown[] = () => []) {
 // surfaces one: the provider's own text lives on the inner RpcRequestError's `details`,
 // while the outer error's shortMessage is generic. Shape mirrors the 2026-08-11 probe of
 // the configured Polygon RPC (free tier, hard 10-block cap, error code -32600).
-function rangeCapRejection(): unknown {
+function rangeCapRejection(
+  message = 'Under the Free tier plan you may only query up to a 10 block range. ' +
+    'Upgrade to PAYG to unlock larger ranges.',
+): unknown {
   const inner = new RpcRequestError({
     body: { method: 'eth_getLogs' },
-    error: {
-      code: -32600,
-      message:
-        'Under the Free tier plan you may only query up to a 10 block range. ' +
-        'Upgrade to PAYG to unlock larger ranges.',
-    },
+    error: { code: -32600, message },
     url: 'https://rpc.example.invalid',
   });
   return new InvalidRequestRpcError(inner);
@@ -230,6 +228,26 @@ describe('scanDepositForBurnLogs', () => {
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(LogRangeCapError);
+  });
+
+  // A cap rejection is recognized by its TEXT, so a provider that words the same refusal
+  // differently must not slip past as a generic failure. One signal is enough.
+  it.each([
+    ['request wording', 'You may only query up to a 10 block request.'],
+    ['upsell wording', 'Free tier limit reached. Upgrade to PAYG to unlock larger ranges.'],
+    ['result-limit wording', 'query returned more than 10000 results'],
+    ['response-size wording', 'Log response size exceeded. Please use a smaller block range.'],
+  ])('recognizes the %s of a range refusal', async (_label, message) => {
+    const chain = fakeClient();
+    chain.getLogs.mockRejectedValueOnce(rangeCapRejection(message));
+
+    await expect(
+      scanDepositForBurnLogs(chain.client, {
+        depositors: [WALLET_A],
+        fromBlock: 0n,
+        toBlock: 5n,
+      }),
+    ).rejects.toBeInstanceOf(LogRangeCapError);
   });
 
   it('returns NO partial result when a later chunk is range-rejected', async () => {
