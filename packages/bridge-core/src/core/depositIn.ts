@@ -45,7 +45,7 @@ import type { Account } from 'starknet';
 
 import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
-import { markNonRetryable } from './errors';
+import { nothingToResumeError } from './errors';
 import { getRpcProvider } from './provider';
 import { READ_BLOCK } from './tx';
 import {
@@ -1169,11 +1169,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   // one guard here makes "a continue can never start a burn" true by construction. A
   // caller that continues unattended must fail here instead of prompting the wallet.
   if (args.resumeOnly) {
-    const err = new Error('There is no in-flight deposit to continue for this wallet.') as Error & {
-      code: 'NOTHING_TO_RESUME';
-    };
-    err.code = 'NOTHING_TO_RESUME';
-    throw markNonRetryable(err);
+    throw nothingToResumeError('There is no in-flight deposit to continue for this wallet.');
   }
 
   // (3) FRESH PATH.
