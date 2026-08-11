@@ -61,28 +61,61 @@ export async function readUsdcBalance(
 }
 
 /**
- * Sum of `balanceOf(address)` across an arbitrary ERC-20 token list on Polygon.
- * Generic (no Polymarket coupling) — callers pass whichever token addresses are
- * relevant to them (e.g. apps/web sums native USDC + its Polymarket collateral
- * tokens to size a returnable balance). Falsy entries are skipped (contribute 0),
- * so a caller's optional/unset token addresses don't fail the read.
+ * Sum of `balanceOf(address)` across an arbitrary ERC-20 token list on Polygon,
+ * read ATOMICALLY: every balance is taken at ONE explicit block. Generic (no
+ * Polymarket coupling) — callers pass whichever token addresses are relevant to
+ * them (e.g. apps/web sums native USDC + its Polymarket collateral tokens to size
+ * a returnable balance). Falsy entries are skipped, and a repeated address
+ * (compared case-insensitively) is counted ONCE — a config that points two token
+ * keys at one contract must not double its balance.
+ *
+ * WHY THE PIN. The summed tokens are often stations the SAME funds pass through
+ * (pUSD → USDC.e → native USDC converts in place, one tx per leg), so this sum is
+ * only meaningful as a statement about a single state root. Reads at "latest" are
+ * NOT that: viem's multicall batcher packs same-tick reads from the whole app into
+ * aggregate3 chunks and SPLITS them past `batchSize` (1024 bytes of calldata), and
+ * split chunks are separate eth_calls, each answered at its own "latest". Under
+ * real load one wallet's token reads land in different chunks — and when a
+ * conversion tx lands between those blocks, the same chunk of money is counted
+ * once per token it passed through (measured in the field: a $30.20 wallet
+ * reading $60.40 and $90.60 while a redeem's return legs were in flight).
+ *
+ * Pinning composes better than an explicit per-call multicall would: viem keys its
+ * multicall scheduler by block tag, so same-block reads from a scan wave still
+ * aggregate into shared aggregate3 calls (now carrying the block), while a forced
+ * per-wallet `client.multicall` would fragment that wave into one call per wallet.
+ * `getBlockNumber` is cached (viem cacheTime), so concurrent sums share one fetch.
+ * A lagging node that hasn't seen the pinned block errors and viem's retry re-asks
+ * — strictly better than silently answering from a different moment.
+ *
+ * `options.blockNumber` lets a caller pin several RELATED reads (e.g. a wallet's
+ * sum and its EOA's sum) to one block; omitted, the latest block is fetched once.
  */
 export async function sumErc20Balances(
   client: PublicClient,
   tokens: string[],
   address: `0x${string}`,
+  options?: { blockNumber?: bigint },
 ): Promise<bigint> {
+  const distinctTokens = [
+    ...new Map(
+      tokens
+        .filter((token): token is string => Boolean(token))
+        .map((token) => [token.toLowerCase(), token] as const),
+    ).values(),
+  ];
+  if (distinctTokens.length === 0) return 0n;
+  const blockNumber = options?.blockNumber ?? (await client.getBlockNumber());
   const balances = await Promise.all(
-    tokens
-      .filter((token): token is string => Boolean(token))
-      .map((token) =>
-        client.readContract({
-          address: token as `0x${string}`,
-          abi: ERC20_BALANCE_OF_ABI,
-          functionName: 'balanceOf',
-          args: [address],
-        }),
-      ),
+    distinctTokens.map((token) =>
+      client.readContract({
+        address: token as `0x${string}`,
+        abi: ERC20_BALANCE_OF_ABI,
+        functionName: 'balanceOf',
+        args: [address],
+        blockNumber,
+      }),
+    ),
   );
   return balances.reduce((sum, bal) => sum + bal, 0n);
 }
