@@ -66,6 +66,18 @@ export function isNonRetryable(err: unknown): boolean {
   );
 }
 
+// A resume-only entry point found nothing to finish. Callers branch on `code`, so the
+// deposit and return legs raise the SAME one from here rather than each minting its own.
+// Always NON_RETRYABLE: retrying cannot conjure the missing cursor, and an unattended
+// watcher must stop rather than spin.
+export type NothingToResumeError = Error & { code: 'NOTHING_TO_RESUME' };
+
+export function nothingToResumeError(message: string): NothingToResumeError {
+  const err = new Error(message) as NothingToResumeError;
+  err.code = 'NOTHING_TO_RESUME';
+  return markNonRetryable(err);
+}
+
 export function isTransientError(err: unknown): boolean {
   if (isNonRetryable(err)) return false;
   const message = err instanceof Error ? err.message : String(err);
