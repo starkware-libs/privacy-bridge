@@ -90,17 +90,12 @@ const FASTEST_BLOCK_TIME_MS = 250;
 // Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
 
-// With no anchor there is no reliable way to MAP a timestamp to a block height — chain block
-// times span ~0.25s to ~15s, so "submitted a day ago" is anywhere from 6k to 350k blocks back
-// and any single estimated window is as likely to sit beside the burn as over it. So the
-// anchorless path WALKS BACK from the head in bounded chunks and stops on a fact rather than
-// an estimate: the first chunk whose lowest block PREDATES the submit. Each chunk costs one
-// getLogs plus one getBlock, and the chunk size stays inside provider range caps.
-const FALLBACK_CHUNK_BLOCKS = 10_000n;
-
-// Ceiling on that walk. Hitting it means we ran out of budget before reaching back past the
-// submit, so absence is NOT established and the result must be 'unknown' — the walk's whole
-// purpose is that a negative answer is earned, never assumed.
+// Ceiling on the anchorless walk, counted in getLogs calls. Hitting it means we ran out of
+// budget before reaching back past the submit, so absence is NOT established and the result
+// must be 'unknown' — the walk's whole purpose is that a negative answer is earned, never
+// assumed. REACH is therefore this budget times the configured chunk size: matching the config
+// to a narrow provider cap reaches less far back and answers 'unknown' sooner, which is the
+// fail-closed direction.
 const FALLBACK_MAX_CHUNKS = 12;
 
 // Ceiling on the submit→deadline span the window is sized from. That span comes off a
@@ -351,6 +346,12 @@ export async function resolvePendingReturnBurn(
   };
 
   try {
+    // The widest INCLUSIVE range this provider accepts — a property of the RPC plan (as low as
+    // 10 blocks), so it belongs to config, not to constants here. Every getLogs below obeys it.
+    const chunkBlocks = BigInt(config.polygonGetLogsChunkBlocks);
+    if (chunkBlocks <= 0n) {
+      throw new Error(`getLogs chunk size must be a positive block count (got ${chunkBlocks})`);
+    }
     const head = await client.getBlockNumber();
 
     // A no-match only becomes a verdict once BOTH hold: the search demonstrably covered where
@@ -359,11 +360,17 @@ export async function resolvePendingReturnBurn(
     // that releases the double-burn guard.
     const searched =
       record.fromBlock === undefined
-        ? await walkBackToSubmit(record, head, findIn, async (block) => {
-            const { timestamp } = await client.getBlock({ blockNumber: block });
-            return Number(timestamp) * 1000;
-          })
-        : await searchExactWindow(record, head, findIn);
+        ? await walkBackToSubmit(
+            record,
+            head,
+            findIn,
+            async (block) => {
+              const { timestamp } = await client.getBlock({ blockNumber: block });
+              return Number(timestamp) * 1000;
+            },
+            chunkBlocks,
+          )
+        : await searchExactWindow(record, head, findIn, chunkBlocks);
 
     if (searched.burnTx) return { kind: 'landed', burnTx: searched.burnTx };
     if (!searched.coveredSubmit) {
@@ -386,14 +393,36 @@ interface BurnSearch {
   coveredSubmit: boolean;
 }
 
+// Walk [from, to] INCLUSIVE in ranges no wider than `chunkBlocks`, oldest chunk first, and
+// stop at the first match — which is the same burn a single wide getLogs would have matched,
+// since both take the lowest-block hit. A chunk that throws PROPAGATES: the caller's verdict
+// depends on the whole range having answered, so a swallowed chunk would turn an unproven
+// absence into 'never-landed'. No call-count ceiling here, deliberately — the anchored window
+// only licenses a negative once it is fully covered, so capping the calls would put this path
+// back where it started, permanently 'unknown'.
+async function findInChunks(
+  findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+  from: bigint,
+  to: bigint,
+  chunkBlocks: bigint,
+): Promise<`0x${string}` | null> {
+  for (let lo = from; lo <= to; lo += chunkBlocks) {
+    const chunkEnd = lo + chunkBlocks - 1n;
+    const burnTx = await findIn(lo, chunkEnd > to ? to : chunkEnd);
+    if (burnTx) return burnTx;
+  }
+  return null;
+}
+
 // ANCHORED search: the record captured the chain head just before submitting, so the burn —
 // which can only execute between the submit and the deadline — must lie in
-// [anchor, anchor + deadline-span]. One getLogs, a constant ~10 minutes of blocks however old
-// the record is, which is what keeps it inside every provider's range cap.
+// [anchor, anchor + deadline-span]: a constant ~10 minutes of blocks however old the record
+// is, walked in config-sized chunks so the window stays inside the provider's range cap.
 async function searchExactWindow(
   record: PendingReturnBurn,
   head: bigint,
   findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+  chunkBlocks: bigint,
 ): Promise<BurnSearch> {
   const anchor = BigInt(record.fromBlock as string);
   if (anchor > head) {
@@ -413,7 +442,7 @@ async function searchExactWindow(
   const lower = anchor > SCAN_MARGIN_BLOCKS ? anchor - SCAN_MARGIN_BLOCKS : 0n;
   const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
   return {
-    burnTx: await findIn(lower, upper > head ? head : upper),
+    burnTx: await findInChunks(findIn, lower, upper > head ? head : upper, chunkBlocks),
     coveredSubmit: true,
   };
 }
@@ -422,16 +451,19 @@ async function searchExactWindow(
 // knowing the chain's block time (0.25s–15s across chains — a day is 6k or 350k blocks). So
 // walk back from the head in bounded chunks and stop on a FACT: the first chunk whose lowest
 // block predates the submit. At that point the walk has covered every block the burn could be
-// in, so a no-match is real; running out of chunks first leaves it unestablished.
+// in, so a no-match is real; running out of chunks first leaves it unestablished. Each chunk
+// costs one getLogs plus one getBlock, and is sized from the same provider cap as every other
+// range here — an over-wide chunk would be REJECTED, which is 'unknown' forever.
 async function walkBackToSubmit(
   record: PendingReturnBurn,
   head: bigint,
   findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
   blockTimestampMs: (block: bigint) => Promise<number>,
+  chunkBlocks: bigint,
 ): Promise<BurnSearch> {
   let hi = head;
   for (let chunk = 0; chunk < FALLBACK_MAX_CHUNKS; chunk++) {
-    const lo = hi > FALLBACK_CHUNK_BLOCKS ? hi - FALLBACK_CHUNK_BLOCKS : 0n;
+    const lo = hi >= chunkBlocks ? hi - chunkBlocks + 1n : 0n;
     const burnTx = await findIn(lo, hi);
     if (burnTx) return { burnTx, coveredSubmit: true };
     // Genesis: there is nothing older left to search, so absence is as established as it gets.
