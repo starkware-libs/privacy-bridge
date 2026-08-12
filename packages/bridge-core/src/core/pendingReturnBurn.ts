@@ -76,10 +76,10 @@ export const TOKEN_MESSENGER_EVENT_ABI = [
 export const PENDING_BURN_DEADLINE_GRACE_MS = 120_000;
 
 // The burn can only execute between the submit and the batch deadline, so the scan window
-// is that span — NOT "everything since the submit". This is what keeps a single getLogs
-// call bounded no matter how old the record is: a week-old record scans the same ~10-minute
-// window, just further back. An elapsed-time span would grow past every provider's
-// eth_getLogs range cap and fail as 'unknown' forever.
+// is that span — NOT "everything since the submit". That is what keeps the window a constant
+// ~10 minutes of blocks no matter how old the record is: a week-old record scans the same
+// span, just further back. The provider's range cap is handled separately, by chunking the
+// window; this bound is what keeps the CHUNK COUNT constant instead of growing with age.
 //
 // Sized against the FASTEST plausible EVM block time rather than a per-chain table: over-
 // estimating the block count only widens a window that is already bounded, whereas
@@ -90,19 +90,24 @@ const FASTEST_BLOCK_TIME_MS = 250;
 // Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
 
-// Ceiling on the anchorless walk, counted in getLogs calls. Hitting it means we ran out of
-// budget before reaching back past the submit, so absence is NOT established and the result
-// must be 'unknown' — the walk's whole purpose is that a negative answer is earned, never
-// assumed. REACH is therefore this budget times the configured chunk size: matching the config
-// to a narrow provider cap reaches less far back and answers 'unknown' sooner, which is the
-// fail-closed direction.
-const FALLBACK_MAX_CHUNKS = 12;
+// How far back the anchorless walk must be able to reach, in BLOCKS. Reach is a statement
+// about how old a stranded submit can be; the provider's range cap is a statement about one
+// request. Deriving reach from the cap conflates them — a narrow cap would silently shrink
+// history (at a 10-block cap, 12 chunks reach 120 blocks: ~4 minutes of Polygon). So a narrow
+// cap buys MORE CALLS instead, and reach stays invariant under the knob.
+const WALK_REACH_BLOCKS = 120_000n;
+
+// Floor on the walk's call budget, which the reach requirement raises when the cap is narrow.
+// Running out of budget before reaching back past the submit means absence is NOT established
+// and the result must be 'unknown' — the walk's whole purpose is that a negative answer is
+// earned, never assumed.
+export const FALLBACK_MAX_CHUNKS = 12;
 
 // Ceiling on the submit→deadline span the window is sized from. That span comes off a
-// PERSISTED record, and the whole point of the window is that it stays inside a provider's
-// eth_getLogs range cap — so a record carrying an implausible deadline (corrupted, or
-// written by a future version with a different batch lifetime) must not be able to widen it
-// into a call that always fails. Comfortably above any real relayer batch deadline.
+// PERSISTED record, and it is the only thing bounding how many chunks the anchored window
+// costs — so a record carrying an implausible deadline (corrupted, or written by a future
+// version with a different batch lifetime) must not be able to widen it into a scan that never
+// finishes. Comfortably above any real relayer batch deadline.
 const MAX_DEADLINE_SPAN_MS = 30 * 60_000;
 
 // SELF-CONTAINED like INFLIGHT_RETURN_KEY: device-store (T5) references only the KEY.
@@ -447,11 +452,17 @@ async function searchExactWindow(
   };
 }
 
+// Calls the walk may spend to cover WALK_REACH_BLOCKS at this cap, never fewer than the floor.
+function walkChunkBudget(chunkBlocks: bigint): number {
+  const needed = (WALK_REACH_BLOCKS + chunkBlocks - 1n) / chunkBlocks;
+  return needed > BigInt(FALLBACK_MAX_CHUNKS) ? Number(needed) : FALLBACK_MAX_CHUNKS;
+}
+
 // ANCHORLESS search: no height to key off, and timestamps cannot be mapped to heights without
 // knowing the chain's block time (0.25s–15s across chains — a day is 6k or 350k blocks). So
 // walk back from the head in bounded chunks and stop on a FACT: the first chunk whose lowest
 // block predates the submit. At that point the walk has covered every block the burn could be
-// in, so a no-match is real; running out of chunks first leaves it unestablished. Each chunk
+// in, so a no-match is real; running out of budget first leaves it unestablished. Each chunk
 // costs one getLogs plus one getBlock, and is sized from the same provider cap as every other
 // range here — an over-wide chunk would be REJECTED, which is 'unknown' forever.
 async function walkBackToSubmit(
@@ -461,8 +472,9 @@ async function walkBackToSubmit(
   blockTimestampMs: (block: bigint) => Promise<number>,
   chunkBlocks: bigint,
 ): Promise<BurnSearch> {
+  const maxChunks = walkChunkBudget(chunkBlocks);
   let hi = head;
-  for (let chunk = 0; chunk < FALLBACK_MAX_CHUNKS; chunk++) {
+  for (let chunk = 0; chunk < maxChunks; chunk++) {
     const lo = hi >= chunkBlocks ? hi - chunkBlocks + 1n : 0n;
     const burnTx = await findIn(lo, hi);
     if (burnTx) return { burnTx, coveredSubmit: true };
