@@ -134,9 +134,10 @@ import { encodeAbiParameters, encodeEventTopics } from 'viem';
 
 import { config, getEvmCctpSource } from './config';
 import { isNonRetryable, isTransientError } from './errors';
-import { TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn';
+import { PENDING_BURN_DEADLINE_GRACE_MS, TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn';
 import {
   returnToPool,
+  DEFAULT_BATCH_DEADLINE_MS,
   INFLIGHT_RETURN_KEY,
   type FreshReturnPlan,
   type ReturnStep,
@@ -211,6 +212,7 @@ interface ReturnCursor {
   evmChainId: number;
   inboundAnonymizer?: string;
   proven?: true;
+  burnSubmittedAtMs?: number;
 }
 function seedCursor(record: ReturnCursor): void {
   localStorage.setItem(INFLIGHT_RETURN_KEY, JSON.stringify({ [EVM_ADDRESS.toLowerCase()]: record }));
@@ -554,6 +556,102 @@ describe('returnToPool — FUND-SAFETY', () => {
     expect(prepareFreshReturn).toHaveBeenCalledTimes(1);
     expect(result.ranFreshBurn).toBe(true);
     expect(onStaleCursorCleared).toHaveBeenCalledTimes(1);
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] an ABSENT burnTx still inside the batch deadline is UNKNOWN, never a clear', async () => {
+    // A relayer broadcasts to its OWN node. For as long as the batch could still execute,
+    // "no node we can reach has this hash" is propagation, not absence — and clearing there
+    // drops the only handle on a burn that is about to mine, whose CCTP message then never
+    // gets claimed. Same release rule the pending-record guard uses.
+    seedCursor(
+      burnedCursor({ amount: FRESH_AMOUNT.toString(), burnSubmittedAtMs: Date.now() - 1_000 }),
+    );
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(isTransientError(err)).toBe(true);
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(submitGaslessBatch).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] an ABSENT burnTx inside the pending-record grace is UNKNOWN, never a clear', async () => {
+    // The pending-record guard treats this whole interval as possibly live to absorb clock
+    // skew and RPC log lag. The cursor guard must use that same release boundary: otherwise
+    // it drops the only burnTx handle while the companion pending record would still refuse
+    // a fresh burn.
+    seedCursor(
+      burnedCursor({
+        amount: FRESH_AMOUNT.toString(),
+        burnSubmittedAtMs:
+          Date.now() - DEFAULT_BATCH_DEADLINE_MS - PENDING_BURN_DEADLINE_GRACE_MS + 60_000,
+      }),
+    );
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(isTransientError(err)).toBe(true);
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] an ABSENT burnTx with a future submit timestamp is UNKNOWN, never a clear', async () => {
+    // Wall clocks can step backwards after the gasless submitter returns its hash. A future
+    // stamp is therefore not evidence that the batch is stale; treat it like the live window
+    // so an RPC's absent answer cannot reopen a second burn while the first still propagates.
+    seedCursor(
+      burnedCursor({
+        amount: FRESH_AMOUNT.toString(),
+        burnSubmittedAtMs: Date.now() + 60_000,
+      }),
+    );
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(isTransientError(err)).toBe(true);
+    expect(readCursor()).toMatchObject({ burnTx: CURSOR_BURN_TX });
+    expect(prepareFreshReturn).not.toHaveBeenCalled();
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
+  });
+
+  it('[stale-cursor CHAIN-VERIFY] the fresh path STAMPS the submit time, and it survives the storage round-trip', async () => {
+    // Without the stamp on the writer — or with a reader that drops unknown fields — the age
+    // gate above degrades to today's clear-on-absence and the two tests still pass.
+    waitForAttestation.mockRejectedValueOnce(new Error('fetch failed'));
+
+    await expect(run()).rejects.toThrow(/fetch failed/i);
+
+    const stamped = readCursor()!.burnSubmittedAtMs;
+    expect(typeof stamped).toBe('number');
+
+    // Re-enter with that persisted cursor: the guard must SEE the stamp through the read path.
+    vi.clearAllMocks();
+    readReturnableBalance.mockResolvedValue(FRESH_AMOUNT);
+    const onStaleCursorCleared = vi.fn();
+    const err = await run({ onStaleCursorCleared }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(isTransientError(err)).toBe(true);
+    expect(onStaleCursorCleared).not.toHaveBeenCalled();
   });
 
   it('[stale-cursor CHAIN-VERIFY] a null receipt whose TX EXISTS (unmined / lagging node) preserves the cursor', async () => {
