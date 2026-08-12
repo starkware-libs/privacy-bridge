@@ -5,12 +5,19 @@
 // Pure functions only — no DOM/network/React. Never log or persist raw keys.
 // (Absorbed from the former packages/shared.)
 
-export { STARKNET_KEY_LABEL, VIEWING_KEY_LABEL, POLYGON_EOA_LABEL } from './messages.js';
+export {
+  STARKNET_KEY_LABEL,
+  VIEWING_KEY_LABEL,
+  POLYGON_EOA_LABEL,
+  RETURN_WAL_LABEL,
+} from './messages.js';
 export { deriveStarknetPrivateKey, deriveStarknetAccount } from './starknet-key.js';
 export type { StarknetAccount } from './starknet-key.js';
 export { MAX_VIEWING_KEY, deriveViewingKey } from './viewing-key.js';
 export { derivePolygonEoa } from './polygon-key.js';
 export type { PolygonEoa } from './polygon-key.js';
+export { deriveReturnWalKeys } from './return-wal.js';
+export type { ReturnWalKeys } from './return-wal.js';
 export {
   CLAIM_TAG,
   BIND_TAG,
@@ -29,7 +36,4 @@ export {
   deriveInboundCommitment,
   encodeCommitmentHookData,
 } from './inbound-commitment.js';
-export type {
-  InboundCommitmentArgs,
-  DeriveInboundCommitmentArgs,
-} from './inbound-commitment.js';
+export type { InboundCommitmentArgs, DeriveInboundCommitmentArgs } from './inbound-commitment.js';
