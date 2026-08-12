@@ -37,3 +37,4 @@ coverage/
 # global gitignore that excludes `.claude/`.
 !.claude/
 !.claude/skills/
+.worktrees/
