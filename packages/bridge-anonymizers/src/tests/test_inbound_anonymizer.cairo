@@ -7,6 +7,7 @@
 //! pool tx. CCTP MessageTransmitter + USDC are mocked; the contract under test is
 //! real, and messages are built with the exact CCTP-v2 big-endian layout. Covers:
 //!  - happy path: one call mints the real delta and returns it as an open note;
+//!  - the fold emits one `ReturnClaimed { commitment, amount, note_id }`;
 //!  - claim is pool-only (CALLER_NOT_POOL);
 //!  - the mint binds to the proven commitment (COMMITMENT_MISMATCH) and to this
 //!    contract as destinationCaller (DEST_CALLER_MISMATCH), both asserted pre-mint;
@@ -31,8 +32,8 @@ use bridge_anonymizers::types::OpenNoteDeposit;
 use core::byte_array::ByteArrayTrait;
 use core::poseidon::poseidon_hash_span;
 use snforge_std::{
-    ContractClassTrait, DeclareResultTrait, declare, start_cheat_caller_address,
-    stop_cheat_caller_address,
+    ContractClassTrait, DeclareResultTrait, EventSpyAssertionsTrait, declare, spy_events,
+    start_cheat_caller_address, stop_cheat_caller_address,
 };
 use starknet::ContractAddress;
 
@@ -169,6 +170,33 @@ fn fold_mints_delta_and_returns_open_note() {
     let ctrl = IMockUsdcControlDispatcher { contract_address: d.usdc };
     assert(ctrl.last_approve_spender() == pool_addr(), 'BAD_APPROVE_SPENDER');
     assert(ctrl.last_approve_amount() == AMOUNT_A, 'BAD_APPROVE_AMT');
+}
+
+// --- 1b the fold emits one ReturnClaimed tying the mint to its pool note ------
+#[test]
+fn fold_emits_return_claimed() {
+    let d = deploy();
+    let commitment: felt252 = 0x5eed;
+    let note_id: felt252 = 0x7a;
+    let msg = build_message(2, d.inbound, AMOUNT_A, d.inbound, commitment);
+    let amount: u128 = AMOUNT_A.try_into().unwrap();
+
+    let mut spy = spy_events();
+    fold(d, commitment, note_id, msg);
+
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    d.inbound,
+                    bridge_anonymizers::inbound_anonymizer::InboundAnonymizer::Event::ReturnClaimed(
+                        bridge_anonymizers::inbound_anonymizer::InboundAnonymizer::ReturnClaimed {
+                            commitment, amount, note_id,
+                        },
+                    ),
+                ),
+            ],
+        );
 }
 
 // --- 2 claim is pool-only ----------------------------------------------------
