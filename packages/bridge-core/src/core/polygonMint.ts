@@ -428,14 +428,12 @@ export async function fetchCctpMessageByTxHash(
   }
   const entry = selectMatchingMessage(outcome.messages, match);
   if (!entry) {
-    // Same rule the poller applies: a sole undecodable entry reporting failed/rejected is
-    // consulted for that status, so a Circle rejection of OUR burn is never filed as "not ours".
-    const sole = soleUnattributableEntry(outcome.messages, entry);
-    if (sole && TERMINAL_IRIS_STATUS.test(sole.status)) {
-      throw new Error(
-        `CCTP attestation failed (Iris status "${sole.status}") for burn ${burnTxHash}.`,
-      );
-    }
+    // NO terminal attribution without a hookData match — deliberately unlike the poller, which
+    // consults a sole undecodable entry's status. A return burn rides a RELAYER batch carrying
+    // other users' CCTP messages, so "exactly one entry" describes Iris's indexing at this
+    // instant, not ownership. The poller can take that bet (a wrong UNKNOWN only keeps it
+    // waiting); this read cannot, because its callers CLEAR the cursor on a terminal verdict —
+    // filing a stranger's rejection as ours would drop a live return's only handle.
     throw new IrisMessageUnavailableError(
       'unmatched',
       `No CCTP message matching burn ${burnTxHash} among the ${outcome.messages.length} Iris returned.`,
