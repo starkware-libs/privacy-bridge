@@ -100,24 +100,17 @@ pub mod InboundAnonymizer {
     #[event]
     #[derive(Drop, starknet::Event)]
     pub enum Event {
-        ReturnBound: ReturnBound,
-        Claimed: Claimed,
+        ReturnClaimed: ReturnClaimed,
     }
 
-    /// Emitted for the mint leg of the atomic return; `minted` is the real balance delta.
+    /// Emitted once per atomic return: the CCTP mint landed (`amount` is the real
+    /// balance delta) and was handed to the pool as the open note `note_id`.
     #[derive(Drop, starknet::Event)]
-    pub struct ReturnBound {
-        #[key]
-        pub commitment: Commitment,
-        pub minted: u128,
-    }
-
-    /// Emitted for the claim leg: the minted funds handed to the pool.
-    #[derive(Drop, starknet::Event)]
-    pub struct Claimed {
+    pub struct ReturnClaimed {
         #[key]
         pub commitment: Commitment,
         pub amount: u128,
+        pub note_id: felt252,
     }
 
     #[constructor]
@@ -191,11 +184,10 @@ pub mod InboundAnonymizer {
             // Real delta of this mint, isolating it from any pre-existing balance.
             let minted: u128 = (after - before).try_into().expect(internal_errors::AMOUNT_OVERFLOW);
             assert(minted.is_non_zero(), errors::NOTHING_MINTED);
-            self.emit(Event::ReturnBound(ReturnBound { commitment, minted }));
 
             // Hand the minted USDC to the pool as a fresh open note (atomic claim).
             usdc_disp.approve(spender: pool, amount: minted.into());
-            self.emit(Event::Claimed(Claimed { commitment, amount: minted }));
+            self.emit(Event::ReturnClaimed(ReturnClaimed { commitment, amount: minted, note_id }));
             array![OpenNoteDeposit { note_id, token: usdc, amount: minted }].span()
         }
     }
