@@ -10,12 +10,15 @@ export {
   STARKNET_KEY_LABEL,
   VIEWING_KEY_LABEL,
   POLYGON_EOA_LABEL,
+  RETURN_WAL_LABEL,
 } from './derivation/index';
 export { deriveStarknetPrivateKey, deriveStarknetAccount } from './derivation/index';
 export type { StarknetAccount } from './derivation/index';
 export { MAX_VIEWING_KEY, deriveViewingKey } from './derivation/index';
 export { derivePolygonEoa } from './derivation/index';
 export type { PolygonEoa } from './derivation/index';
+export { deriveReturnWalKeys } from './derivation/index';
+export type { ReturnWalKeys } from './derivation/index';
 export {
   CLAIM_TAG,
   BIND_TAG,

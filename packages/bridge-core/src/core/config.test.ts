@@ -293,6 +293,24 @@ describe('public network defaults (baked in config.ts)', () => {
     expect(config.proofValidityBlocks).toBe(20);
   });
 
+  // Block counts become bigints at their call sites, where `BigInt(1.5)` would throw far
+  // from the env line that caused it — so they are rejected here instead.
+  it.each([
+    ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10_000],
+    ['RECOVERY_CAP_BLOCKS', 'recoveryCapBlocks', 2_592_000],
+  ] as const)(
+    '%s: blank falls back to its default; fractions and zero fail loud',
+    (key, field, def) => {
+      initTestConfig({ [key]: '' });
+      expect(config[field]).toBe(def);
+
+      expect(() => initTestConfig({ [key]: '1.5' })).toThrow(/positive whole number of blocks/);
+      expect(() => initTestConfig({ [key]: '0' })).toThrow(/positive whole number of blocks/);
+      expect(() => initTestConfig({ [key]: '-1' })).toThrow(/positive whole number of blocks/);
+      expect(() => initTestConfig({ [key]: 'lots' })).toThrow(/must be a numeric string/);
+    },
+  );
+
   it('poolAddress: SN mainnet + SN Sepolia defaults are both baked', () => {
     initTestConfig({ NETWORK: 'mainnet', PRIVACY_POOL_ADDRESS: '' });
     expect(config.poolAddress).toBe(

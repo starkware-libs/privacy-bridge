@@ -65,12 +65,14 @@ import {
 } from '../derivation/index';
 import { claimToPool, buildAndProveClaim, submitProvenClaim } from './bridgeBack';
 import { assertStorageWritable } from './storageProbe';
-import { markNonRetryable, nothingToResumeError } from './errors';
+import { markNonRetryable, markTransient, nothingToResumeError } from './errors';
 import { sleep } from './proving';
 import {
   clearPendingReturnBurn,
   evmClientForSource,
   isPendingBurnExecutable,
+  listPendingReturnBurns,
+  PENDING_BURN_DEADLINE_GRACE_MS,
   readPendingReturnBurn,
   resolvePendingReturnBurn,
   writePendingReturnBurn,
@@ -217,6 +219,12 @@ export interface InflightReturn {
   // Written only by chain-evidence recovery, off a matched on-chain DepositForBurn. Such a
   // cursor is exempt from the stale-balance heuristic.
   proven?: true;
+  // When the burn was handed to the gasless submitter. The cursor is written off the submitter
+  // RETURNING a hash, not off a mined receipt, so `burnTx` can name a tx still propagating from
+  // the relayer's own node — during which "no node has this hash" is not absence. Gates that
+  // one reading (see verifyCursorBurnOnChain). OPTIONAL/backward-compat: a cursor written
+  // before this field is already older than the deploy, so absent = past the deadline.
+  burnSubmittedAtMs?: number;
   // LEGACY (ignored): pre-fold cursors carried a two-phase field. Kept optional so a
   // cursor written before the single-tx fold still validates + resumes.
   phase?: 'cctp' | 'claim';
@@ -224,13 +232,33 @@ export interface InflightReturn {
 
 type InflightReturnMap = Record<string, InflightReturn>;
 
+// `proven` claims on-chain evidence, so only the literal `true` writeRecoveredInflightReturn
+// stamps may survive a read: any other stored value is STRIPPED, never rejected.
+//
+// Rejection has no home on this path. isValidInflightReturn's failure branch CLEARS the
+// cursor (readInflightReturn) and hides it from hasAnyInflightReturn — the network-switch
+// wipe guard — so treating a forged flag as corruption would delete a live burn cursor
+// instead of ignoring one meaningless field. Stripping keeps the cursor and downgrades it
+// to unproven, which only re-arms the stale-balance heuristic.
+function stripForgedProven(entry: unknown): unknown {
+  if (!entry || typeof entry !== 'object') return entry;
+  const record = entry as Record<string, unknown>;
+  if (record.proven === undefined || record.proven === true) return entry;
+  const { proven: _forged, ...rest } = record;
+  return rest;
+}
+
 function readInflightReturnMap(): InflightReturnMap {
   try {
     const raw = localStorage.getItem(INFLIGHT_RETURN_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object') return parsed as InflightReturnMap;
-    return {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    const map: InflightReturnMap = {};
+    for (const [evmAddress, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      map[evmAddress] = stripForgedProven(entry) as InflightReturn;
+    }
+    return map;
   } catch {
     return {};
   }
@@ -393,20 +421,128 @@ function writeInflightReturnVerified(evmAddress: string, record: InflightReturn)
   return !!persisted && persisted.burnTx === record.burnTx && persisted.phase === record.phase;
 }
 
+// What a recovery rebuild found when it tried to write a cursor for a slot.
+export type RecoveredWriteOutcome =
+  // The rebuilt cursor is in storage.
+  | 'written'
+  // A live cursor already carries this exact burn — nothing to rebuild.
+  | 'tracked'
+  // Another record owns this burn's slot: a cursor on a DIFFERENT burnTx, or a pending
+  // record (no burnTx by schema, so "same burn" is unprovable). Nothing was overwritten.
+  | 'occupied';
+
+// A cursor rebuilt from chain evidence. Mirrors InflightReturn except that the caller holds
+// `amountWei` as a bigint (the store keeps a decimal string) and there is no `proven` field
+// — the writer stamps that, so no caller can assert evidence it does not have.
+export interface RecoveredReturnRecord {
+  accountIndex: number;
+  burnTx: string;
+  sourceDomain: number;
+  amountWei: bigint;
+  commitment: string;
+  evmChainId: number;
+  // REQUIRED here, unlike on InflightReturn, where its optionality is backward-compat for
+  // cursors written before the field existed. A cursor minted today knows which
+  // InboundAnonymizer the matched burn was built against and must pin it, or a later config
+  // redeploy retargets the claim at a contract holding no CCTP funds.
+  inboundAnonymizer: string;
+  channel?: string;
+}
+
+// Rebuild a post-burn cursor for a slot whose DepositForBurn was matched on chain, keyed by
+// the SLOT's deposit wallet so it coexists with the organic connected-address cursor.
+//
+// SYNCHRONOUS on purpose: the occupancy re-read and the write are one section, so a caller
+// holding a write lock gets no-overwrite for free. An `await` in here reopens that window.
+//
+// Occupancy is COMMITMENT-scoped, not key-scoped. A commitment is per-SLOT, while the organic
+// cursor and the pending record for that same slot are keyed by the CONNECTED address — so a
+// keyed-only look-up would see an empty slot and mint a SECOND cursor for a burn already in
+// flight.
+//
+// `proven` is stamped here and nowhere else: it exists only to exempt a cursor from the
+// stale-balance heuristic, which is sound exactly because reaching this writer requires a
+// matched on-chain burn.
+//
+// THROWS instead of widening the outcome set. A record built from a real burn log must never
+// be silently dropped, and a write that missed storage must not read as a completed rebuild —
+// the app's recovery marker would then advance over a burn that stayed invisible.
+export function writeRecoveredInflightReturn(
+  depositWallet: `0x${string}`,
+  record: RecoveredReturnRecord,
+): RecoveredWriteOutcome {
+  const { amountWei, ...fields } = record;
+  const cursor: InflightReturn = { ...fields, amount: amountWei.toString(), proven: true };
+  // The wallet becomes a permanent map key, so shape-check it alongside the record (mirrors
+  // isValidPendingReturnBurn's own depositWallet guard). A zero amount passes the record
+  // validator's digits check yet describes no real burn, and its cursor can never move funds.
+  if (
+    !/^0x[0-9a-fA-F]{40}$/.test(depositWallet) ||
+    amountWei <= 0n ||
+    !isValidInflightReturn(cursor)
+  ) {
+    throw new Error(`Refusing to store a malformed recovered return cursor for ${depositWallet}.`);
+  }
+
+  const key = depositWallet.toLowerCase();
+  const burnTx = cursor.burnTx.toLowerCase();
+
+  if (listPendingReturnBurns().some(({ record: p }) => p.commitment === cursor.commitment)) {
+    return 'occupied';
+  }
+  const claimants = listInflightReturns().filter(
+    ({ evmAddress, record: live }) =>
+      live.commitment === cursor.commitment || evmAddress.toLowerCase() === key,
+  );
+  if (claimants.length > 0) {
+    return claimants.every(({ record: live }) => live.burnTx.toLowerCase() === burnTx)
+      ? 'tracked'
+      : 'occupied';
+  }
+
+  if (!writeInflightReturnVerified(key, cursor)) {
+    throw new Error(
+      `The recovered return cursor for ${depositWallet} could not be saved — device storage ` +
+        'rejected the write.',
+    );
+  }
+  return 'written';
+}
+
 // Chain evidence about a cursor's own burn tx. 'unknown' covers a failed read AND an
 // ambiguous answer — neither is absence. 'unsupported-chain' is permanent: there is no
-// RPC left to ask.
-type CursorBurnVerdict = 'found' | 'not-found' | 'unknown' | 'unsupported-chain';
+// RPC left to ask. The two absence verdicts differ in STRENGTH: 'reverted' is a mined
+// receipt (terminal on its own), 'absent' is only "no node we asked holds this hash".
+type CursorBurnVerdict = 'found' | 'reverted' | 'absent' | 'unknown' | 'unsupported-chain';
+
+// Whether the cursor's burn could still be executing, i.e. whether 'absent' is allowed to
+// mean "never happened". Gated on the SAME deadline the pending-record guard releases on
+// (isPendingBurnExecutable) — absence-of-tx is the same ambiguity class, so it gets one
+// number, not a second timeout of its own.
+//
+// Anything other than a plain past timestamp inside the window reads as PAST the deadline:
+// absent (pre-stamp cursor — already older than the deploy), non-numeric, or a future value
+// (which would otherwise wedge the slot until that time arrived).
+function burnCouldStillBeExecuting(cursor: InflightReturn, now = Date.now()): boolean {
+  const submittedAt = cursor.burnSubmittedAtMs;
+  if (typeof submittedAt !== 'number' || !Number.isFinite(submittedAt)) return false;
+  const age = now - submittedAt;
+  return age >= 0 && age <= DEFAULT_BATCH_DEADLINE_MS + PENDING_BURN_DEADLINE_GRACE_MS;
+}
 
 // eth_getTransactionReceipt on the cursor's own hash (no log range, so range-capped
 // providers work). The hookData commitment comes from the CURSOR, never a fresh
 // derivation — a cursor predating an InboundAnonymizer redeploy carries a different one.
 //
-// Only two answers are absence: a REVERTED receipt, and a hash no node has ever seen. A
-// mined receipt without our DepositForBurn is ambiguous (an address or wire-format drift
+// Only two answers are absence, and they differ in strength. A REVERTED receipt is terminal
+// on its own. A hash NO node holds ('absent') is weaker: this RPC is a different endpoint
+// from both the caller's balance reader and the relayer's own node, so for as long as the
+// batch could still execute it reads as propagation — the caller applies that age gate.
+//
+// A mined receipt without our DepositForBurn is ambiguous (an address or wire-format drift
 // would otherwise re-burn every real burn), and a null receipt for a tx that DOES exist is
-// merely unmined — this RPC is a different endpoint from the caller's balance reader, so a
-// lagging pool can serve "balance full, no receipt" for a burn sitting in the mempool.
+// merely unmined — a lagging pool can serve "balance full, no receipt" for a burn sitting in
+// the mempool.
 async function verifyCursorBurnOnChain(cursor: InflightReturn): Promise<CursorBurnVerdict> {
   const source = getEvmCctpSource(cursor.evmChainId);
   if (!source) return 'unsupported-chain';
@@ -419,10 +555,10 @@ async function verifyCursorBurnOnChain(cursor: InflightReturn): Promise<CursorBu
     });
     if (!receipt) {
       const tx = await client.request({ method: 'eth_getTransactionByHash', params: [hash] });
-      return tx ? 'unknown' : 'not-found';
+      return tx ? 'unknown' : 'absent';
     }
     const status = String((receipt as { status?: unknown }).status ?? '');
-    if (status !== '0x1') return status === '0x0' ? 'not-found' : 'unknown';
+    if (status !== '0x1') return status === '0x0' ? 'reverted' : 'unknown';
     const wantHookData = encodeCommitmentHookData(BigInt(cursor.commitment)).toLowerCase();
     const burns = parseEventLogs({
       abi: TOKEN_MESSENGER_EVENT_ABI,
@@ -483,6 +619,9 @@ async function promoteLandedPendingBurn(
     evmChainId: pending.evmChainId,
     inboundAnonymizer: pending.inboundAnonymizer,
     channel: pending.channel,
+    // Carried, not re-stamped: a promoted cursor is as old as the SUBMIT it recovers, and a
+    // fresh stamp here would re-open the propagation window on every sweep.
+    burnSubmittedAtMs: pending.submittedAtMs,
   };
   writeInflightReturnVerified(evmAddress, record);
   // Clear only AFTER the cursor write is attempted: if that write is what fails (quota), the
@@ -531,7 +670,11 @@ export async function recoverPendingReturnBurn(
 // The relayer batch is signed with a 10-minute EIP-712 deadline. The transport owns the
 // real value and doesn't report it, so this is the conservative assumption — see
 // PendingReturnBurn.deadlineMs for why erring long is the safe direction.
-const DEFAULT_BATCH_DEADLINE_MS = 600_000;
+//
+// EXPORTED for the app's recovery marker: the quiet period a sweep must clear before it can
+// call a device complete is this deadline (plus PENDING_BURN_DEADLINE_GRACE_MS), because a
+// burn submitted just before the sweep can still mine after it.
+export const DEFAULT_BATCH_DEADLINE_MS = 600_000;
 
 // Inline budget for resolving a burn whose submitter threw. Generous enough to cover the
 // usual case (the relayer's status poll gave up moments before the batch mined) without
@@ -597,17 +740,21 @@ async function resolveAmbiguousReturnBurn(
   return null;
 }
 
-// Refusal for a fresh burn while an earlier submission is unresolved. Worded to classify
-// TRANSIENT so the flow ends RESUMABLE rather than as a red terminal card, and shared by
-// both entry points (returnToPool guards before its prep runs; returnBurnToPool guards
-// again right before the burn) so the two can never drift apart.
+// Refusal for a fresh burn while an earlier submission is unresolved. BRANDED transient (the
+// refusal preserves the record and asks for a later retry) so the flow ends RESUMABLE rather
+// than as a red terminal card — structurally, since the message shares no vocabulary with
+// TRANSIENT_RE and pinning it there would make a copy-edit a behavior change. Shared by both
+// entry points (returnToPool guards before its prep runs; returnBurnToPool guards again right
+// before the burn) so the two can never drift apart.
 function unresolvedSubmissionError(record: PendingReturnBurn): Error {
-  return new Error(
-    `A return burn for account #${record.accountIndex} was submitted from this device ` +
+  return markTransient(
+    new Error(
+      `A return burn for account #${record.accountIndex} was submitted from this device ` +
       `and hasn't been confirmed on-chain yet, so starting another one could burn the same ` +
       `funds twice. Your USDC is safe in the deposit wallet either way. Retry in a few ` +
       `minutes — we re-check the chain every time, and either resume the original burn or ` +
-      `let you start a new one once the first can no longer run.`,
+        `let you start a new one once the first can no longer run.`,
+    ),
   );
 }
 
@@ -1055,6 +1202,9 @@ export async function returnBurnToPool(args: ReturnBurnToPoolArgs): Promise<Retu
     // the burn bound (recoverBridgeIn/scanUnclaimedReturns read it and self-route). Omitted
     // key on default-channel cursors (undefined) keeps them byte-identical to pre-channel.
     channel,
+    // The submit time, not the write time: this cursor may name a tx still propagating from
+    // the relayer's own node, and the stale-cursor chain-verify needs to know how long ago.
+    burnSubmittedAtMs: submittedAtMs,
   };
   if (!writeInflightReturnVerified(evmAddress, record)) {
     onStatus?.(
@@ -1350,17 +1500,25 @@ export async function returnToPool(args: ReturnToPoolArgs): Promise<ReturnToPool
         emit('cctp', 'error', err.message);
         throw err;
       }
-      if (verdict === 'unknown') {
-        // Worded to satisfy isTransientError: the consumer branches on it to show the
+      // 'absent' is a hash no node we asked holds — which, while the batch could still
+      // execute, is the relayer broadcasting to its OWN node, not an absent burn. Clearing
+      // there loses the only handle on a burn that is about to mine, and its CCTP message
+      // then never gets claimed. Past the deadline it IS the answer, and must be: a cursor is
+      // written off the submitter returning a hash, so a dropped/replaced tx leaves one
+      // naming a hash no node will ever hold, and refusing forever would wedge the slot.
+      if (verdict === 'unknown' || (verdict === 'absent' && burnCouldStillBeExecuting(cursor))) {
+        // markTransient, not wording: the consumer branches on isTransientError to show the
         // resumable "your funds are safe" card instead of a hard failure.
-        const err = new Error(
-          'Could not verify the in-flight return burn on chain — verification is temporarily unavailable. ' +
-            'Your resume point is kept; try again in a moment.',
+        const err = markTransient(
+          new Error(
+            'Could not verify the in-flight return burn on chain — verification is temporarily unavailable. ' +
+              'Your resume point is kept; try again in a moment.',
+          ),
         );
         emit('cctp', 'error', err.message);
         throw err;
       }
-      if (verdict === 'not-found') {
+      if (verdict === 'reverted' || verdict === 'absent') {
         clearInflightReturn(evmAddress);
         cursor = null;
         try {

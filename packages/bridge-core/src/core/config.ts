@@ -136,6 +136,19 @@ function envInt(raw: string | undefined, def: number, key: string): number {
   return parsed;
 }
 
+// Parse a numeric env var that will become a bigint block count. `envInt` accepts any
+// finite number, and `BigInt(1.5)` throws far from here — so require a positive whole
+// number at the boundary instead.
+function envBlockCount(raw: string | undefined, def: number, key: string): number {
+  const parsed = envInt(raw, def, key);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `${key} must be a positive whole number of blocks (got: ${JSON.stringify(raw)}).`,
+    );
+  }
+  return parsed;
+}
+
 // The BUILD-TIME default network (the `NETWORK` env var). apps/web pins to this for
 // its whole lifetime; apps/bridge starts here and may swap at runtime. Set by
 // `initBridgeConfig` from the injected env; recovered from the globalThis stash on a
@@ -376,6 +389,17 @@ export type Config = {
     usdc: string;
     domain: number;
   };
+  // Largest INCLUSIVE block span one `eth_getLogs` request may cover on the EVM
+  // side. Providers cap this, and the cap belongs to the RPC PLAN rather than the
+  // chain — a free tier can be as low as 10 blocks, rejecting anything wider with
+  // -32600. Default 10_000 keeps today's burn-scan sizing; set it to the provider's
+  // real cap, or every scan fails and absence can never be established.
+  polygonGetLogsChunkBlocks: number;
+  // How far back a return-recovery sweep may look for a deposit wallet's funding
+  // block (≈60 days of ~2 s Polygon blocks). A wallet deployed before it cannot be
+  // scanned over its complete history, so the slot is WITHHELD rather than reported
+  // settled. Raising this extends coverage with no migration.
+  recoveryCapBlocks: number;
   // Network-SELECTED CCTP source registry (NOT merged — fund-safety invariant).
   evmCctpSources: Record<number, EvmCctpSource>;
   // Network-SELECTED CCTP DESTINATION registry (pool → EVM). Same fund-safety
@@ -780,6 +804,20 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       usdc: e.vars.POLYGON_USDC_ADDRESS || defaultDest.usdcAddress,
       domain: envInt(e.vars.CCTP_POLYGON_DOMAIN, defaultDest.domain, 'CCTP_POLYGON_DOMAIN'),
     },
+    // Provider getLogs range cap (see the Config doc). Default = today's burn-scan
+    // chunk size, so an unset env changes no existing behavior.
+    polygonGetLogsChunkBlocks: envBlockCount(
+      e.vars.POLYGON_GET_LOGS_CHUNK_BLOCKS,
+      10_000,
+      'POLYGON_GET_LOGS_CHUNK_BLOCKS',
+    ),
+    // Recovery look-back cap (see the Config doc). Mirrored by RECOVERY_CAP_BLOCKS in
+    // fundingAnchor.ts, which pins the two together in a test.
+    recoveryCapBlocks: envBlockCount(
+      e.vars.RECOVERY_CAP_BLOCKS,
+      2_592_000,
+      'RECOVERY_CAP_BLOCKS',
+    ),
     evmCctpSources,
     evmCctpDestinations,
     // Dev-only same-origin proxied paths (production uses OHTTP, one gateway/network).
