@@ -66,6 +66,26 @@ export function isNonRetryable(err: unknown): boolean {
   );
 }
 
+// The mirror of NON_RETRYABLE: "this error IS retryable, whatever its wording says." For a
+// refusal that is transient by CONSTRUCTION — it preserves the state a retry needs and asks
+// for a later attempt — but shares no vocabulary with TRANSIENT_RE. Wording it into the regex
+// instead makes a copy-edit a behavior change, and leaves the classification silently wrong
+// until someone re-reads both files. TERMINAL_RE and NON_RETRYABLE still win over the brand.
+export const TRANSIENT = Symbol.for('bridge-core.TRANSIENT');
+
+export function markTransient<E extends Error>(err: E): E {
+  (err as unknown as Record<PropertyKey, unknown>)[TRANSIENT] = true;
+  return err;
+}
+
+function isMarkedTransient(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as Record<PropertyKey, unknown>)[TRANSIENT] === true
+  );
+}
+
 // A resume-only entry point found nothing to finish. Callers branch on `code`, so the
 // deposit and return legs raise the SAME one from here rather than each minting its own.
 // Always NON_RETRYABLE: retrying cannot conjure the missing cursor, and an unattended
@@ -82,5 +102,5 @@ export function isTransientError(err: unknown): boolean {
   if (isNonRetryable(err)) return false;
   const message = err instanceof Error ? err.message : String(err);
   if (TERMINAL_RE.test(message)) return false;
-  return TRANSIENT_RE.test(message);
+  return isMarkedTransient(err) || TRANSIENT_RE.test(message);
 }
