@@ -3,7 +3,8 @@
 
 // resolveOpenReturn classifies ONE WAL entry. Every test here defends the same property:
 // a verdict that moves funds (`reburn`) or drops the entry (`claimed`) is only ever reached
-// from a completed, matched on-chain read. A failed read must land on `unknown`.
+// from a completed, matched, COMMITTED on-chain read. A failed, ambiguous, or merely
+// pre-confirmed read must land on `unknown`.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -14,7 +15,7 @@ import { encodeCommitmentHookData } from '../derivation/index';
 import { spyOnSecretSinks } from './__testkit__/secretSinks';
 
 // PARTIAL mocks throughout: LogRangeCapError / IrisMessageUnavailableError must stay the real
-// classes, or the classifier's `instanceof` split turns green for the wrong reason.
+// classes, or the classifier's `instanceof` splits turn green for the wrong reason.
 vi.mock('./chunkedLogScan', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chunkedLogScan')>();
   return { ...actual, scanDepositForBurnLogs: vi.fn() };
@@ -39,7 +40,8 @@ vi.mock('./polygonClient', async (importOriginal) => {
 import { LogRangeCapError, scanDepositForBurnLogs, type DepositForBurnLog } from './chunkedLogScan';
 import { fetchCctpMessageByTxHash, IrisMessageUnavailableError } from './polygonMint';
 import { isCctpMessageNonceUsed } from './depositIn';
-import { writeRecoveredInflightReturn } from './returnIn';
+import { writeRecoveredInflightReturn, DEFAULT_BATCH_DEADLINE_MS } from './returnIn';
+import { PENDING_BURN_DEADLINE_GRACE_MS } from './pendingReturnBurn';
 import { sumErc20Balances } from './polygonClient';
 import {
   resolveOpenReturn,
@@ -60,11 +62,16 @@ const OUR_HOOK = encodeCommitmentHookData(BigInt(COMMITMENT));
 const STALE_HOOK = encodeCommitmentHookData(BigInt(OTHER_COMMITMENT));
 const BURN_TX = `0x${'ab'.repeat(32)}` as const;
 const OTHER_BURN_TX = `0x${'cd'.repeat(32)}` as const;
+const THIRD_BURN_TX = `0x${'ef'.repeat(32)}` as const;
 const INBOUND_ANONYMIZER = '0x4';
 const MESSAGE = `0x${'11'.repeat(64)}` as const;
 const HEAD = 2_000n;
 const INTENT_BLOCK = 1_000n;
 const DUST = 10_000n;
+const NOW_MS = 1_770_000_000_000;
+// The window a just-written intent is allowed to have an unmined burn in. Reused from the
+// pending-record deadline, not a second timeout of its own.
+const QUIET_MS = DEFAULT_BATCH_DEADLINE_MS + PENDING_BURN_DEADLINE_GRACE_MS;
 
 function entry(over: Partial<OpenReturnEntry> = {}): OpenReturnEntry {
   return {
@@ -93,9 +100,28 @@ function burnLog(over: Partial<DepositForBurnLog> = {}): DepositForBurnLog {
   };
 }
 
-function fakeClient(head: bigint | (() => Promise<bigint>) = HEAD) {
-  const getBlockNumber = vi.fn(typeof head === 'bigint' ? async () => head : head);
-  return { getBlockNumber, client: { getBlockNumber } as unknown as PublicClient };
+function fakeClient(
+  over: {
+    head?: bigint | (() => Promise<bigint>);
+    receipt?: () => Promise<{ status: 'success' | 'reverted' }>;
+    chainId?: number;
+  } = {},
+) {
+  const { head = HEAD } = over;
+  const getBlockNumber = vi.fn(typeof head === 'function' ? head : async () => head);
+  const getChainId = vi.fn(async () => over.chainId ?? config.polygon.chainId);
+  const getTransactionReceipt = vi.fn(
+    over.receipt ??
+      (async () => {
+        throw new Error('transaction not found');
+      }),
+  );
+  return {
+    getBlockNumber,
+    getChainId,
+    getTransactionReceipt,
+    client: { getBlockNumber, getChainId, getTransactionReceipt } as unknown as PublicClient,
+  };
 }
 
 function resolve(over: Partial<Parameters<typeof resolveOpenReturn>[0]> = {}) {
@@ -104,8 +130,16 @@ function resolve(over: Partial<Parameters<typeof resolveOpenReturn>[0]> = {}) {
     client: fakeClient().client,
     depositWallet: DEPOSIT_WALLET,
     dustFloorWei: DUST,
+    nowMs: NOW_MS,
     ...over,
   });
+}
+
+// L5: a reason is part of the contract, not a debug string — assert the exact literal so a
+// mutation that swaps two of them goes red.
+function unknownReason(verdict: OpenReturnVerdict): string {
+  if (verdict.kind !== 'unknown') throw new Error(`expected unknown, got ${verdict.kind}`);
+  return verdict.reason;
 }
 
 beforeEach(() => {
@@ -140,17 +174,45 @@ describe('resolveOpenReturn — intent entries scan first', () => {
     expect(params.chunkBlocks).toBeUndefined();
   });
 
-  it('takes the OLDEST matched log when a commitment carries more than one burn', async () => {
+  // L6
+  it('still scans the single-block window when the head equals the intent block', async () => {
+    mBalance.mockResolvedValue(DUST + 1n);
+    const { client } = fakeClient({ head: INTENT_BLOCK });
+
+    expect(await resolve({ client })).toEqual({ kind: 'reburn' });
+    const [, params] = mScan.mock.calls[0]!;
+    expect(params.fromBlock).toBe(INTENT_BLOCK);
+    expect(params.toBlock).toBe(INTENT_BLOCK);
+  });
+
+  // L1: provider log order is not guaranteed, so the pick must not depend on it.
+  it('finds the matched burn regardless of the order the provider returned logs in', async () => {
     mScan.mockResolvedValue([
-      burnLog({ blockNumber: 1_010n, transactionHash: BURN_TX, amount: 4_000_000n }),
-      burnLog({ blockNumber: 1_500n, transactionHash: OTHER_BURN_TX, amount: 9_000_000n }),
+      burnLog({ blockNumber: 1_500n, hookData: STALE_HOOK, transactionHash: OTHER_BURN_TX }),
+      burnLog({ blockNumber: 1_010n, hookData: OUR_HOOK, transactionHash: BURN_TX }),
     ]);
 
-    expect(await resolve()).toEqual({
-      kind: 'burn-found',
-      burnTx: BURN_TX,
-      amountWei: 4_000_000n,
-    });
+    expect(await resolve()).toEqual({ kind: 'burn-found', burnTx: BURN_TX, amountWei: 5_000_000n });
+  });
+
+  // L2: two burns carrying the SAME commitment is a state this module cannot explain.
+  it('refuses to pick between two hookData-matched burns', async () => {
+    mScan.mockResolvedValue([
+      burnLog({ blockNumber: 1_010n, transactionHash: BURN_TX }),
+      burnLog({ blockNumber: 1_500n, transactionHash: THIRD_BURN_TX }),
+    ]);
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(unknownReason(await resolve())).toBe('multiple-matched-burns');
+  });
+
+  it('refuses to pick between two matched burns whatever order they arrive in', async () => {
+    mScan.mockResolvedValue([
+      burnLog({ blockNumber: 1_500n, transactionHash: THIRD_BURN_TX }),
+      burnLog({ blockNumber: 1_010n, transactionHash: BURN_TX }),
+    ]);
+
+    expect(unknownReason(await resolve())).toBe('multiple-matched-burns');
   });
 
   it('refuses to attribute a right-depositor burn whose hookData carries a stale commitment', async () => {
@@ -159,8 +221,15 @@ describe('resolveOpenReturn — intent entries scan first', () => {
 
     const verdict = await resolve();
 
-    expect(verdict.kind).not.toBe('burn-found');
-    expect(verdict).toEqual({ kind: 'reburn' });
+    expect(verdict.kind).toBe('reburn');
+    // L3: the orphan is reported, not swallowed — it is the only handle on a burn nothing owns.
+    expect(verdict).toEqual({ kind: 'reburn', orphanBurnTxs: [OTHER_BURN_TX] });
+  });
+
+  it('omits the orphan list when every scanned log matched or none existed', async () => {
+    mBalance.mockResolvedValue(DUST + 1n);
+
+    expect(await resolve()).toEqual({ kind: 'reburn' });
   });
 
   it('reburns when no matched burn exists and the balance is above the dust floor', async () => {
@@ -172,23 +241,75 @@ describe('resolveOpenReturn — intent entries scan first', () => {
   it('answers unknown when no matched burn exists and the balance is at the dust floor', async () => {
     mBalance.mockResolvedValue(DUST);
 
-    expect((await resolve()).kind).toBe('unknown');
+    expect(unknownReason(await resolve())).toBe('no-burn-and-balance-at-dust');
   });
 
   it('answers unknown when no matched burn exists and the balance is below the dust floor', async () => {
     mBalance.mockResolvedValue(0n);
 
-    expect((await resolve()).kind).toBe('unknown');
+    expect(unknownReason(await resolve())).toBe('no-burn-and-balance-at-dust');
   });
 
-  it('reads the balance for the entry own chain USDC', async () => {
+  // H2a: the scan and the balance must describe ONE height, or a burn mined between the two
+  // reads is invisible to the scan and already gone from the balance.
+  it('pins the balance read to the same block the scan ended at', async () => {
     mBalance.mockResolvedValue(0n);
 
     await resolve();
 
-    const [, tokens, address] = mBalance.mock.calls[0]!;
+    const [, tokens, address, opts] = mBalance.mock.calls[0]!;
     expect(tokens).toEqual([config.polygon.usdc]);
     expect(address).toBe(DEPOSIT_WALLET);
+    expect(opts).toEqual({ blockNumber: HEAD });
+  });
+});
+
+// H2b: a full-balance burn that has not been mined yet looks exactly like a burn that was
+// never submitted. Only the age of the intent separates them.
+describe('resolveOpenReturn — a young intent is not evidence of a missing burn', () => {
+  it('withholds reburn while the burn could still be executing', async () => {
+    mBalance.mockResolvedValue(5_000_000n);
+
+    const verdict = await resolve({ entry: entry({ intentAtMs: NOW_MS - 1_000 }) });
+
+    expect(verdict.kind).not.toBe('reburn');
+    expect(unknownReason(verdict)).toBe('intent-too-young');
+  });
+
+  it('withholds reburn on the last millisecond of the quiet window', async () => {
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(unknownReason(await resolve({ entry: entry({ intentAtMs: NOW_MS - QUIET_MS }) }))).toBe(
+      'intent-too-young',
+    );
+  });
+
+  it('reburns once the quiet window has elapsed', async () => {
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(await resolve({ entry: entry({ intentAtMs: NOW_MS - QUIET_MS - 1 }) })).toEqual({
+      kind: 'reburn',
+    });
+  });
+
+  it('treats a missing intentAtMs as past the deadline, like returnIn treats a missing stamp', async () => {
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(await resolve({ entry: entry() })).toEqual({ kind: 'reburn' });
+  });
+
+  it('treats a future intentAtMs as conservatively live', async () => {
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(unknownReason(await resolve({ entry: entry({ intentAtMs: NOW_MS + 60_000 }) }))).toBe(
+      'intent-too-young',
+    );
+  });
+
+  it('never lets youth suppress a matched burn', async () => {
+    mScan.mockResolvedValue([burnLog()]);
+
+    expect((await resolve({ entry: entry({ intentAtMs: NOW_MS }) })).kind).toBe('burn-found');
   });
 });
 
@@ -197,38 +318,45 @@ describe('resolveOpenReturn — a failed read is UNKNOWN, never a classification
     mScan.mockRejectedValue(new LogRangeCapError('provider refused the range'));
     mBalance.mockResolvedValue(5_000_000n);
 
-    const verdict = await resolve();
-
-    expect(verdict.kind).toBe('unknown');
+    expect(unknownReason(await resolve())).toBe('burn-scan-range-capped');
     expect(mBalance).not.toHaveBeenCalled();
   });
 
   it('answers unknown on any other scan failure', async () => {
     mScan.mockRejectedValue(new Error('socket hang up'));
 
-    expect((await resolve()).kind).toBe('unknown');
+    expect(unknownReason(await resolve())).toBe('burn-scan-failed');
   });
 
   it('answers unknown when the head read fails, so no window is ever assumed', async () => {
-    const { client } = fakeClient(async () => {
-      throw new Error('rpc down');
+    const { client } = fakeClient({
+      head: async () => {
+        throw new Error('rpc down');
+      },
     });
 
-    expect((await resolve({ client })).kind).toBe('unknown');
+    expect(unknownReason(await resolve({ client }))).toBe('head-read-failed');
     expect(mScan).not.toHaveBeenCalled();
   });
 
   it('answers unknown when the node head lags the intent block', async () => {
-    const { client } = fakeClient(INTENT_BLOCK - 1n);
+    const { client } = fakeClient({ head: INTENT_BLOCK - 1n });
 
-    expect((await resolve({ client })).kind).toBe('unknown');
+    expect(unknownReason(await resolve({ client }))).toBe('head-behind-intent-block');
     expect(mScan).not.toHaveBeenCalled();
   });
 
   it('answers unknown when the balance read throws after a clean no-match scan', async () => {
     mBalance.mockRejectedValue(new Error('multicall reverted'));
 
-    expect((await resolve()).kind).toBe('unknown');
+    expect(unknownReason(await resolve())).toBe('balance-read-failed');
+  });
+
+  // L4: one stale entry pointing at a retired chain must not abort a whole resume pass.
+  it('answers unknown for an entry on a chain this build has no CCTP source for', async () => {
+    expect(unknownReason(await resolve({ entry: entry({ evmChainId: 999_999 }) }))).toBe(
+      'unsupported-chain',
+    );
   });
 
   it('never leaks an RPC endpoint or key into the unknown reason', async () => {
@@ -260,14 +388,22 @@ describe('resolveOpenReturn — scanFirst:false still requires a clean scan to r
     mBalance.mockResolvedValue(5_000_000n);
     mScan.mockRejectedValue(new LogRangeCapError('provider refused the range'));
 
-    expect((await resolve({ scanFirst: false })).kind).toBe('unknown');
+    expect(unknownReason(await resolve({ scanFirst: false }))).toBe('burn-scan-range-capped');
   });
 
   it('reads the balance before the scan and stops there when the balance read throws', async () => {
     mBalance.mockRejectedValue(new Error('multicall reverted'));
 
-    expect((await resolve({ scanFirst: false })).kind).toBe('unknown');
+    expect(unknownReason(await resolve({ scanFirst: false }))).toBe('balance-read-failed');
     expect(mScan).not.toHaveBeenCalled();
+  });
+
+  it('pins the eager balance read to the scan height too', async () => {
+    mBalance.mockResolvedValue(0n);
+
+    await resolve({ scanFirst: false });
+
+    expect(mBalance.mock.calls[0]![3]).toEqual({ blockNumber: HEAD });
   });
 
   it('still prefers a matched burn over an above-dust balance', async () => {
@@ -291,6 +427,26 @@ describe('resolveOpenReturn — burned entries', () => {
     expect(await resolve({ entry: burned() })).toEqual({ kind: 'claimed' });
     expect(mWrite).not.toHaveBeenCalled();
     expect(mScan).not.toHaveBeenCalled();
+  });
+
+  // H1: `claimed` makes the app DELETE the entry — the only handle on the funds. A
+  // pre-confirmed claim that never commits would delete it against a claim that never
+  // happened, so the delete decision must read COMMITTED state.
+  it('reads the nonce at latest, not the default pre-confirmed view', async () => {
+    mNonceUsed.mockResolvedValue(true);
+
+    await resolve({ entry: burned() });
+
+    expect(mNonceUsed).toHaveBeenCalledWith(MESSAGE, { blockIdentifier: 'latest' });
+  });
+
+  it('never claims on a nonce that is consumed only at pre-confirmed', async () => {
+    mNonceUsed.mockImplementation(async (_message, opts) => opts?.blockIdentifier !== 'latest');
+
+    const verdict = await resolve({ entry: burned() });
+
+    expect(verdict.kind).not.toBe('claimed');
+    expect(verdict).toEqual({ kind: 'continue-claim', write: 'written' });
   });
 
   it.each(['written', 'tracked', 'occupied'] as const)(
@@ -321,8 +477,8 @@ describe('resolveOpenReturn — burned entries', () => {
     });
   });
 
-  // The cursor slot key is `${channel ?? ''}:${accountIndex}`, so a dropped channel writes a
-  // cursor the claim machinery resolves against the wrong slot.
+  // The cursor slot key is `${channel ?? ''}:${accountIndex}`, so a dropped or invented
+  // channel resolves the rebuilt cursor against the wrong slot.
   it('forwards the entry channel to the cursor writer', async () => {
     await resolve({ entry: entry({ state: 'burned', burnTx: BURN_TX, channel: 'fast' }) });
 
@@ -335,24 +491,10 @@ describe('resolveOpenReturn — burned entries', () => {
     expect('channel' in mWrite.mock.calls[0]![1]).toBe(false);
   });
 
-  it('answers unknown when Iris has not indexed the burn', async () => {
-    mIris.mockRejectedValue(new IrisMessageUnavailableError('not-indexed', 'no message'));
-
-    expect((await resolve({ entry: burned() })).kind).toBe('unknown');
-    expect(mWrite).not.toHaveBeenCalled();
-  });
-
-  it('answers unknown on a terminal Iris attestation failure — never claimed', async () => {
-    mIris.mockRejectedValue(new Error('CCTP attestation failed (Iris status "failed")'));
-
-    expect((await resolve({ entry: burned() })).kind).toBe('unknown');
-    expect(mWrite).not.toHaveBeenCalled();
-  });
-
   it('answers unknown when the nonce read throws', async () => {
     mNonceUsed.mockRejectedValue(new Error('starknet rpc 502'));
 
-    expect((await resolve({ entry: burned() })).kind).toBe('unknown');
+    expect(unknownReason(await resolve({ entry: burned() }))).toBe('nonce-read-failed');
     expect(mWrite).not.toHaveBeenCalled();
   });
 
@@ -368,6 +510,81 @@ describe('resolveOpenReturn — burned entries', () => {
   });
 });
 
+// M1: the four ways Iris can fail to hand over our message say different things, and W4
+// renders them differently. Collapsing them loses the distinction.
+describe('resolveOpenReturn — Iris failures stay distinguishable', () => {
+  const burned = () => entry({ state: 'burned', burnTx: BURN_TX });
+
+  it.each([
+    ['not-indexed', 'iris-not-indexed'],
+    ['unmatched', 'iris-unmatched'],
+    ['incomplete', 'iris-incomplete'],
+  ] as const)('maps the %s bucket to %s', async (reason, expected) => {
+    mIris.mockRejectedValue(new IrisMessageUnavailableError(reason, 'no usable message'));
+
+    expect(unknownReason(await resolve({ entry: burned() }))).toBe(expected);
+    expect(mWrite).not.toHaveBeenCalled();
+  });
+
+  it('answers unknown iris-terminal on a rejected attestation — never claimed', async () => {
+    mIris.mockRejectedValue(new Error('CCTP attestation failed (Iris status "failed")'));
+
+    expect(unknownReason(await resolve({ entry: burned() }))).toBe('iris-terminal');
+    expect(mWrite).not.toHaveBeenCalled();
+  });
+});
+
+// M1 (second half): a MINED, reverted burn tx is terminal evidence the funds never left the
+// deposit wallet. Without it, an unindexed reverted burn retries forever.
+describe('resolveOpenReturn — a reverted burn tx is terminal', () => {
+  const burned = () => entry({ state: 'burned', burnTx: BURN_TX });
+
+  beforeEach(() => {
+    mIris.mockRejectedValue(new IrisMessageUnavailableError('not-indexed', 'no message'));
+  });
+
+  it('reports burn-reverted when the burn tx has a mined failure receipt', async () => {
+    const { client } = fakeClient({ receipt: async () => ({ status: 'reverted' }) });
+
+    expect(await resolve({ entry: burned(), client })).toEqual({
+      kind: 'burn-reverted',
+      burnTx: BURN_TX,
+    });
+    expect(mWrite).not.toHaveBeenCalled();
+  });
+
+  it('stays unknown when the receipt shows the burn succeeded and Iris is merely behind', async () => {
+    const { client } = fakeClient({ receipt: async () => ({ status: 'success' }) });
+
+    expect(unknownReason(await resolve({ entry: burned(), client }))).toBe('iris-not-indexed');
+  });
+
+  it('stays unknown when no node holds the burn tx', async () => {
+    const { client } = fakeClient();
+
+    expect(unknownReason(await resolve({ entry: burned(), client }))).toBe('iris-not-indexed');
+  });
+
+  it('refuses to read a reverted receipt off a client on the wrong chain', async () => {
+    const { client, getTransactionReceipt } = fakeClient({
+      chainId: 1,
+      receipt: async () => ({ status: 'reverted' }),
+    });
+
+    expect(unknownReason(await resolve({ entry: burned(), client }))).toBe('iris-not-indexed');
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('does not spend a receipt read when Iris already holds our message', async () => {
+    mIris.mockResolvedValue({ message: MESSAGE, attestation: '0x00' });
+    const { client, getTransactionReceipt } = fakeClient();
+
+    await resolve({ entry: burned(), client });
+
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+});
+
 describe('resolveOpenReturn — hookData is the required discriminator', () => {
   it('passes expectedHookData derived from the entry commitment to Iris', async () => {
     await resolve({ entry: entry({ state: 'burned', burnTx: BURN_TX }) });
@@ -378,6 +595,22 @@ describe('resolveOpenReturn — hookData is the required discriminator', () => {
     expect(opts.match.expectedSourceDomain).toBe(config.polygon.domain);
     expect(opts.match.expectedHookData).toBe(OUR_HOOK);
     expect(opts.match.expectedHookData).toBe(encodeCommitmentHookData(BigInt(COMMITMENT)));
+  });
+
+  // M2: a commitment that encodes to the zero hookData would match nothing on chain, so a
+  // real burn would read as absent and the entry would reburn.
+  it.each(['', '0', '0x0', 'not-a-number', '12x'])(
+    'throws rather than classifying an entry whose commitment is %s',
+    async (commitment) => {
+      await expect(resolve({ entry: entry({ commitment }) })).rejects.toThrow(/commitment/);
+      expect(mScan).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a canonical non-zero decimal commitment', async () => {
+    mBalance.mockResolvedValue(DUST + 1n);
+
+    expect(await resolve({ entry: entry({ commitment: '1' }) })).toEqual({ kind: 'reburn' });
   });
 });
 
@@ -435,8 +668,3 @@ describe('resolveOpenReturn — reachability and sinks', () => {
     }
   });
 });
-
-function unknownReason(verdict: OpenReturnVerdict): string {
-  if (verdict.kind !== 'unknown') throw new Error(`expected unknown, got ${verdict.kind}`);
-  return verdict.reason;
-}
