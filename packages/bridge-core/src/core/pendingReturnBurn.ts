@@ -47,8 +47,8 @@ import { encodeCommitmentHookData } from '../derivation/index';
 
 // TokenMessengerV2 DepositForBurn — the on-chain proof that a submitted batch executed.
 // Mirrors depositIn.ts's copy (same event, same indexing: burnToken, depositor,
-// minFinalityThreshold); kept local so this module has no depositIn import cycle.
-const TOKEN_MESSENGER_EVENT_ABI = [
+// minFinalityThreshold). Also the ABI returnIn's burn-receipt verification decodes with.
+export const TOKEN_MESSENGER_EVENT_ABI = [
   {
     type: 'event',
     name: 'DepositForBurn',
