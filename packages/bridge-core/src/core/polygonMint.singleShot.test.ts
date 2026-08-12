@@ -215,17 +215,19 @@ describe('fetchCctpMessageByTxHash — every failure throws after ONE request', 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  // Iris can report failed/rejected with no decodable payload. The poller treats a SOLE such
-  // entry as ours for the status check; the single shot must agree, or a Circle rejection of our
-  // own burn gets filed as "not our burn".
-  it('a sole undecodable entry reporting failed is a terminal attest failure, not unmatched', async () => {
+  // Iris can report failed/rejected with no decodable payload — and a return burn rides a
+  // RELAYER batch carrying other users' CCTP messages, so "exactly one entry" is a snapshot of
+  // Iris's indexing, not proof the entry is ours. The poller may take that bet (a wrong UNKNOWN
+  // there only keeps it waiting); this one-shot cannot, because its callers clear the cursor on
+  // a terminal verdict. Only a hookData match may attribute a failure to THIS burn.
+  it('a sole undecodable entry reporting failed is UNMATCHED, never a terminal attest failure', async () => {
     fetchMock.mockResolvedValue(res(200, { messages: [entry('0xdeadbeef', 'failed')] }));
 
     const err = await reject();
 
-    expect(err).not.toBeInstanceOf(IrisMessageUnavailableError);
-    expect((err as Error).message).toContain('CCTP attestation failed (Iris status "failed")');
-    expect(isTerminalAttestFailure(err)).toBe(true);
+    expect(err).toBeInstanceOf(IrisMessageUnavailableError);
+    expect((err as IrisMessageUnavailableError).reason).toBe('unmatched');
+    expect(isTerminalAttestFailure(err)).toBe(false);
   });
 
   it('a sole undecodable entry with a non-terminal status stays unmatched', async () => {
