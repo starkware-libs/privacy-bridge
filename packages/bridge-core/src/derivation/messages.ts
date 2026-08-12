@@ -19,6 +19,10 @@ export const VIEWING_KEY_LABEL = 'viewing-key:v1';
 // index so every account derives a fresh, mutually-unlinkable address from the
 // same EVM signature — distinct from the Starknet/viewing-key domains above.
 export const POLYGON_EOA_LABEL = 'polygon-eoa:v1';
+// Scopes the open-return write-ahead-log keys (an opaque backend storage id plus
+// a client-only AES-GCM key). This label IS the WAL keyspace: changing it
+// orphans every open return entry, same hazard class as the identity message.
+export const RETURN_WAL_LABEL = 'open-return-bound:v1';
 
 // Validate a named account channel (the optional 2nd derivation domain). BOTH
 // derivation roots (derivePolygonEoa, deriveAccountNonce) call this so their accepted
