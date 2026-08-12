@@ -11,6 +11,7 @@ import type { PublicClient } from 'viem';
 
 import { config } from './config';
 import { encodeCommitmentHookData } from '../derivation/index';
+import { spyOnSecretSinks } from './__testkit__/secretSinks';
 
 // PARTIAL mocks throughout: LogRangeCapError / IrisMessageUnavailableError must stay the real
 // classes, or the classifier's `instanceof` split turns green for the wrong reason.
@@ -320,6 +321,20 @@ describe('resolveOpenReturn — burned entries', () => {
     });
   });
 
+  // The cursor slot key is `${channel ?? ''}:${accountIndex}`, so a dropped channel writes a
+  // cursor the claim machinery resolves against the wrong slot.
+  it('forwards the entry channel to the cursor writer', async () => {
+    await resolve({ entry: entry({ state: 'burned', burnTx: BURN_TX, channel: 'fast' }) });
+
+    expect(mWrite.mock.calls[0]![1].channel).toBe('fast');
+  });
+
+  it('leaves channel absent on the record when the entry has none', async () => {
+    await resolve({ entry: burned() });
+
+    expect('channel' in mWrite.mock.calls[0]![1]).toBe(false);
+  });
+
   it('answers unknown when Iris has not indexed the burn', async () => {
     mIris.mockRejectedValue(new IrisMessageUnavailableError('not-indexed', 'no message'));
 
@@ -394,6 +409,30 @@ describe('resolveOpenReturn — the cursor write is lock-scoped', () => {
       resolve({ entry: entry({ state: 'burned', burnTx: BURN_TX }), withCursorWriteLock }),
     ).rejects.toThrow(/lock unavailable/);
     expect(mWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveOpenReturn — reachability and sinks', () => {
+  it('is exported from the public api barrel, or the app cannot reach it', async () => {
+    const api = await import('../api');
+
+    expect(typeof api.resolveOpenReturn).toBe('function');
+  });
+
+  it('never writes a provider error to console or storage', async () => {
+    const leaky = new Error(
+      'HTTP request failed. URL: https://polygon-amoy.rpc.example.invalid/v2/SECRETKEY',
+    );
+    mScan.mockRejectedValue(leaky);
+    const sinks = spyOnSecretSinks();
+
+    try {
+      expect((await resolve()).kind).toBe('unknown');
+      expect(() => sinks.assertNeverLeaked('SECRETKEY')).not.toThrow();
+      expect(() => sinks.assertNeverLeaked('rpc.example.invalid')).not.toThrow();
+    } finally {
+      sinks.restore();
+    }
   });
 });
 
