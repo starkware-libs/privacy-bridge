@@ -90,9 +90,16 @@ export type OpenReturnVerdict =
   | { kind: 'continue-claim'; write: RecoveredWriteOutcome }
   // The CCTP nonce is consumed at COMMITTED state — the mint+claim landed. Delete the entry.
   | { kind: 'claimed' }
-  // The burn tx is mined and REVERTED: the funds never left the deposit wallet and no
-  // attestation will ever exist. Terminal and actionable, which is why it is not `unknown` —
-  // an `unknown` here retries forever against a burn that can never succeed.
+  // The burn tx is mined and REVERTED, so no attestation for THAT tx will ever exist.
+  // Actionable, which is why it is not `unknown` — an `unknown` here retries forever against a
+  // tx that can never succeed.
+  //
+  // Required action: demote the entry to `intent` and re-resolve; NEVER delete. A reverted
+  // burnTx proves only that THIS tx failed, not that no other burn for this commitment landed
+  // — a second device resuming the same intent reverts on insufficient balance precisely
+  // BECAUSE the first device's burn already took the funds. The demote path self-heals: the
+  // reverted tx emitted no DepositForBurn log, so the re-scan finds only the burn that landed
+  // and answers `burn-found`.
   | { kind: 'burn-reverted'; burnTx: `0x${string}` }
   // A read failed or answered ambiguously. NOT a classification: leave the entry alone.
   | { kind: 'unknown'; reason: UnknownReason };

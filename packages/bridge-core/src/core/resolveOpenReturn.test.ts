@@ -534,9 +534,12 @@ describe('resolveOpenReturn — Iris failures stay distinguishable', () => {
   });
 });
 
-// M1 (second half): a MINED, reverted burn tx is terminal evidence the funds never left the
-// deposit wallet. Without it, an unindexed reverted burn retries forever.
-describe('resolveOpenReturn — a reverted burn tx is terminal', () => {
+// M1 (second half): a MINED, reverted burn tx proves THAT tx will never attest, which is what
+// turns an otherwise endless retry into an answer. It does NOT prove the funds are still on the
+// deposit wallet — a second device's burn reverts on insufficient balance precisely because the
+// first device's burn took them — so the caller demotes the entry to `intent` and re-resolves
+// rather than deleting it.
+describe('resolveOpenReturn — a reverted burn tx is terminal for that tx', () => {
   const burned = () => entry({ state: 'burned', burnTx: BURN_TX });
 
   beforeEach(() => {
@@ -581,6 +584,30 @@ describe('resolveOpenReturn — a reverted burn tx is terminal', () => {
 
     await resolve({ entry: burned(), client });
 
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  // The narrowing is the point: `incomplete` means Iris HAS our message and is still working on
+  // it, so the burn plainly succeeded and a receipt could only ever say `success`. Widening the
+  // condition would spend an RPC on every in-progress attestation.
+  it('does not spend a receipt read on the incomplete bucket, where Iris holds the message', async () => {
+    mIris.mockRejectedValue(new IrisMessageUnavailableError('incomplete', 'still attesting'));
+    const { client, getTransactionReceipt } = fakeClient({
+      receipt: async () => ({ status: 'reverted' }),
+    });
+
+    // Even a reverted receipt must not be consulted, let alone reach the verdict.
+    expect(unknownReason(await resolve({ entry: burned(), client }))).toBe('iris-incomplete');
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('does not spend a receipt read when Iris rejected the attestation', async () => {
+    mIris.mockRejectedValue(new Error('CCTP attestation failed (Iris status "failed")'));
+    const { client, getTransactionReceipt } = fakeClient({
+      receipt: async () => ({ status: 'reverted' }),
+    });
+
+    expect(unknownReason(await resolve({ entry: burned(), client }))).toBe('iris-terminal');
     expect(getTransactionReceipt).not.toHaveBeenCalled();
   });
 });
