@@ -61,16 +61,6 @@ export interface CctpMessageMatch {
 
 // Whether the entry carries a body we can decode at all. An UNDECODABLE body cannot be
 // attributed to anyone; a decodable one that does not match us belongs to someone else.
-function isDecodableMessage(message: `0x${string}` | undefined): boolean {
-  if (!message) return false;
-  try {
-    decodeCctpMessage(message);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // The entry whose decoded body is addressed to us. Returns undefined when the
 // response holds only other people's messages — the poller then keeps waiting rather
 // than handing a stranger's message to the mint path.
@@ -155,6 +145,49 @@ interface PollOpts {
   random?: () => number;
 }
 
+function irisMessagesUrl(sourceDomain: number, burnTxHash: string): string {
+  const base = config.cctp.irisUrl.replace(/\/+$/, '');
+  return `${base}/v2/messages/${sourceDomain}?transactionHash=${burnTxHash}`;
+}
+
+// One Iris GET, classified but not interpreted. `not-indexed` (404) is Iris saying it holds
+// nothing for this burn; `transient` is Iris failing to answer (network drop, 5xx/429, or an
+// OK-but-unparseable body) and carries the underlying text so a caller that does NOT retry
+// can still say which. A genuinely non-retryable HTTP status throws.
+type IrisFetchOutcome =
+  | { kind: 'messages'; messages: IrisMessage[] }
+  | { kind: 'not-indexed' }
+  | { kind: 'transient'; detail: string };
+
+async function fetchIrisMessagesOnce(url: string): Promise<IrisFetchOutcome> {
+  const asDetail = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { accept: 'application/json' } });
+  } catch (err) {
+    return { kind: 'transient', detail: asDetail(err) };
+  }
+  if (res.ok) {
+    let body: IrisResponse | undefined;
+    try {
+      body = safeJsonParse<IrisResponse>(await res.text(), `Iris /v2/messages (${res.status})`);
+    } catch (err) {
+      return { kind: 'transient', detail: asDetail(err) };
+    }
+    // safeJsonParse accepts the JSON literal `null` and bare primitives; dereferencing
+    // `.messages` on those would throw outside every retry guard.
+    if (!body || typeof body !== 'object') {
+      return { kind: 'transient', detail: `Iris /v2/messages (${res.status}): non-object body.` };
+    }
+    return { kind: 'messages', messages: body.messages ?? [] };
+  }
+  if (res.status === 404) return { kind: 'not-indexed' };
+  if (isTransientHttpStatus(res.status)) {
+    return { kind: 'transient', detail: `HTTP ${res.status}` };
+  }
+  throw new Error(`Iris poll failed: HTTP ${res.status}`);
+}
+
 // Generic Iris poller: GET the same /v2/messages/{sourceDomain}?transactionHash=
 // URL on a loop until `extract` returns a non-null value, retrying 404 (not yet
 // indexed) at the base interval and transient 5xx/429 with exponential backoff +
@@ -192,9 +225,7 @@ async function pollIris<T>(
   const sleepFn = opts?.sleep ?? sleep;
   const randomFn = opts?.random ?? Math.random;
 
-  const { irisUrl } = config.cctp;
-  const base = irisUrl.replace(/\/+$/, '');
-  const url = `${base}/v2/messages/${sourceDomain}?transactionHash=${burnTxHash}`;
+  const url = irisMessagesUrl(sourceDomain, burnTxHash);
 
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
@@ -210,86 +241,36 @@ async function pollIris<T>(
     // error, below) overrides it with an exponential backoff + jitter delay.
     let waitMs = intervalMs;
 
-    // A thrown network error (DNS hiccup, connection reset, CORS preflight
-    // failure, Wi-Fi drop) is caught here and classified exactly like a transient
-    // 5xx/429 below — `networkError` stands in for `res` not being `ok`/404/etc.
-    let res: Response | undefined;
-    let networkError = false;
-    try {
-      res = await fetch(url, { headers: { accept: 'application/json' } });
-    } catch {
-      networkError = true;
-    }
+    // A `transient` outcome (network failure, 5xx/429, unparseable 200) is retried with
+    // exponential backoff below; a non-retryable HTTP status already threw inside the fetch.
+    const outcome = await fetchIrisMessagesOnce(url);
+    const transient = outcome.kind === 'transient';
 
-    // Set when the response should be retried with exponential backoff exactly
-    // like a 5xx/429: a network fetch failure, a transient HTTP status, OR an
-    // OK-but-empty/non-JSON body (below). The backoff is applied once, after the
-    // branch, so the transient-handling lives in a single place.
-    let transient = false;
-
-    if (res && res.ok) {
-      // Guard the body parse: an OK response with an empty/non-JSON body must be
-      // RETRIED like a transient 5xx/429 (Circle occasionally serves a blank or
-      // partial 200 mid-attestation) — NOT escape the poll loop as a terminal
-      // "empty body (expected JSON)" throw (which auto-resume would treat terminal).
-      let body: IrisResponse | undefined;
-      try {
-        body = safeJsonParse<IrisResponse>(await res.text(), `Iris /v2/messages (${res.status})`);
-        // safeJsonParse does NOT throw on the JSON literal `null` (JSON.parse("null")
-        // is valid) or a bare primitive, so a degenerate-but-parseable 200 body slips
-        // past the catch. Dereferencing `body!.messages` on `null` would then throw a
-        // TERMINAL `Cannot read properties of null` OUTSIDE this guard. Treat any
-        // non-object body as transient — retry it exactly like the empty/non-JSON case.
-        if (!body || typeof body !== 'object') {
-          transient = true;
-        }
-      } catch {
-        transient = true;
-      }
-      if (!transient) {
-        transientStreak = 0;
-        const entry = select(body!.messages ?? []);
-        const resolved = extract(entry);
-        if (resolved !== null) return resolved;
-        // TERMINAL status: Circle can reject / fail a message that will never
-        // attest. Short-circuit with a distinct, actionable error instead of
-        // wasting the full poll window (default 30 min) on a "timed out" that
-        // misrepresents the cause. (Anything else — e.g. "pending_confirmations"
-        // — is non-terminal and keeps polling.)
-        // When OUR entry is absent, a failed/rejected one may still be ours: Iris can
-        // report a terminal status with NO decodable body, which the selector cannot
-        // match on. Such an entry is consulted for the TERMINAL check ONLY (its payload
-        // is never read). Two guards keep a stranger's failure from clearing our cursor:
-        // the response must be UNAMBIGUOUS (one entry), and that entry's body must be
-        // UNDECODABLE — a body that decodes and does not match us is provably not ours.
-        const all = body!.messages ?? [];
-        const soleUnattributable =
-          !entry && all.length === 1 && all[0] !== undefined && !isDecodableMessage(all[0].message)
-            ? all[0]
-            : undefined;
-        const terminal = [entry, soleUnattributable].find(
-          (candidate) => candidate && TERMINAL_IRIS_STATUS.test(candidate.status),
+    if (outcome.kind === 'messages') {
+      transientStreak = 0;
+      const all = outcome.messages;
+      const entry = select(all);
+      const resolved = extract(entry);
+      if (resolved !== null) return resolved;
+      // TERMINAL status: Circle can reject / fail a message that will never
+      // attest. Short-circuit with a distinct, actionable error instead of
+      // wasting the full poll window (default 30 min) on a "timed out" that
+      // misrepresents the cause. (Anything else — e.g. "pending_confirmations"
+      // — is non-terminal and keeps polling.)
+      // A terminal Iris status is evidence only when the matching hook-data identifies
+      // this burn. A sole bodyless entry may belong to another operation in a relayer batch;
+      // treating it as ours would make return recovery discard its only cursor.
+      if (entry && TERMINAL_IRIS_STATUS.test(entry.status)) {
+        throw new Error(
+          `CCTP attestation failed (Iris status "${entry.status}") for burn ${burnTxHash}.`,
         );
-        if (terminal) {
-          throw new Error(
-            `CCTP attestation failed (Iris status "${terminal.status}") for burn ${burnTxHash}.`,
-          );
-        }
-        // Indexed but not yet done (status e.g. "pending_confirmations"). Only OUR
-        // entry's status is ours to report — a stranger's would misdescribe our progress.
-        onStatus?.(`${entry?.status ?? 'pending'}…`);
       }
-    } else if (!networkError && res!.status === 404) {
+      // Indexed but not yet done (status e.g. "pending_confirmations"). Only OUR
+      // entry's status is ours to report — a stranger's would misdescribe our progress.
+      onStatus?.(`${entry?.status ?? 'pending'}…`);
+    } else if (outcome.kind === 'not-indexed') {
       // Not indexed yet — keep polling at the base interval.
       transientStreak = 0;
-    } else if (networkError || isTransientHttpStatus(res!.status)) {
-      // TRANSIENT (Bundle B1) — a busy/rate-limiting Iris (5xx/429) OR a caught
-      // network-level fetch failure. The deadline-exceeded throw below is
-      // transient-classified, so a persistent failure still surfaces as resumable.
-      transient = true;
-    } else {
-      // Genuine non-retryable HTTP error (400/401/403, …) — throw as before.
-      throw new Error(`Iris poll failed: HTTP ${res!.status}`);
     }
 
     if (transient) {
@@ -352,6 +333,103 @@ export async function waitForAttestation(
     'waitForAttestation',
     match ? (messages) => selectMatchingMessage(messages, match) : undefined,
   );
+}
+
+// Why Iris gave us no usable message. Separate from a transport failure because the two
+// say different things: `not-indexed`/`unmatched` are Iris ANSWERING (nothing here / not
+// yours), `incomplete` is Iris still working, while an unreachable Iris says nothing at all.
+export type IrisMessageUnavailableReason = 'not-indexed' | 'unmatched' | 'incomplete';
+
+export class IrisMessageUnavailableError extends Error {
+  readonly reason: IrisMessageUnavailableReason;
+
+  constructor(reason: IrisMessageUnavailableReason, message: string) {
+    super(message);
+    this.name = 'IrisMessageUnavailableError';
+    this.reason = reason;
+  }
+}
+
+// ONE Iris GET for a burn's attested message — the read return RECOVERY needs. CCTP V2's
+// DepositForBurn log carries no nonce, so classifying a historical burn requires its Iris
+// message; but recovery is classifying the past, not waiting on the present, so it must never
+// poll. Anything short of OUR complete message throws: a caller can then treat every failure
+// as UNKNOWN, which is the only reading that can't turn a stuck burn into a settled one.
+// `match.expectedHookData` is REQUIRED, not merely the match object: return burns all mint to
+// the shared inbound anonymizer with the same domains, so the burn-bound commitment in hookData
+// is the only field that can tell two of them apart. A selector without it would silently
+// answer about a sibling burn — so it is enforced at the type AND at runtime.
+export async function fetchCctpMessageByTxHash(
+  burnTxHash: string,
+  opts: {
+    sourceDomain: number;
+    match: CctpMessageMatch & { expectedHookData: `0x${string}` };
+  },
+): Promise<AttestationResult> {
+  const { sourceDomain, match } = opts;
+  if (match.expectedSourceDomain !== sourceDomain) {
+    throw new Error(
+      `fetchCctpMessageByTxHash: queried source domain ${sourceDomain} contradicts the expected source domain ${match.expectedSourceDomain}.`,
+    );
+  }
+  if (!match.expectedHookData || match.expectedHookData === '0x') {
+    throw new Error(
+      'fetchCctpMessageByTxHash: match.expectedHookData is required — domains and recipient alone cannot tell two return burns apart.',
+    );
+  }
+  const outcome = await fetchIrisMessagesOnce(irisMessagesUrl(sourceDomain, burnTxHash));
+  if (outcome.kind === 'not-indexed') {
+    throw new IrisMessageUnavailableError(
+      'not-indexed',
+      `Iris holds no CCTP message for burn ${burnTxHash} (HTTP 404).`,
+    );
+  }
+  if (outcome.kind === 'transient') {
+    // "temporarily unavailable" makes the WHOLE bucket classify transient (errors.ts): the
+    // poller only ever surfaces its transient-worded timeout, so this is the first place a
+    // bare status escapes to a caller, and TRANSIENT_RE lists only 429/502/503/504 — leaving
+    // the wording to the detail would make retryability depend on which 5xx Iris chose.
+    throw new Error(
+      `Iris message read failed for burn ${burnTxHash} — temporarily unavailable: ${outcome.detail}`,
+    );
+  }
+  // An indexed shell with no entries is "nothing here" (what the poller keeps waiting on),
+  // NOT "these are not ours": `unmatched` means Iris DID return entries and none carried our
+  // commitment, which is the only one of the two a caller may read as definitive.
+  if (outcome.messages.length === 0) {
+    throw new IrisMessageUnavailableError(
+      'not-indexed',
+      `Iris returned no CCTP message entries for burn ${burnTxHash}.`,
+    );
+  }
+  const entry = selectMatchingMessage(outcome.messages, match);
+  if (!entry) {
+    // NO terminal attribution without a hookData match — deliberately unlike the poller, which
+    // consults a sole undecodable entry's status. A return burn rides a RELAYER batch carrying
+    // other users' CCTP messages, so "exactly one entry" describes Iris's indexing at this
+    // instant, not ownership. The poller can take that bet (a wrong UNKNOWN only keeps it
+    // waiting); this read cannot, because its callers CLEAR the cursor on a terminal verdict —
+    // filing a stranger's rejection as ours would drop a live return's only handle.
+    throw new IrisMessageUnavailableError(
+      'unmatched',
+      `No CCTP message matching burn ${burnTxHash} among the ${outcome.messages.length} Iris returned.`,
+    );
+  }
+  if (TERMINAL_IRIS_STATUS.test(entry.status)) {
+    throw new Error(
+      `CCTP attestation failed (Iris status "${entry.status}") for burn ${burnTxHash}.`,
+    );
+  }
+  if (entry.status !== 'complete' || !entry.message || !entry.attestation) {
+    // "attestation incomplete" carries the retry class (errors.ts) for EVERY status: reading it
+    // off Iris's own word would make `pending_confirmations` transient and every other
+    // in-progress status terminal.
+    throw new IrisMessageUnavailableError(
+      'incomplete',
+      `CCTP attestation incomplete for burn ${burnTxHash} (Iris status "${entry.status}").`,
+    );
+  }
+  return { message: entry.message, attestation: entry.attestation };
 }
 
 // Poll Iris by SOURCE domain + burn tx hash until the Forwarding Service has

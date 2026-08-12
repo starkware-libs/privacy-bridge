@@ -98,7 +98,7 @@ vi.mock('./config', async (importOriginal) => {
 });
 
 import { config } from './config';
-import { isNonRetryable } from './errors';
+import { isNonRetryable, isTransientError } from './errors';
 import { PENDING_RETURN_BURN_KEY, PENDING_BURN_DEADLINE_GRACE_MS } from './pendingReturnBurn';
 import { returnToPool, INFLIGHT_RETURN_KEY, type FreshReturnPlan } from './returnIn';
 import {
@@ -301,6 +301,10 @@ describe('returnToPool({ resume: true }) — pending submission records', () => 
 
     expect((err as Error).message).toMatch(/submitted from this device/i);
     expect(err).not.toMatchObject({ code: 'NOTHING_TO_RESUME' });
+    // The refusal PRESERVES the record and asks for a later retry, so a consumer must read it
+    // as resumable — a terminal reading shows a red failure card over state we kept on
+    // purpose. Structural, not wording: the message shares no vocabulary with TRANSIENT_RE.
+    expect(isTransientError(err)).toBe(true);
     // The record is the only handle on a burn that may be mining — it must survive.
     expect(readPending()).toMatchObject({ commitment: EXPECTED_COMMITMENT.toString() });
     expect(prepareFreshReturn).not.toHaveBeenCalled();

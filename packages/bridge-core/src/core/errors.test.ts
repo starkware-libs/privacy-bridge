@@ -2,7 +2,7 @@
 // Copyright 2026 StarkWare Industries Ltd.
 
 import { describe, expect, it } from 'vitest';
-import { isTransientError } from './errors';
+import { isTransientError, markNonRetryable, markTransient } from './errors';
 
 // Transient-vs-terminal classification (the orchestrator's resume safety net).
 // TERMINAL_RE is evaluated FIRST, so a terminal marker (e.g. REVERTED) always
@@ -89,6 +89,27 @@ describe('isTransientError', () => {
       expect(
         isTransientError('submitAndTrack: 0xabc REJECTED: temporarily unavailable'),
       ).toBe(false);
+    });
+  });
+
+  describe('the transient BRAND, for a refusal whose retryability is structural', () => {
+    it('classifies a branded error transient even though its wording matches nothing', () => {
+      // A refusal that preserves state and asks for a later retry is transient by
+      // construction. Pinning it to TRANSIENT_RE would make a copy-edit a behavior change.
+      const err = markTransient(new Error('please try this again in a few minutes'));
+
+      expect(isTransientError(new Error('please try this again in a few minutes'))).toBe(false);
+      expect(isTransientError(err)).toBe(true);
+    });
+
+    it('never lets the brand override an unambiguously TERMINAL message', () => {
+      expect(isTransientError(markTransient(new Error('REVERTED: insufficient balance')))).toBe(
+        false,
+      );
+    });
+
+    it('never lets the brand override NON_RETRYABLE', () => {
+      expect(isTransientError(markNonRetryable(markTransient(new Error('try again'))))).toBe(false);
     });
   });
 });

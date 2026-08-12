@@ -49,11 +49,13 @@ function fakeLog(
   return { ...log, args: { depositor, amount, destinationDomain, hookData } };
 }
 
-function fakeClient(logsFor: (p: GetLogsArgs) => unknown[] = () => []) {
+function fakeClient(logsFor: (p: GetLogsArgs) => unknown[] = () => [], chainId?: number) {
   const getLogs = vi.fn(async (p: GetLogsArgs) => logsFor(p));
+  const getChainId = vi.fn(async () => chainId ?? config.polygon.chainId);
   return {
     getLogs,
-    client: { getLogs } as unknown as PublicClient,
+    getChainId,
+    client: { getLogs, getChainId } as unknown as PublicClient,
     ranges: () => getLogs.mock.calls.map((c) => [c[0].fromBlock, c[0].toBlock] as const),
   };
 }
@@ -363,5 +365,36 @@ describe('scanDepositForBurnLogs', () => {
         evmChainId: 999_999,
       }),
     ).rejects.toThrow(/999999/);
+  });
+
+  it('refuses a client connected to a DIFFERENT chain, before reading a single log', async () => {
+    // The worst failure this scanner can produce: a filter resolved for one chain, queried on
+    // another, answers with a complete empty log set — which recovery consumes as proven
+    // absence and turns a stuck burn into `settled`. A precondition in a comment cannot catch
+    // it; the client has to be asked.
+    const chain = fakeClient(() => [fakeLog(101n)], 1);
+
+    await expect(
+      scanDepositForBurnLogs(chain.client, {
+        depositors: [WALLET_A],
+        fromBlock: 100n,
+        toBlock: 109n,
+      }),
+    ).rejects.toThrow(new RegExp(`${config.polygon.chainId}`));
+    expect(chain.getLogs).not.toHaveBeenCalled();
+  });
+
+  it('propagates a getChainId failure instead of scanning on an unverified client', async () => {
+    const chain = fakeClient(() => [fakeLog(101n)]);
+    chain.getChainId.mockRejectedValue(new Error('rpc down'));
+
+    await expect(
+      scanDepositForBurnLogs(chain.client, {
+        depositors: [WALLET_A],
+        fromBlock: 100n,
+        toBlock: 109n,
+      }),
+    ).rejects.toThrow(/rpc down/);
+    expect(chain.getLogs).not.toHaveBeenCalled();
   });
 });
