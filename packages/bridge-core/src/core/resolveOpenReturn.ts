@@ -297,8 +297,9 @@ async function classifyBurned(
   return { kind: 'continue-claim', write: await (withCursorWriteLock?.(write) ?? write()) };
 }
 
-// Ascending (blockNumber, logIndex). Provider log order is not part of any contract, so both
-// the pick and the reported orphan list are ordered here rather than inherited.
+// Ascending (blockNumber, logIndex). Provider log order is not part of any contract, and the
+// reported orphan list is oldest-first regardless of it. Determinism of the matched PICK is
+// enforced upstream instead — two matches refuse rather than choose.
 function oldestFirst(logs: DepositForBurnLog[]): DepositForBurnLog[] {
   return [...logs].sort((a, b) =>
     a.blockNumber === b.blockNumber
@@ -364,7 +365,9 @@ async function classifyIntent(p: {
     const want = hookData.toLowerCase();
     matched = logs.filter((log) => log.hookData.toLowerCase() === want);
     orphanBurnTxs = [
-      ...new Set(logs.filter((log) => !matched.includes(log)).map((log) => log.transactionHash)),
+      ...new Set(
+        logs.filter((log) => log.hookData.toLowerCase() !== want).map((log) => log.transactionHash),
+      ),
     ];
   } catch (err) {
     return unknown(err instanceof LogRangeCapError ? 'burn-scan-range-capped' : 'burn-scan-failed');
