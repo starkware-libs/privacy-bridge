@@ -40,6 +40,7 @@ export * from './core/unclaimedReturns';
 export * from './core/bridgeFunding';
 export * from './core/accountScan';
 export * from './core/returnIn';
+export * from './core/resolveOpenReturn';
 export * from './core/pendingReturnBurn';
 export * from './core/polygonMint';
 export * from './core/proven-submit';
