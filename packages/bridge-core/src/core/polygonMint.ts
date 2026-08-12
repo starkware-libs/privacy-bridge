@@ -61,16 +61,6 @@ export interface CctpMessageMatch {
 
 // Whether the entry carries a body we can decode at all. An UNDECODABLE body cannot be
 // attributed to anyone; a decodable one that does not match us belongs to someone else.
-function isDecodableMessage(message: `0x${string}` | undefined): boolean {
-  if (!message) return false;
-  try {
-    decodeCctpMessage(message);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // The entry whose decoded body is addressed to us. Returns undefined when the
 // response holds only other people's messages — the poller then keeps waiting rather
 // than handing a stranger's message to the mint path.
@@ -87,20 +77,6 @@ function selectMatchingMessage(
       return false;
     }
   });
-}
-
-// When OUR entry is absent, a failed/rejected one may still be ours: Iris can report a terminal
-// status with NO decodable body, which the selector cannot match on. Such an entry is consulted
-// for the TERMINAL check ONLY (its payload is never read). Two guards keep a stranger's failure
-// from being taken for ours: the response must be UNAMBIGUOUS (one entry), and that entry's body
-// must be UNDECODABLE — a body that decodes and does not match us is provably not ours.
-function soleUnattributableEntry(
-  messages: IrisMessage[],
-  entry: IrisMessage | undefined,
-): IrisMessage | undefined {
-  const sole = messages.length === 1 ? messages[0] : undefined;
-  if (entry || !sole || isDecodableMessage(sole.message)) return undefined;
-  return sole;
 }
 
 // Base Iris poll cadence for the STANDARD finality tier (threshold 2000). Standard
@@ -281,12 +257,12 @@ async function pollIris<T>(
       // wasting the full poll window (default 30 min) on a "timed out" that
       // misrepresents the cause. (Anything else — e.g. "pending_confirmations"
       // — is non-terminal and keeps polling.)
-      const terminal = [entry, soleUnattributableEntry(all, entry)].find(
-        (candidate) => candidate && TERMINAL_IRIS_STATUS.test(candidate.status),
-      );
-      if (terminal) {
+      // A terminal Iris status is evidence only when the matching hook-data identifies
+      // this burn. A sole bodyless entry may belong to another operation in a relayer batch;
+      // treating it as ours would make return recovery discard its only cursor.
+      if (entry && TERMINAL_IRIS_STATUS.test(entry.status)) {
         throw new Error(
-          `CCTP attestation failed (Iris status "${terminal.status}") for burn ${burnTxHash}.`,
+          `CCTP attestation failed (Iris status "${entry.status}") for burn ${burnTxHash}.`,
         );
       }
       // Indexed but not yet done (status e.g. "pending_confirmations"). Only OUR
@@ -428,14 +404,12 @@ export async function fetchCctpMessageByTxHash(
   }
   const entry = selectMatchingMessage(outcome.messages, match);
   if (!entry) {
-    // Same rule the poller applies: a sole undecodable entry reporting failed/rejected is
-    // consulted for that status, so a Circle rejection of OUR burn is never filed as "not ours".
-    const sole = soleUnattributableEntry(outcome.messages, entry);
-    if (sole && TERMINAL_IRIS_STATUS.test(sole.status)) {
-      throw new Error(
-        `CCTP attestation failed (Iris status "${sole.status}") for burn ${burnTxHash}.`,
-      );
-    }
+    // NO terminal attribution without a hookData match — deliberately unlike the poller, which
+    // consults a sole undecodable entry's status. A return burn rides a RELAYER batch carrying
+    // other users' CCTP messages, so "exactly one entry" describes Iris's indexing at this
+    // instant, not ownership. The poller can take that bet (a wrong UNKNOWN only keeps it
+    // waiting); this read cannot, because its callers CLEAR the cursor on a terminal verdict —
+    // filing a stranger's rejection as ours would drop a live return's only handle.
     throw new IrisMessageUnavailableError(
       'unmatched',
       `No CCTP message matching burn ${burnTxHash} among the ${outcome.messages.length} Iris returned.`,

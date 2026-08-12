@@ -164,23 +164,23 @@ describe('waitForAttestation — bundled transaction with several CCTP messages'
     ).rejects.toThrow(/attestation failed/i);
   });
 
-  it('N4: a genuinely failed attestation with NO decodable body still short-circuits', async () => {
-    // Iris can report failed/rejected with an empty message, which the selector cannot
-    // match on. Unambiguous (single entry) ⇒ it is ours ⇒ fail fast instead of burning
-    // the full 30-minute window.
+  it('N4: a sole bodiless failure is unattributable and keeps the cursor resumable', async () => {
+    // A relayer batch may expose this stranger's Iris entry before ours. Its missing body
+    // cannot carry the hook-data commitment, so one entry is not proof of ownership.
     fetchMock.mockResolvedValue(
       res(200, { messages: [{ status: 'failed', message: '0x', attestation: '0x' }] }),
     );
 
-    await expect(
-      waitForAttestation(BURN_TX, {
-        sourceDomain: SOURCE_DOMAIN,
-        match: MATCH,
-        intervalMs: 1,
-        timeoutMs: 50,
-        sleep: async () => {},
-      }),
-    ).rejects.toThrow(/attestation failed/i);
+    const err = await waitForAttestation(BURN_TX, {
+      sourceDomain: SOURCE_DOMAIN,
+      match: MATCH,
+      intervalMs: 1,
+      timeoutMs: 5,
+      sleep: async () => {},
+    }).catch((e: unknown) => e);
+
+    expect((err as Error).message).not.toMatch(/attestation failed/i);
+    expect(isTransientError(err)).toBe(true);
   });
 
   it('N7: a single DECODABLE non-matching failed entry is provably a stranger’s — keep polling', async () => {
