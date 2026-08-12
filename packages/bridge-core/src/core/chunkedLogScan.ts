@@ -128,7 +128,8 @@ function toDepositForBurnLog(log: RawLog): DepositForBurnLog {
 //
 // `client` MUST be connected to `evmChainId`'s network — the same fund-safety rule
 // resolvePendingReturnBurn follows, since a filter resolved for one chain and queried on
-// another returns an empty log set that reads as "no burn happened".
+// another returns an empty log set that reads as "no burn happened". ASSERTED, not documented:
+// that answer is indistinguishable from a real absence, so a comment cannot enforce it.
 export async function scanDepositForBurnLogs(
   client: PublicClient,
   p: {
@@ -152,6 +153,15 @@ export async function scanDepositForBurnLogs(
   const evmChainId = p.evmChainId ?? config.polygon.chainId;
   const source = getEvmCctpSource(evmChainId);
   if (!source) throw new Error(`no EVM CCTP source configured for chain ${evmChainId}`);
+  // A PLAIN error, never LogRangeCapError: a cap means "absence unproven on the right chain",
+  // which a caller may act on as a partial answer. A mismatch invalidates the whole query.
+  const connectedChainId = await client.getChainId();
+  if (connectedChainId !== evmChainId) {
+    throw new Error(
+      `refusing to scan chain ${evmChainId} on a client connected to chain ${connectedChainId} — ` +
+        'its empty log set would read as proof that no burn happened',
+    );
+  }
 
   const out: DepositForBurnLog[] = [];
   for (let from = p.fromBlock; from <= p.toBlock; from += chunkBlocks) {
