@@ -688,7 +688,19 @@ export async function moveIntoPool(
       // Funding just committed — it's the fresher proving dependency than the deploy.
       // Recorded in the CROSS-ATTEMPT scope so a transient deposit retry (which skips
       // this branch, `funded` already true) still ages the proof past the funding.
-      depositFundingBlock = await getCurrentBlock(getRpcProvider());
+      //
+      // FOLD PATH SKIP: mintFold set (deferMint fold this run) or mintAlreadyConsumed
+      // (fold-resume that found the nonce burned) both mean NO standalone Starknet mint
+      // committed here — the CCTP mint rides INSIDE the deposit tx below. Recording
+      // getCurrentBlock() as `depositFundingBlock` would be a spurious "latest" with no
+      // on-chain dep to age past: an inline re-prove (on a prebuilt-proof mismatch — AVNU
+      // fee drift or an autoRegister flip) would then wait ~8 blocks past `latest` instead
+      // of past the deploy (already minutes-buried by the attestation). Skipping keeps the
+      // depositAnchorBlock choice below falling through to `deployBlock`, matching the
+      // anchor `buildDepositProofAhead` used, so the two paths age against the same base.
+      if (!mintFold && !mintAlreadyConsumed) {
+        depositFundingBlock = await getCurrentBlock(getRpcProvider());
+      }
       // Persist the resume cursor BEFORE depositToPool: from here the funds are on the
       // SN account and recovery must RESUME the deposit, never re-fund/re-burn.
       //
