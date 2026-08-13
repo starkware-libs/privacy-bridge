@@ -59,8 +59,6 @@ export interface CctpMessageMatch {
   expectedHookData?: `0x${string}`;
 }
 
-// Whether the entry carries a body we can decode at all. An UNDECODABLE body cannot be
-// attributed to anyone; a decodable one that does not match us belongs to someone else.
 // The entry whose decoded body is addressed to us. Returns undefined when the
 // response holds only other people's messages — the poller then keeps waiting rather
 // than handing a stranger's message to the mint path.
@@ -404,12 +402,10 @@ export async function fetchCctpMessageByTxHash(
   }
   const entry = selectMatchingMessage(outcome.messages, match);
   if (!entry) {
-    // NO terminal attribution without a hookData match — deliberately unlike the poller, which
-    // consults a sole undecodable entry's status. A return burn rides a RELAYER batch carrying
-    // other users' CCTP messages, so "exactly one entry" describes Iris's indexing at this
-    // instant, not ownership. The poller can take that bet (a wrong UNKNOWN only keeps it
-    // waiting); this read cannot, because its callers CLEAR the cursor on a terminal verdict —
-    // filing a stranger's rejection as ours would drop a live return's only handle.
+    // NO terminal attribution without a hookData match. A return burn rides a RELAYER batch
+    // carrying other users' CCTP messages, so "exactly one entry" describes Iris's indexing at
+    // this instant, not ownership — and this read's callers CLEAR the cursor on a terminal
+    // verdict, so filing a stranger's rejection as ours would drop a live return's only handle.
     throw new IrisMessageUnavailableError(
       'unmatched',
       `No CCTP message matching burn ${burnTxHash} among the ${outcome.messages.length} Iris returned.`,

@@ -299,7 +299,6 @@ describe('public network defaults (baked in config.ts)', () => {
     ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10],
     // Derived from the chunk default (10 × 10) — the pairing tests below pin the rule.
     ['POLYGON_WALK_REACH_BLOCKS', 'polygonWalkReachBlocks', 100],
-    ['RECOVERY_CAP_BLOCKS', 'recoveryCapBlocks', 2_592_000],
   ] as const)(
     '%s: blank falls back to its default; fractions and zero fail loud',
     (key, field, def) => {

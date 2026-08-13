@@ -407,11 +407,6 @@ export type Config = {
   // MUST set the pair explicitly (test 10 / 100; production the probed chunk against a
   // reach up to ~2_000_000). An explicit value wins and is independent of the chunk.
   polygonWalkReachBlocks: number;
-  // How far back a return-recovery sweep may look for a deposit wallet's funding
-  // block (≈60 days of ~2 s Polygon blocks). A wallet deployed before it cannot be
-  // scanned over its complete history, so the slot is WITHHELD rather than reported
-  // settled. Raising this extends coverage with no migration.
-  recoveryCapBlocks: number;
   // Network-SELECTED CCTP source registry (NOT merged — fund-safety invariant).
   evmCctpSources: Record<number, EvmCctpSource>;
   // Network-SELECTED CCTP DESTINATION registry (pool → EVM). Same fund-safety
@@ -833,13 +828,6 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       e.vars.POLYGON_WALK_REACH_BLOCKS,
       getLogsChunkBlocks * 10,
       'POLYGON_WALK_REACH_BLOCKS',
-    ),
-    // Recovery look-back cap (see the Config doc). Mirrored by RECOVERY_CAP_BLOCKS in
-    // fundingAnchor.ts, which pins the two together in a test.
-    recoveryCapBlocks: envBlockCount(
-      e.vars.RECOVERY_CAP_BLOCKS,
-      2_592_000,
-      'RECOVERY_CAP_BLOCKS',
     ),
     evmCctpSources,
     evmCctpDestinations,
