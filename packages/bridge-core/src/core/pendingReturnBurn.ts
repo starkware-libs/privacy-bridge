@@ -103,6 +103,25 @@ export const FALLBACK_MAX_CHUNKS = 12;
 // finishes. Comfortably above any real relayer batch deadline.
 const MAX_DEADLINE_SPAN_MS = 30 * 60_000;
 
+// Blocks a time span can cover, floored at the FASTEST plausible block time. Over-counting
+// only widens an already-bounded window; under-counting cuts it short and misses the burn.
+export function blocksForSpanMs(spanMs: number): bigint {
+  return BigInt(Math.ceil(spanMs / FASTEST_BLOCK_TIME_MS));
+}
+
+// The widest block span in which a return burn for a given intent can still execute, counted
+// FORWARD from the intent's own block.
+//
+// Sized off MAX_DEADLINE_SPAN_MS rather than the default batch deadline. That constant exists
+// above as a ceiling on a span read from a persisted record, so using it as the nominal window
+// is a repurposing — licensed by the very property its comment claims: "comfortably above any
+// real relayer batch deadline". A window narrower than some future relayer's deadline would
+// hide a burn that DID land, and a hidden burn plus fresh proceeds on the wallet reads as
+// "never burned" — the one wrong answer that burns twice. Margins on both sides absorb clock
+// skew and block-time variance, exactly as searchExactWindow applies them.
+export const DEADLINE_WINDOW_BLOCKS =
+  blocksForSpanMs(MAX_DEADLINE_SPAN_MS) + SCAN_MARGIN_BLOCKS * 2n;
+
 // SELF-CONTAINED like INFLIGHT_RETURN_KEY: device-store (T5) references only the KEY.
 export const PENDING_RETURN_BURN_KEY = 'pmp.pendingReturnBurn';
 
@@ -438,7 +457,7 @@ async function searchExactWindow(
     MAX_DEADLINE_SPAN_MS,
     Math.max(0, record.deadlineMs + PENDING_BURN_DEADLINE_GRACE_MS - record.submittedAtMs),
   );
-  const deadlineSpanBlocks = BigInt(Math.ceil(deadlineSpanMs / FASTEST_BLOCK_TIME_MS));
+  const deadlineSpanBlocks = blocksForSpanMs(deadlineSpanMs);
   // Margin on BOTH sides. The lower one matters most: the anchor read races the submit, so a
   // slow response can report a height already PAST the burn's block, and starting exactly at
   // the anchor would scan above it.
