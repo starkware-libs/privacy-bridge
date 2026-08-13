@@ -20,10 +20,11 @@
 //     terminal here: a log counts as this entry's burn only when its hookData equals
 //     encodeCommitmentHookData(entry.commitment). A burn bound to a stale commitment (an
 //     InboundAnonymizer redeploy re-derives it) belongs to a different return.
-//   - The scan runs BEFORE the balance is consulted, at the SAME height. Full-balance burns
-//     make "balance above dust" look like "never burned" the moment fresh proceeds land on a
-//     wallet whose burn already succeeded, and a balance read at a later height than the scan
-//     hides a burn that landed between the two reads.
+//   - The scan runs BEFORE the balance is consulted. Full-balance burns make "balance above
+//     dust" look like "never burned" the moment fresh proceeds land on a wallet whose burn
+//     already succeeded. The scan's window stops at the relayer's contract-enforced batch
+//     deadline rather than at the head, so it is COMPLETE for this intent however old the entry
+//     is; the balance is then read at the head, since a reburn spends what is on the wallet now.
 //   - A burn that has not been MINED yet is also indistinguishable from a burn never
 //     submitted, and no chain read can separate them — only the age of the intent can. Inside
 //     the relayer's own deadline window, absence stays `unknown`.
@@ -48,7 +49,7 @@ import {
   DEFAULT_BATCH_DEADLINE_MS,
   type RecoveredWriteOutcome,
 } from './returnIn';
-import { PENDING_BURN_DEADLINE_GRACE_MS } from './pendingReturnBurn';
+import { PENDING_BURN_DEADLINE_GRACE_MS, DEADLINE_WINDOW_BLOCKS } from './pendingReturnBurn';
 import { sumErc20Balances } from './polygonClient';
 import { snAddressToBytes32 } from './snMint';
 import { encodeCommitmentHookData } from '../derivation/index';
@@ -344,6 +345,17 @@ async function classifyIntent(p: {
   // throw on the inverted range and assuming a window would manufacture absence.
   if (head < entry.intentBlock) return unknown('head-behind-intent-block');
 
+  // The scan stops at the deadline window, not at the head: the relayer's batch deadline is
+  // contract-enforced, so a burn for THIS intent cannot execute past it — the same property
+  // that licenses concluding "never landed" instead of "not yet". Bounds the call to a fixed
+  // span however stale the entry is, which also keeps it inside one getLogs chunk.
+  const deadlineEnd = entry.intentBlock + DEADLINE_WINDOW_BLOCKS;
+  const scanTo = head < deadlineEnd ? head : deadlineEnd;
+
+  // Balance at the HEAD, deliberately not at `scanTo`: the scan asks how far a burn could have
+  // landed, the balance asks what is on the wallet NOW, and a reburn spends what is there now.
+  // Reading it later than the scan cannot hide a burn, because past `scanTo` no burn for this
+  // intent can exist. In the uncapped regime the two heights coincide.
   const readBalance = () =>
     sumErc20Balances(client, [source.usdc], depositWallet, { blockNumber: head });
 
@@ -365,7 +377,7 @@ async function classifyIntent(p: {
       await scanDepositForBurnLogs(client, {
         depositors: [depositWallet],
         fromBlock: entry.intentBlock,
-        toBlock: head,
+        toBlock: scanTo,
         evmChainId: entry.evmChainId,
       }),
     );

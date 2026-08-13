@@ -41,7 +41,11 @@ import { LogRangeCapError, scanDepositForBurnLogs, type DepositForBurnLog } from
 import { fetchCctpMessageByTxHash, IrisMessageUnavailableError } from './polygonMint';
 import { isCctpMessageNonceUsed } from './depositIn';
 import { writeRecoveredInflightReturn, DEFAULT_BATCH_DEADLINE_MS } from './returnIn';
-import { PENDING_BURN_DEADLINE_GRACE_MS } from './pendingReturnBurn';
+import {
+  PENDING_BURN_DEADLINE_GRACE_MS,
+  DEADLINE_WINDOW_BLOCKS,
+  blocksForSpanMs,
+} from './pendingReturnBurn';
 import { sumErc20Balances } from './polygonClient';
 import {
   resolveOpenReturn,
@@ -149,6 +153,90 @@ beforeEach(() => {
   mIris.mockResolvedValue({ message: MESSAGE, attestation: '0x00' });
   mNonceUsed.mockResolvedValue(false);
   mWrite.mockReturnValue('written');
+});
+
+// The intent scan is capped at the block span in which a burn for this intent could still
+// execute. The relayer's batch deadline is contract-enforced, so execution past it is
+// impossible — the same property that licenses concluding "never landed" at all.
+describe('resolveOpenReturn — the intent scan window is deadline-capped', () => {
+  const CAP_END = INTENT_BLOCK + DEADLINE_WINDOW_BLOCKS;
+  // Unlike the suite's simple mock, this one HONORS the requested range — otherwise "a burn
+  // beyond the cap is unreachable" would be asserted by a mock that returns it at any range.
+  function stageRangeAware(logs: DepositForBurnLog[]) {
+    mScan.mockImplementation(async (_client, p) =>
+      logs.filter((log) => log.blockNumber >= p.fromBlock && log.blockNumber <= p.toBlock),
+    );
+  }
+
+  it('never sizes the block window below the time window the freshness gate licenses', () => {
+    expect(DEADLINE_WINDOW_BLOCKS).toBeGreaterThanOrEqual(
+      blocksForSpanMs(DEFAULT_BATCH_DEADLINE_MS + PENDING_BURN_DEADLINE_GRACE_MS),
+    );
+  });
+
+  it('caps toBlock at the deadline window while pinning the balance to the live head', async () => {
+    const farHead = CAP_END + 500_000n;
+    const { client } = fakeClient({ head: farHead });
+    stageRangeAware([]);
+    mBalance.mockResolvedValue(DUST + 1n);
+
+    expect(await resolve({ client })).toEqual({ kind: 'reburn' });
+    // The two heights DIVERGE on purpose: the scan asks how far a burn could have landed, the
+    // balance asks what is on the wallet NOW. Sound because no burn can exist past the cap.
+    expect(mScan.mock.calls[0]![1].toBlock).toBe(CAP_END);
+    expect(mBalance.mock.calls[0]![3]).toEqual({ blockNumber: farHead });
+  });
+
+  it('scans to the head when the head sits inside the deadline window', async () => {
+    const nearHead = CAP_END - 1n;
+    const { client } = fakeClient({ head: nearHead });
+    stageRangeAware([]);
+    mBalance.mockResolvedValue(DUST + 1n);
+
+    await resolve({ client });
+
+    expect(mScan.mock.calls[0]![1].toBlock).toBe(nearHead);
+    expect(mBalance.mock.calls[0]![3]).toEqual({ blockNumber: nearHead });
+  });
+
+  it('still finds a burn that landed inside the capped window', async () => {
+    const { client } = fakeClient({ head: CAP_END + 500_000n });
+    stageRangeAware([burnLog({ blockNumber: CAP_END - 1n })]);
+    mBalance.mockResolvedValue(5_000_000n);
+
+    expect(await resolve({ client })).toEqual({
+      kind: 'burn-found',
+      burnTx: BURN_TX,
+      amountWei: 5_000_000n,
+    });
+  });
+
+  it('finds a burn inside the window even while the intent is still young', async () => {
+    const { client } = fakeClient({ head: CAP_END + 500_000n });
+    stageRangeAware([burnLog({ blockNumber: INTENT_BLOCK + 1n })]);
+
+    expect((await resolve({ client, entry: entry({ intentAtMs: NOW_MS }) })).kind).toBe(
+      'burn-found',
+    );
+  });
+
+  it('cannot see a burn beyond the cap, and reburns on the evidence it does have', async () => {
+    const { client } = fakeClient({ head: CAP_END + 500_000n });
+    stageRangeAware([burnLog({ blockNumber: CAP_END + 1n })]);
+    mBalance.mockResolvedValue(DUST + 1n);
+
+    // Unreachable BY CONSTRUCTION: the range-aware mock would have returned it had the scan
+    // asked. Past the contract-enforced deadline such a burn cannot exist, which is what makes
+    // the reburn sound rather than merely uninformed.
+    expect(await resolve({ client })).toEqual({ kind: 'reburn' });
+  });
+
+  it('leaves the lagging-head guard untouched', async () => {
+    const { client } = fakeClient({ head: INTENT_BLOCK - 1n });
+
+    expect(unknownReason(await resolve({ client }))).toBe('head-behind-intent-block');
+    expect(mScan).not.toHaveBeenCalled();
+  });
 });
 
 describe('resolveOpenReturn — intent entries scan first', () => {
