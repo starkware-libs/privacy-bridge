@@ -323,7 +323,15 @@ async function classifyBurned(
 // slots actually pays. Fails CLOSED: an exhausted budget answers `unknown`, never absence.
 //
 // An operator whose chunk size covers the window within this budget — chunk >= window/10, i.e.
-// >= 841 blocks for today's 8401-block inclusive window — sees no behavior change at all.
+// >= 841 blocks for today's 8401-block inclusive window — sees no behavior change at all. Below
+// it the reachable span is chunk × 10 and everything past that withholds judgement, so the
+// getLogs chunk and this path's usefulness are set together per environment. At the shipped
+// default (10 blocks, free-tier-safe) that span is 100 blocks: intended, and the reason a
+// coverage-critical deployment must raise the chunk to its provider's real cap.
+//
+// Ten is the SAME budget config.polygonWalkReachBlocks derives itself from — reach = chunk × 10,
+// "always <=10 requests per walk whatever the cap" — one convention for what a single sweep of
+// this chain may cost, applied to the forward window here and the backward walk there.
 export const MAX_INTENT_SCAN_REQUESTS = 10;
 
 function ceilDiv(numerator: bigint, denominator: bigint): bigint {

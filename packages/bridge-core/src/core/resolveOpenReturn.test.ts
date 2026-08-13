@@ -150,6 +150,12 @@ function unknownReason(verdict: OpenReturnVerdict): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Every suite except the budget one asserts CLASSIFICATION, so each declares the regime it
+  // means instead of inheriting a cost default that can move underneath it: a chunk wide enough
+  // to span the deadline window in ONE request. The shipped default is deliberately far below
+  // that (10 blocks, the free-tier-safe floor) — the budget suite runs there and pins what it
+  // costs.
+  initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
   mScan.mockResolvedValue([]);
   mBalance.mockResolvedValue(0n);
   mIris.mockResolvedValue({ message: MESSAGE, attestation: '0x00' });
@@ -262,7 +268,8 @@ describe('resolveOpenReturn — the scan spends a bounded request budget', () =>
   const FAR_HEAD = CAP_END + 500_000n;
 
   // Chunk small enough that the window needs far more than the budget: 8401 inclusive blocks
-  // at 10 per request is 841 requests against a budget of 10.
+  // at 10 per request is 841 requests against a budget of 10. Stated explicitly rather than
+  // left to the default, even though 10 IS the default today.
   function withStarvedChunk() {
     initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10' });
   }
@@ -348,6 +355,22 @@ describe('resolveOpenReturn — the scan spends a bounded request budget', () =>
     const { client } = fakeClient({ head: FAR_HEAD });
 
     expect(unknownReason(await resolve({ client }))).toBe('burn-scan-budget-exhausted');
+  });
+
+  // The shipped default is the free-tier-safe floor, well under the coverage threshold. So out
+  // of the box the intent path can only ever see chunk × budget = 100 blocks and otherwise
+  // withholds judgement. That is the intended fail-safe, not a regression — but it is the
+  // difference between "resume works" and "resume says it cannot tell yet", so it is pinned
+  // here: this test goes red if either the default or the budget moves.
+  it('is budget-starved under the shipped default chunk size', async () => {
+    initTestConfig();
+    stageSliceAware([]);
+    mBalance.mockResolvedValue(5_000_000n);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    expect(config.polygonGetLogsChunkBlocks).toBe(10);
+    const verdict = await resolve({ client, entry: entry({ intentAtMs: NOW_MS - QUIET_MS - 1 }) });
+    expect(unknownReason(verdict)).toBe('burn-scan-budget-exhausted');
   });
 
   it('leaves a scan failure reported as a scan failure, not as budget exhaustion', async () => {
