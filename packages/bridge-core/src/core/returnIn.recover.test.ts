@@ -271,6 +271,22 @@ describe('recoverBridgeIn', () => {
     expect(localStorage.getItem(INFLIGHT_RETURN_KEY)).toBe('{}');
   });
 
+  // A `true` read here CLEARS the cursor, so it must come off a COMMITTED block. At
+  // pre_confirmed the answer can still be reorged away, which would drop the one handle on a
+  // burn whose claim never actually landed — the class of bug H1 fixed in resolveOpenReturn.
+  it('reads is_nonce_used at LATEST, never at the pre-confirmed default', async () => {
+    seedCursor(ACCOUNT_INDEX);
+    callContract.mockResolvedValue(['0x1']);
+
+    await recoverBridgeIn({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX });
+
+    const nonceCall = callContract.mock.calls.find(
+      (call) => (call[0] as { entrypoint?: string } | undefined)?.entrypoint === 'is_nonce_used',
+    );
+    expect(nonceCall).toBeDefined();
+    expect(nonceCall?.[1]).toBe('latest');
+  });
+
   it('does NOT recover a cursor whose commitment belongs to a DIFFERENT account index', async () => {
     seedCursor(ACCOUNT_INDEX + 1); // cursor's commitment is for a different index
     const res = await recoverBridgeIn({ signature: SIGNATURE, accountIndex: ACCOUNT_INDEX });

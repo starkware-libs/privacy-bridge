@@ -3,18 +3,18 @@
 
 // Chunked DepositForBurn scan — the burn half of return recovery.
 //
-// The caller counts what this returns and compares the count against the pool's Claimed
-// events; equal counts mean every burn was claimed. That inference is only as sound as the
-// window, so this module's job is to make a short result impossible to mistake for an empty
-// one:
+// Its consumer is resolveOpenReturn: a WAL entry still in `intent` asks whether ITS burn is
+// already on chain, and a clean no-match over the whole window is what licenses re-burning.
+// That inference is only as sound as the window, so this module's job is to make a short
+// result impossible to mistake for an empty one:
 //
 //   - the window is walked in chunks no wider than the provider's getLogs range cap, which
 //     is a property of the RPC PLAN (as low as 10 blocks) and therefore config, not a
 //     constant;
 //   - a provider that REJECTS a range surfaces as LogRangeCapError, with no partial result;
-//   - a log missing the fields a count needs throws rather than being filtered out. A
-//     dropped log turns matched > Claimed into matched == Claimed, i.e. a stuck burn read
-//     as `settled` — the one wrong answer that loses money.
+//   - a log missing the fields the caller matches on throws rather than being filtered out.
+//     A dropped log reads as "no burn found" — i.e. burn again over a burn that landed, the
+//     one wrong answer that loses money.
 //
 // Cap-vs-generic classification is message-based because JSON-RPC codes do not discriminate
 // (-32600 is "invalid request" for any reason). A heuristic is acceptable because BOTH
