@@ -3,9 +3,9 @@
 
 /**
  * Bug 1 (value-path): useBridgeFundingEstimate must NOT serve the previous bet's
- * `ready` plan during the 400ms debounce after the bet changes. If it did, a
- * consumer that reads `estimate.plan.fundMicro` (e.g. OrderTicket.runBuy) within
- * that window would burn the OLD bet's fund amount for the NEW bet.
+ * `ready` plan during the debounce after the bet changes. If it did, a consumer
+ * that reads `estimate.plan.fundMicro` (e.g. OrderTicket.runBuy) within that
+ * window would burn the OLD bet's fund amount for the NEW bet.
  *
  * The fix resets `estimate` to `{status:'loading'}` synchronously at the TOP of
  * the effect (before scheduling the debounce timer), so no consumer ever sees a
@@ -54,7 +54,7 @@ afterEach(() => {
 });
 
 describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the debounce', () => {
-  it('does NOT serve bet A\'s ready plan while bet B is still inside the 400ms debounce', async () => {
+  it("does NOT serve bet A's ready plan while bet B is still inside the debounce window", async () => {
     const BET_A = 1_000_000n;
     const BET_B = 5_000_000n;
 
@@ -62,28 +62,31 @@ describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the deb
       initialProps: { bet: BET_A as bigint | null },
     });
 
-    // Settle bet A: advance past the debounce, let the async plan resolve.
+    // Settle bet A: run every timer + microtask so the plan resolves regardless of
+    // the current DEBOUNCE_MS value — the test asserts the sync-invalidate contract,
+    // not a specific delay.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.runAllTimersAsync();
     });
     expect(result.current.status).toBe('ready');
     if (result.current.status === 'ready') {
       expect(result.current.plan.fundMicro).toBe(BET_A + 100_000n);
     }
 
-    // Change to bet B and advance LESS than the debounce (still mid-debounce).
+    // Change to bet B and advance ONLY the synchronous microtask queue — no timers
+    // fire, so the debounced fetch is still pending regardless of its length.
     rerender({ bet: BET_B });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200); // < 400ms
+      await Promise.resolve();
     });
 
     // RED before the fix: status is still 'ready' with bet A's plan.
     // GREEN after: status is NOT 'ready' (reset to 'loading') → no stale plan.
     expect(result.current.status).not.toBe('ready');
 
-    // After the debounce elapses it settles to bet B's plan.
+    // Draining timers + microtasks settles bet B's plan.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200); // now past 400ms total
+      await vi.runAllTimersAsync();
     });
     expect(result.current.status).toBe('ready');
     if (result.current.status === 'ready') {

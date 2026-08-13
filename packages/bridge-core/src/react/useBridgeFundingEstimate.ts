@@ -35,7 +35,13 @@ export type BridgeFundingEstimate =
       capError: string | null;
     };
 
-const DEBOUNCE_MS = 400;
+// Coalesce keystrokes without stalling the caller's CTA past user-visible latency. On a
+// bet-amount change the SDK invalidates to `loading` synchronously (see line 106 comment),
+// so this debounce is the floor on how long a caller's fee-gate stays pending after the
+// last keystroke — a value that reads as "instant" for typing (typical keystroke cadence
+// is ~50-200ms so short bursts still coalesce into one request) while keeping the CTA in
+// step with the min-dollar text the same keystroke clears.
+const DEBOUNCE_MS = 150;
 
 /** Optional per-caller cap on the total bridge (`plan.fundMicro`), e.g. a per-order limit. */
 export interface BridgeFundingCap {
