@@ -67,9 +67,21 @@ vi.mock('viem', async (importOriginal) => {
     createPublicClient: vi.fn(() => ({ getLogs, getBlockNumber, getBlock })),
   };
 });
+// A CONFIGURED environment: the getLogs pair set the way a real deployment sets it (a probed
+// 10_000-block cap over a 120_000-block reach = 12 requests per walk). The unconfigured
+// defaults are deliberately shallow — a ~100-block horizon — which would put every stranded
+// burn these tests recover out of reach, so pin the pair rather than inherit the dev floor.
 vi.mock('./config', async (importOriginal) => {
   const mod = await importOriginal<typeof import('./config')>();
-  return { ...mod, config: { ...mod.config, inboundAnonymizerAddress: '0x49abc' } };
+  return {
+    ...mod,
+    config: {
+      ...mod.config,
+      inboundAnonymizerAddress: '0x49abc',
+      polygonGetLogsChunkBlocks: 10_000,
+      polygonWalkReachBlocks: 120_000,
+    },
+  };
 });
 
 import { config } from './config';
@@ -794,8 +806,10 @@ describe('Bugbot round 7 — an anchorless walk must reach an OLD burn', () => {
 
     await recoverPendingReturnBurn(EVM_ADDRESS);
 
+    // Ceiling, matching walkChunkBudget: a pair that does not divide exactly still costs a
+    // whole final request, and a fractional expectation here would assert nothing.
     expect(getLogs.mock.calls.length).toBe(
-      config.polygonWalkReachBlocks / config.polygonGetLogsChunkBlocks,
+      Math.ceil(config.polygonWalkReachBlocks / config.polygonGetLogsChunkBlocks),
     );
     expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
   });

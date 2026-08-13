@@ -38,8 +38,8 @@ const WINDOW_FROM = 400n;
 const HEAD = 1_040n;
 const WINDOW_BLOCKS = 641n;
 
-// Walk geometry: a chain deep enough that the walk cannot hit genesis, and the lowest block
-// WALK_REACH_BLOCKS (120_000) of reach bottoms out at — head - 120_000 + 1.
+// Walk geometry: a chain deep enough that the walk cannot hit genesis, and the lowest block an
+// EXPLICIT 120_000-block reach bottoms out at — head - 120_000 + 1.
 const DEEP_HEAD = 50_000_000n;
 const WALK_REACH_FLOOR = 49_880_001n;
 
@@ -257,13 +257,13 @@ describe('the anchorless walk obeys the configured getLogs chunk size', () => {
 // A narrow cap is a property of the RPC PLAN. If it also shrank how far back the walk can
 // look, an operator fixing their range-cap failures would silently trade away recovery
 // history — at a 10-block cap, 12 chunks would reach 120 blocks, ~4 minutes of Polygon.
-describe('the anchorless walk reaches the same distance whatever the cap', () => {
+describe('an EXPLICIT walk reach is the same distance whatever the cap', () => {
   it('bottoms out at the same block at a wide cap and at a 10-block cap', async () => {
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000', POLYGON_WALK_REACH_BLOCKS: '120000' });
     const wide = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: wide.client });
 
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10' });
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10', POLYGON_WALK_REACH_BLOCKS: '120000' });
     const narrow = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: narrow.client });
 
@@ -273,19 +273,19 @@ describe('the anchorless walk reaches the same distance whatever the cap', () =>
   });
 
   it('spends the floor budget at a wide cap and buys more calls at a narrow one', async () => {
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000', POLYGON_WALK_REACH_BLOCKS: '120000' });
     const wide = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: wide.client });
     expect(wide.ranges().length).toBe(FALLBACK_MAX_CHUNKS);
 
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10' });
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10', POLYGON_WALK_REACH_BLOCKS: '120000' });
     const narrow = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: narrow.client });
     expect(narrow.ranges().length).toBe(12_000);
   });
 
   it('still reports an unreached submit as unknown rather than never-landed', async () => {
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10' });
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10', POLYGON_WALK_REACH_BLOCKS: '120000' });
     const chain = fakeClient({ head: DEEP_HEAD });
 
     const resolution = await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), {
@@ -320,6 +320,43 @@ describe('the anchorless walk reach is configurable', () => {
     expect(resolution.kind).toBe('unknown');
   });
 
+  // Reach that is NOT a whole number of chunks. Every other pair here divides exactly, which
+  // makes the clamp on the last chunk invisible — delete it and those still pass. These two
+  // are what hold it: the walk must stop AT the reach, not at the next chunk boundary past it.
+  it('clamps the last chunk to a reach that is not a multiple of the cap', async () => {
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '10',
+      POLYGON_WALK_REACH_BLOCKS: '105',
+    });
+    const chain = fakeClient({ head: DEEP_HEAD, providerCap: 10n });
+
+    const resolution = await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), {
+      client: chain.client,
+    });
+
+    const ranges = chain.ranges();
+    // Ten full chunks cover head-99..head; the eleventh is the 5-block remainder, not a
+    // twelfth 10-block chunk overshooting to head-119.
+    expect(ranges.length).toBe(11);
+    expect(ranges[ranges.length - 1]).toEqual([DEEP_HEAD - 104n, DEEP_HEAD - 100n]);
+    expect(resolution.kind).toBe('unknown');
+  });
+
+  it('asks for the reach, not the cap, when reach is SMALLER than one chunk', async () => {
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000',
+      POLYGON_WALK_REACH_BLOCKS: '100',
+    });
+    const chain = fakeClient({ head: DEEP_HEAD });
+
+    const resolution = await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), {
+      client: chain.client,
+    });
+
+    expect(chain.ranges()).toEqual([[DEEP_HEAD - 99n, DEEP_HEAD]]);
+    expect(resolution.kind).toBe('unknown');
+  });
+
   it('spends reach ÷ chunk requests per walk', async () => {
     initTestConfig({
       POLYGON_GET_LOGS_CHUNK_BLOCKS: '100',
@@ -333,13 +370,45 @@ describe('the anchorless walk reach is configurable', () => {
     expect(chain.ranges()[chain.ranges().length - 1][0]).toBe(DEEP_HEAD - 4_999n);
   });
 
-  it('defaults the reach to 120_000 blocks', async () => {
+  // UNSET, reach derives as chunk × 10 — so an unconfigured walk costs ≤10 requests at any
+  // cap. Cheap, and only ~100 blocks deep at the default cap: a dev-box horizon, which is
+  // exactly why a real deployment must set the pair.
+  it('derives the default reach from the chunk size, ten chunks deep', async () => {
+    const chain = fakeClient({ head: DEEP_HEAD, providerCap: 10n });
+
+    const resolution = await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), {
+      client: chain.client,
+    });
+
+    expect(config.polygonWalkReachBlocks).toBe(100);
+    expect(chain.ranges().length).toBe(10);
+    expect(chain.ranges()[9][0]).toBe(DEEP_HEAD - 99n);
+    expect(resolution.kind).toBe('unknown');
+  });
+
+  it('derives a proportionally deeper default at a probed wide cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient({ head: DEEP_HEAD });
 
     await resolvePendingReturnBurn(anchorlessRecord(), { client: chain.client });
 
-    expect(config.polygonWalkReachBlocks).toBe(120_000);
-    expect(chain.ranges()[chain.ranges().length - 1][0]).toBe(WALK_REACH_FLOOR);
+    expect(config.polygonWalkReachBlocks).toBe(100_000);
+    expect(chain.ranges().length).toBe(10);
+    expect(chain.ranges()[9][0]).toBe(DEEP_HEAD - 99_999n);
+  });
+
+  it('lets an explicit reach override the derived default at any cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000', POLYGON_WALK_REACH_BLOCKS: '777' });
+    const wide = fakeClient({ head: DEEP_HEAD });
+    await resolvePendingReturnBurn(anchorlessRecord(), { client: wide.client });
+
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10', POLYGON_WALK_REACH_BLOCKS: '777' });
+    const narrow = fakeClient({ head: DEEP_HEAD, providerCap: 10n });
+    await resolvePendingReturnBurn(anchorlessRecord(), { client: narrow.client });
+
+    // One clamped call at the wide cap, 78 at the narrow one — same horizon either way.
+    expect(wide.ranges()).toEqual([[DEEP_HEAD - 776n, DEEP_HEAD]]);
+    expect(narrow.ranges()[narrow.ranges().length - 1][0]).toBe(DEEP_HEAD - 776n);
   });
 
   it('still finds a burn that sits within reach at a tiny cap', async () => {
@@ -502,7 +571,12 @@ describe('PROBE B: chunks tile their range exactly, at every cap', () => {
   });
 
   it.each(CAPS)('anchorless walk, cap %s', async (cap) => {
-    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: cap.toString() });
+    // Reach pinned so the cap is the only variable — the derived default would otherwise
+    // stop the tiniest caps short of the boundary this case walks to.
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: cap.toString(),
+      POLYGON_WALK_REACH_BLOCKS: '120000',
+    });
     const boundary = DEEP_HEAD - 50n;
     const chain = fakeClient({
       head: DEEP_HEAD,
