@@ -31,6 +31,10 @@
 //     the `burned {txHash}` upgrade right after submit, which moves the entry off this path
 //     entirely. The residual is one case: submitted, the upgrade PUT failed, AND more than the
 //     window elapsed between the intent write and the submit.
+//   - The scan is bounded in REQUESTS as well as blocks (MAX_INTENT_SCAN_REQUESTS), because the
+//     request count is the window divided by the operator's chunk size. The budget fails CLOSED:
+//     exhausting it yields `unknown`, never absence — absence is what licenses a second burn. A
+//     burn found in an early slice still wins, since positive evidence needs no full coverage.
 //   - A burn that has not been MINED yet is also indistinguishable from a burn never
 //     submitted, and no chain read can separate them — only the age of the intent can. Inside
 //     the relayer's own deadline window, absence stays `unknown`.
@@ -119,6 +123,9 @@ export type UnknownReason =
   | 'head-behind-intent-block'
   | 'burn-scan-range-capped'
   | 'burn-scan-failed'
+  // The request budget ran out before the deadline window was covered. Absence is UNPROVEN:
+  // raise config.polygonGetLogsChunkBlocks to cover the window in fewer requests.
+  | 'burn-scan-budget-exhausted'
   | 'multiple-matched-burns'
   | 'balance-read-failed'
   | 'no-burn-and-balance-at-dust'
@@ -311,6 +318,55 @@ async function classifyBurned(
   return { kind: 'continue-claim', write: await (withCursorWriteLock?.(write) ?? write()) };
 }
 
+// Hard ceiling on eth_getLogs requests one intent resolution may spend. The deadline window
+// bounds the scan in BLOCKS; this bounds it in CALLS, which is what a resume pass over many
+// slots actually pays. Fails CLOSED: an exhausted budget answers `unknown`, never absence.
+//
+// An operator whose chunk size covers the window within this budget — chunk >= window/10, i.e.
+// >= 841 blocks for today's 8401-block inclusive window — sees no behavior change at all.
+export const MAX_INTENT_SCAN_REQUESTS = 10;
+
+function ceilDiv(numerator: bigint, denominator: bigint): bigint {
+  return (numerator + denominator - 1n) / denominator;
+}
+
+// Degraded path: the window needs more requests than the budget allows, so full coverage is
+// off the table. Walk chunk-wide slices forward from the intent block and stop the moment a
+// matched burn appears — positive evidence stays positive under partial coverage, and it is the
+// verdict that PREVENTS a second burn. Absence gets the opposite treatment: an exhausted budget
+// may never conclude "no burn happened".
+//
+// Each slice is its own complete scanDepositForBurnLogs call, one chunk wide, so that module's
+// contract ("cover the whole range or throw, never a partial answer") holds per call — the
+// partiality lives here, where it is named in the verdict.
+async function scanOnBudget(p: {
+  client: PublicClient;
+  depositWallet: `0x${string}`;
+  want: string;
+  evmChainId: number;
+  fromBlock: bigint;
+  chunkBlocks: bigint;
+}): Promise<OpenReturnVerdict> {
+  let from = p.fromBlock;
+  for (let spent = 0; spent < MAX_INTENT_SCAN_REQUESTS; spent += 1) {
+    const logs = oldestFirst(
+      await scanDepositForBurnLogs(p.client, {
+        depositors: [p.depositWallet],
+        fromBlock: from,
+        toBlock: from + p.chunkBlocks - 1n,
+        chunkBlocks: p.chunkBlocks,
+        evmChainId: p.evmChainId,
+      }),
+    );
+    const matched = logs.filter((log) => log.hookData.toLowerCase() === p.want);
+    if (matched.length > 1) return unknown('multiple-matched-burns');
+    const burn = matched[0];
+    if (burn) return { kind: 'burn-found', burnTx: burn.transactionHash, amountWei: burn.amount };
+    from += p.chunkBlocks;
+  }
+  return unknown('burn-scan-budget-exhausted');
+}
+
 // Ascending (blockNumber, logIndex). Provider log order is not part of any contract, and the
 // reported orphan list is oldest-first regardless of it. Determinism of the matched PICK is
 // enforced upstream instead — two matches refuse rather than choose.
@@ -375,11 +431,27 @@ async function classifyIntent(p: {
     }
   }
 
+  const want = hookData.toLowerCase();
+  // The window is bounded in BLOCKS, but its cost in requests is that span divided by the
+  // operator's chunk size — so a small chunk turns a bounded window into an unbounded scan.
+  const chunkBlocks = BigInt(config.polygonGetLogsChunkBlocks);
+  const requestsNeeded = ceilDiv(scanTo - entry.intentBlock + 1n, chunkBlocks);
+
   let matched: DepositForBurnLog[];
   let orphanBurnTxs: `0x${string}`[];
   try {
+    if (requestsNeeded > BigInt(MAX_INTENT_SCAN_REQUESTS)) {
+      return await scanOnBudget({
+        client,
+        depositWallet,
+        want,
+        evmChainId: entry.evmChainId,
+        fromBlock: entry.intentBlock,
+        chunkBlocks,
+      });
+    }
     // chunkBlocks omitted on purpose — the scanner takes it from
-    // config.polygonGetLogsChunkBlocks, so an operator's provider cap flows through here.
+    // config.polygonGetLogsChunkBlocks, the value the budget above was measured against.
     const logs = oldestFirst(
       await scanDepositForBurnLogs(client, {
         depositors: [depositWallet],
@@ -388,7 +460,6 @@ async function classifyIntent(p: {
         evmChainId: entry.evmChainId,
       }),
     );
-    const want = hookData.toLowerCase();
     matched = logs.filter((log) => log.hookData.toLowerCase() === want);
     orphanBurnTxs = [
       ...new Set(

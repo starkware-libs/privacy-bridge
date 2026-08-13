@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PublicClient } from 'viem';
 
 import { config } from './config';
+import { initTestConfig } from '../../vitest.setup';
 import { encodeCommitmentHookData } from '../derivation/index';
 import { spyOnSecretSinks } from './__testkit__/secretSinks';
 
@@ -49,6 +50,7 @@ import {
 import { sumErc20Balances } from './polygonClient';
 import {
   resolveOpenReturn,
+  MAX_INTENT_SCAN_REQUESTS,
   type OpenReturnEntry,
   type OpenReturnVerdict,
 } from './resolveOpenReturn';
@@ -248,6 +250,112 @@ describe('resolveOpenReturn — the intent scan window is deadline-capped', () =
 
     expect(unknownReason(await resolve({ client }))).toBe('head-behind-intent-block');
     expect(mScan).not.toHaveBeenCalled();
+  });
+});
+
+// The window is bounded in BLOCKS, but its cost in eth_getLogs REQUESTS is the window divided
+// by the operator's chunk size — unbounded from this module's point of view. So the request
+// count is capped too, and the cap fails CLOSED: an exhausted budget can never answer "no burn
+// happened", because that answer is what licenses a second burn.
+describe('resolveOpenReturn — the scan spends a bounded request budget', () => {
+  const CAP_END = INTENT_BLOCK + DEADLINE_WINDOW_BLOCKS;
+  const FAR_HEAD = CAP_END + 500_000n;
+
+  // Chunk small enough that the window needs far more than the budget: 8401 inclusive blocks
+  // at 10 per request is 841 requests against a budget of 10.
+  function withStarvedChunk() {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10' });
+  }
+
+  // One request per call, honoring the requested slice — mirrors what the real scanner does
+  // when its range is exactly one chunk wide.
+  function stageSliceAware(logs: DepositForBurnLog[]) {
+    mScan.mockImplementation(async (_client, p) =>
+      logs.filter((log) => log.blockNumber >= p.fromBlock && log.blockNumber <= p.toBlock),
+    );
+  }
+
+  it('stops at the budget and refuses to reburn from partial coverage', async () => {
+    withStarvedChunk();
+    stageSliceAware([]);
+    const { client } = fakeClient({ head: FAR_HEAD });
+    // The would-be reburn: funds present, intent long past the freshness deadline. Under FULL
+    // coverage this is `reburn`; under partial coverage it must not be.
+    mBalance.mockResolvedValue(5_000_000n);
+
+    const verdict = await resolve({ client, entry: entry({ intentAtMs: NOW_MS - QUIET_MS - 1 }) });
+
+    expect(verdict.kind).not.toBe('reburn');
+    expect(unknownReason(verdict)).toBe('burn-scan-budget-exhausted');
+    expect(mScan).toHaveBeenCalledTimes(MAX_INTENT_SCAN_REQUESTS);
+    expect(MAX_INTENT_SCAN_REQUESTS).toBe(10);
+  });
+
+  it('walks contiguous chunk-wide slices from the intent block', async () => {
+    withStarvedChunk();
+    stageSliceAware([]);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    await resolve({ client });
+
+    const ranges = mScan.mock.calls.map(([, p]) => [p.fromBlock, p.toBlock] as const);
+    expect(ranges[0]).toEqual([INTENT_BLOCK, INTENT_BLOCK + 9n]);
+    expect(ranges[1]).toEqual([INTENT_BLOCK + 10n, INTENT_BLOCK + 19n]);
+    expect(ranges.at(-1)).toEqual([INTENT_BLOCK + 90n, INTENT_BLOCK + 99n]);
+  });
+
+  it('stops as soon as a matched burn appears, well inside the budget', async () => {
+    withStarvedChunk();
+    // Third slice: [intentBlock+20, intentBlock+29].
+    stageSliceAware([burnLog({ blockNumber: INTENT_BLOCK + 25n })]);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    expect(await resolve({ client })).toEqual({
+      kind: 'burn-found',
+      burnTx: BURN_TX,
+      amountWei: 5_000_000n,
+    });
+    // Positive evidence is still positive under partial coverage — and it costs 3, not 10.
+    expect(mScan).toHaveBeenCalledTimes(3);
+  });
+
+  it('spends one request when the chunk size covers the window within budget', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
+    mScan.mockResolvedValue([]);
+    mBalance.mockResolvedValue(DUST + 1n);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    // Full coverage ⇒ every verdict is exactly what it was before the budget existed.
+    expect(await resolve({ client })).toEqual({ kind: 'reburn' });
+    expect(mScan).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a chunk that covers the window in exactly the budget as full coverage', async () => {
+    // 8401 inclusive blocks / 10 requests ⇒ 841 blocks per request is the threshold.
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '841' });
+    mScan.mockResolvedValue([]);
+    mBalance.mockResolvedValue(DUST + 1n);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    expect(await resolve({ client })).toEqual({ kind: 'reburn' });
+    expect(mScan).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades one block below that threshold', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '840' });
+    stageSliceAware([]);
+    mBalance.mockResolvedValue(5_000_000n);
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    expect(unknownReason(await resolve({ client }))).toBe('burn-scan-budget-exhausted');
+  });
+
+  it('leaves a scan failure reported as a scan failure, not as budget exhaustion', async () => {
+    withStarvedChunk();
+    mScan.mockRejectedValue(new LogRangeCapError('provider refused the range'));
+    const { client } = fakeClient({ head: FAR_HEAD });
+
+    expect(unknownReason(await resolve({ client }))).toBe('burn-scan-range-capped');
   });
 });
 
