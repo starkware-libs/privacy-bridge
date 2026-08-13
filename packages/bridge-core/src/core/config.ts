@@ -392,9 +392,16 @@ export type Config = {
   // Largest INCLUSIVE block span one `eth_getLogs` request may cover on the EVM
   // side. Providers cap this, and the cap belongs to the RPC PLAN rather than the
   // chain — a free tier can be as low as 10 blocks, rejecting anything wider with
-  // -32600. Default 10_000 keeps today's burn-scan sizing; set it to the provider's
-  // real cap, or every scan fails and absence can never be established.
+  // -32600. Default 10 is the SAFE-ANYWHERE floor: it works unconfigured on a free
+  // tier, where a wider default would reject every scan and absence could never be
+  // established. Raise it to the provider's PROBED cap in every real environment.
   polygonGetLogsChunkBlocks: number;
+  // How far back the anchorless return-burn walk may look for a stranded burn.
+  // Paired with the chunk size above: REQUESTS PER WALK = reach ÷ chunk, so the two
+  // must be set TOGETHER per environment (a big reach over a tiny chunk multiplies
+  // requests — 2_000_000 over 10 is 200k of them). Reach is deliberately independent
+  // of the cap so a narrow plan costs calls rather than recovery history.
+  polygonWalkReachBlocks: number;
   // How far back a return-recovery sweep may look for a deposit wallet's funding
   // block (≈60 days of ~2 s Polygon blocks). A wallet deployed before it cannot be
   // scanned over its complete history, so the slot is WITHHELD rather than reported
@@ -804,12 +811,19 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       usdc: e.vars.POLYGON_USDC_ADDRESS || defaultDest.usdcAddress,
       domain: envInt(e.vars.CCTP_POLYGON_DOMAIN, defaultDest.domain, 'CCTP_POLYGON_DOMAIN'),
     },
-    // Provider getLogs range cap (see the Config doc). Default = today's burn-scan
-    // chunk size, so an unset env changes no existing behavior.
+    // Provider getLogs range cap and the anchorless walk's look-back, in blocks (see
+    // the Config doc). SET THESE AS A PAIR: requests per walk = reach ÷ chunk. The
+    // defaults (10 / 120_000 = 12k requests) are sized to be SAFE unconfigured rather
+    // than fast; a probed chunk of 10_000 against a 2_000_000 reach is 200 requests.
     polygonGetLogsChunkBlocks: envBlockCount(
       e.vars.POLYGON_GET_LOGS_CHUNK_BLOCKS,
-      10_000,
+      10,
       'POLYGON_GET_LOGS_CHUNK_BLOCKS',
+    ),
+    polygonWalkReachBlocks: envBlockCount(
+      e.vars.POLYGON_WALK_REACH_BLOCKS,
+      120_000,
+      'POLYGON_WALK_REACH_BLOCKS',
     ),
     // Recovery look-back cap (see the Config doc). Mirrored by RECOVERY_CAP_BLOCKS in
     // fundingAnchor.ts, which pins the two together in a test.

@@ -90,13 +90,6 @@ const FASTEST_BLOCK_TIME_MS = 250;
 // Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
 
-// How far back the anchorless walk must be able to reach, in BLOCKS. Reach is a statement
-// about how old a stranded submit can be; the provider's range cap is a statement about one
-// request. Deriving reach from the cap conflates them — a narrow cap would silently shrink
-// history (at a 10-block cap, 12 chunks reach 120 blocks: ~4 minutes of Polygon). So a narrow
-// cap buys MORE CALLS instead, and reach stays invariant under the knob.
-const WALK_REACH_BLOCKS = 120_000n;
-
 // Floor on the walk's call budget, which the reach requirement raises when the cap is narrow.
 // Running out of budget before reaching back past the submit means absence is NOT established
 // and the result must be 'unknown' — the walk's whole purpose is that a negative answer is
@@ -353,9 +346,13 @@ export async function resolvePendingReturnBurn(
   try {
     // The widest INCLUSIVE range this provider accepts — a property of the RPC plan (as low as
     // 10 blocks), so it belongs to config, not to constants here. Every getLogs below obeys it.
+    // Its ratio against the walk's reach is the request cost of an anchorless resolution.
     const chunkBlocks = BigInt(config.polygonGetLogsChunkBlocks);
-    if (chunkBlocks <= 0n) {
-      throw new Error(`getLogs chunk size must be a positive block count (got ${chunkBlocks})`);
+    const reachBlocks = BigInt(config.polygonWalkReachBlocks);
+    if (chunkBlocks <= 0n || reachBlocks <= 0n) {
+      throw new Error(
+        `getLogs chunk size and walk reach must be positive block counts (got ${chunkBlocks}, ${reachBlocks})`,
+      );
     }
     const head = await client.getBlockNumber();
 
@@ -374,6 +371,7 @@ export async function resolvePendingReturnBurn(
               return Number(timestamp) * 1000;
             },
             chunkBlocks,
+            reachBlocks,
           )
         : await searchExactWindow(record, head, findIn, chunkBlocks);
 
@@ -452,9 +450,11 @@ async function searchExactWindow(
   };
 }
 
-// Calls the walk may spend to cover WALK_REACH_BLOCKS at this cap, never fewer than the floor.
-function walkChunkBudget(chunkBlocks: bigint): number {
-  const needed = (WALK_REACH_BLOCKS + chunkBlocks - 1n) / chunkBlocks;
+// Hard ceiling on the calls one walk may spend: reach ÷ chunk, which IS the request cost of a
+// walk and the reason the two knobs are set as a pair. The reach floor below normally ends the
+// walk first, so this is a guard rather than the operative bound.
+function walkChunkBudget(chunkBlocks: bigint, reachBlocks: bigint): number {
+  const needed = (reachBlocks + chunkBlocks - 1n) / chunkBlocks;
   return needed > BigInt(FALLBACK_MAX_CHUNKS) ? Number(needed) : FALLBACK_MAX_CHUNKS;
 }
 
@@ -471,11 +471,17 @@ async function walkBackToSubmit(
   findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
   blockTimestampMs: (block: bigint) => Promise<number>,
   chunkBlocks: bigint,
+  reachBlocks: bigint,
 ): Promise<BurnSearch> {
-  const maxChunks = walkChunkBudget(chunkBlocks);
+  const maxChunks = walkChunkBudget(chunkBlocks, reachBlocks);
+  // The oldest block the configured reach allows. Reach is a DISTANCE, so it bounds the walk
+  // itself rather than only its call count — the last chunk is clamped to it instead of
+  // overshooting, and stopping here means absence was never established.
+  const reachFloor = head >= reachBlocks ? head - reachBlocks + 1n : 0n;
   let hi = head;
   for (let chunk = 0; chunk < maxChunks; chunk++) {
-    const lo = hi >= chunkBlocks ? hi - chunkBlocks + 1n : 0n;
+    const stride = hi >= chunkBlocks ? hi - chunkBlocks + 1n : 0n;
+    const lo = stride > reachFloor ? stride : reachFloor;
     const burnTx = await findIn(lo, hi);
     if (burnTx) return { burnTx, coveredSubmit: true };
     // Genesis: there is nothing older left to search, so absence is as established as it gets.
@@ -483,6 +489,7 @@ async function walkBackToSubmit(
     if ((await blockTimestampMs(lo)) <= record.submittedAtMs) {
       return { burnTx: null, coveredSubmit: true };
     }
+    if (lo === reachFloor) return { burnTx: null, coveredSubmit: false };
     hi = lo - 1n;
   }
   return { burnTx: null, coveredSubmit: false };

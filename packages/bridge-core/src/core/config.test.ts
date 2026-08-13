@@ -296,7 +296,8 @@ describe('public network defaults (baked in config.ts)', () => {
   // Block counts become bigints at their call sites, where `BigInt(1.5)` would throw far
   // from the env line that caused it — so they are rejected here instead.
   it.each([
-    ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10_000],
+    ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10],
+    ['POLYGON_WALK_REACH_BLOCKS', 'polygonWalkReachBlocks', 120_000],
     ['RECOVERY_CAP_BLOCKS', 'recoveryCapBlocks', 2_592_000],
   ] as const)(
     '%s: blank falls back to its default; fractions and zero fail loud',

@@ -418,7 +418,11 @@ describe('recoverPendingReturnBurn (the sweep entry point)', () => {
 
     await recoverPendingReturnBurn(EVM_ADDRESS);
 
-    const { fromBlock, toBlock } = getLogs.mock.calls[0][0] as { fromBlock: bigint; toBlock: bigint };
+    // The window is walked in provider-cap-sized chunks, so bound the UNION of them: first
+    // chunk's start to last chunk's end is the span that has to stay reasonable.
+    const calls = getLogs.mock.calls.map((c) => c[0] as { fromBlock: bigint; toBlock: bigint });
+    const fromBlock = calls[0].fromBlock;
+    const toBlock = calls[calls.length - 1].toBlock;
     // Starts just BELOW the anchor: the pre-submit head read races the submit, so the margin
     // absorbs an answer that arrived after the burn's own block.
     expect(fromBlock).toBeLessThan(41_000_000n);
@@ -782,14 +786,17 @@ describe('Bugbot round 7 — an anchorless walk must reach an OLD burn', () => {
     expect(readPendingReturnBurn(EVM_ADDRESS)).toBeNull();
   });
 
-  it('stops at the chunk budget rather than scanning forever', async () => {
+  it('stops at the configured reach rather than scanning forever', async () => {
     // The walk is bounded: an unreachable submit must cost a fixed number of reads and end
-    // 'unknown', not grind through the whole chain.
+    // 'unknown', not grind through the whole chain. That count is reach ÷ chunk — the pair of
+    // config knobs — which at the safe-anywhere defaults is 120_000 / 10.
     seedInconclusiveAnchorless();
 
     await recoverPendingReturnBurn(EVM_ADDRESS);
 
-    expect(getLogs.mock.calls.length).toBeLessThanOrEqual(12);
+    expect(getLogs.mock.calls.length).toBe(
+      config.polygonWalkReachBlocks / config.polygonGetLogsChunkBlocks,
+    );
     expect(readPendingReturnBurn(EVM_ADDRESS)).not.toBeNull();
   });
 });

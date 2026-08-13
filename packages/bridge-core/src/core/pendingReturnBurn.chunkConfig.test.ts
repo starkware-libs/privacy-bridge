@@ -174,12 +174,23 @@ describe('the anchored window obeys the configured getLogs chunk size', () => {
     for (let i = 1; i < ranges.length; i++) expect(ranges[i][0]).toBe(ranges[i - 1][1] + 1n);
   });
 
-  it('issues ONE call spanning the whole window under the default config', async () => {
+  // The default is the SAFE-ANYWHERE floor: unconfigured, the resolver must work on a free tier
+  // whose hard cap is 10 blocks. A wide default would reject every call and strand the guard.
+  it('chunks by 10 blocks under the DEFAULT config', async () => {
+    const chain = fakeClient({ head: HEAD, providerCap: 10n });
+
+    await resolvePendingReturnBurn(anchoredRecord(), { client: chain.client });
+
+    expect(config.polygonGetLogsChunkBlocks).toBe(10);
+    expect(chain.ranges().length).toBe(chunkCount(WINDOW_BLOCKS, 10n));
+  });
+
+  it('issues ONE call spanning the whole window at a probed wide cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient({ head: HEAD });
 
     await resolvePendingReturnBurn(anchoredRecord(), { client: chain.client });
 
-    expect(config.polygonGetLogsChunkBlocks).toBe(10_000);
     expect(chain.ranges()).toEqual([[WINDOW_FROM, HEAD]]);
   });
 
@@ -229,7 +240,8 @@ describe('the anchorless walk obeys the configured getLogs chunk size', () => {
     for (const [from, to] of chain.ranges()) expect(to - from + 1n).toBeLessThanOrEqual(10n);
   });
 
-  it('keeps the default walk at 10_000-block chunks, descending from the head', async () => {
+  it('walks in 10_000-block chunks at a probed wide cap, descending from the head', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient({ head: DEEP_HEAD });
 
     await resolvePendingReturnBurn(anchorlessRecord(), { client: chain.client });
@@ -244,9 +256,10 @@ describe('the anchorless walk obeys the configured getLogs chunk size', () => {
 
 // A narrow cap is a property of the RPC PLAN. If it also shrank how far back the walk can
 // look, an operator fixing their range-cap failures would silently trade away recovery
-// history — at a 10-block cap, 12 chunks reach 120 blocks, ~4 minutes of Polygon.
+// history — at a 10-block cap, 12 chunks would reach 120 blocks, ~4 minutes of Polygon.
 describe('the anchorless walk reaches the same distance whatever the cap', () => {
-  it('bottoms out at the same block at the default cap and at a 10-block cap', async () => {
+  it('bottoms out at the same block at a wide cap and at a 10-block cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const wide = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: wide.client });
 
@@ -259,7 +272,8 @@ describe('the anchorless walk reaches the same distance whatever the cap', () =>
     expect(lowest(narrow.ranges())).toBe(WALK_REACH_FLOOR);
   });
 
-  it('spends the floor budget at the default cap and buys more calls at a narrow one', async () => {
+  it('spends the floor budget at a wide cap and buys more calls at a narrow one', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const wide = fakeClient({ head: DEEP_HEAD });
     await resolvePendingReturnBurn(anchorlessRecord(), { client: wide.client });
     expect(wide.ranges().length).toBe(FALLBACK_MAX_CHUNKS);
@@ -280,6 +294,73 @@ describe('the anchorless walk reaches the same distance whatever the cap', () =>
 
     expect(chain.ranges().length).toBe(12_000);
     expect(resolution.kind).toBe('unknown');
+  });
+});
+
+// Reach is its own knob because it answers a different question from the cap: how OLD a
+// stranded submit may be, versus how much one request may ask for. Their ratio is the request
+// cost of a walk, which is why they are set as a pair per environment.
+describe('the anchorless walk reach is configurable', () => {
+  it('bottoms out at head - reach + 1 at a custom reach', async () => {
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '10',
+      POLYGON_WALK_REACH_BLOCKS: '100',
+    });
+    const chain = fakeClient({ head: DEEP_HEAD, providerCap: 10n });
+
+    const resolution = await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), {
+      client: chain.client,
+    });
+
+    const ranges = chain.ranges();
+    expect(ranges.length).toBe(10);
+    expect(ranges[ranges.length - 1][0]).toBe(DEEP_HEAD - 99n);
+    // Reach ran out before the walk covered the submit, so absence is UNPROVEN — the record
+    // stays undecidable rather than being declared safe to re-burn.
+    expect(resolution.kind).toBe('unknown');
+  });
+
+  it('spends reach ÷ chunk requests per walk', async () => {
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '100',
+      POLYGON_WALK_REACH_BLOCKS: '5000',
+    });
+    const chain = fakeClient({ head: DEEP_HEAD, providerCap: 100n });
+
+    await resolvePendingReturnBurn(anchorlessRecord(pastDeadline()), { client: chain.client });
+
+    expect(chain.ranges().length).toBe(5_000 / 100);
+    expect(chain.ranges()[chain.ranges().length - 1][0]).toBe(DEEP_HEAD - 4_999n);
+  });
+
+  it('defaults the reach to 120_000 blocks', async () => {
+    const chain = fakeClient({ head: DEEP_HEAD });
+
+    await resolvePendingReturnBurn(anchorlessRecord(), { client: chain.client });
+
+    expect(config.polygonWalkReachBlocks).toBe(120_000);
+    expect(chain.ranges()[chain.ranges().length - 1][0]).toBe(WALK_REACH_FLOOR);
+  });
+
+  it('still finds a burn that sits within reach at a tiny cap', async () => {
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '10',
+      POLYGON_WALK_REACH_BLOCKS: '500',
+    });
+    const chain = fakeClient({
+      head: DEEP_HEAD,
+      providerCap: 10n,
+      logsAt: [DEEP_HEAD - 300n],
+    });
+
+    const resolution = await resolvePendingReturnBurn(anchorlessRecord(), {
+      client: chain.client,
+    });
+
+    expect(resolution).toEqual({
+      kind: 'landed',
+      burnTx: matchingLog(DEEP_HEAD - 300n).transactionHash,
+    });
   });
 });
 
@@ -352,13 +433,13 @@ describe('PROBE A: a provider with a hard range cap', () => {
   });
 
   it('is stuck at unknown when the config is left ABOVE the cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient({ head: HEAD, providerCap: 10n });
 
     const resolution = await resolvePendingReturnBurn(anchoredRecord(pastDeadline()), {
       client: chain.client,
     });
 
-    expect(config.polygonGetLogsChunkBlocks).toBe(10_000);
     expect(resolution.kind).toBe('unknown');
   });
 
@@ -378,6 +459,7 @@ describe('PROBE A: a provider with a hard range cap', () => {
   });
 
   it('is stuck at unknown on the anchorless walk when the config is above the cap', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient({
       head: DEEP_HEAD,
       providerCap: 10n,
