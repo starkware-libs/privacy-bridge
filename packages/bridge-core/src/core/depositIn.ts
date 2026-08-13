@@ -41,7 +41,7 @@ import {
 } from 'viem';
 import { getCallsStatus, getCapabilities, sendCalls } from 'viem/actions';
 
-import type { Account } from 'starknet';
+import type { Account, BlockIdentifier } from 'starknet';
 
 import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
 import { getDepositTokenBalance } from './deposit';
@@ -519,7 +519,16 @@ const STORAGE_PROBE_KEY = 'pmp.depositStorageProbe';
 // once receive_message lands, is_nonce_used(nonce) = 1 forever (monotonic), so a
 // `1` read proves the mint already happened; a read FAILURE proves nothing.
 // EXPORTED so returnIn.ts can use the same monotonic gate on RESUME (bug-hunt E1).
-export async function isCctpMessageNonceUsed(message: `0x${string}`): Promise<boolean> {
+//
+// `blockIdentifier` defaults to READ_BLOCK (pre_confirmed) — right for every caller that uses
+// a `1` to SKIP work it would otherwise redo, because a pre-confirmed claim that never commits
+// only costs a retry. A caller whose `1` is TERMINAL (the return-WAL `claimed` verdict deletes
+// the user's only handle on in-flight funds) must pass 'latest' instead: monotonic is a
+// property of committed state, and pre_confirmed can still be rolled back.
+export async function isCctpMessageNonceUsed(
+  message: `0x${string}`,
+  opts?: { blockIdentifier?: BlockIdentifier },
+): Promise<boolean> {
   const nonce = BigInt(extractCctpNonce(message)); // bytes 12..44, big-endian u256
   const result = await getRpcProvider().callContract(
     {
@@ -530,7 +539,7 @@ export async function isCctpMessageNonceUsed(message: `0x${string}`): Promise<bo
         `0x${(nonce >> 128n).toString(16)}`, // u256.high second
       ],
     },
-    READ_BLOCK,
+    opts?.blockIdentifier ?? READ_BLOCK,
   );
   const [used] = result;
   if (used === undefined) {

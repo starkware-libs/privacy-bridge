@@ -92,6 +92,10 @@ export async function sumErc20Balances(
   client: PublicClient,
   tokens: string[],
   address: `0x${string}`,
+  // Pins the read to ONE height. A caller that compares this sum against another read of the
+  // same chain (a log scan's window, say) needs both to describe the same block, or funds that
+  // moved between the two are visible to neither. Omitted ⇒ latest, as before.
+  opts?: { blockNumber?: bigint },
 ): Promise<bigint> {
   const distinctTokens = [
     ...new Map(
@@ -113,6 +117,7 @@ export async function sumErc20Balances(
       functionName: 'balanceOf',
       args: [address],
     })),
+    ...(opts?.blockNumber === undefined ? {} : { blockNumber: opts.blockNumber }),
   });
   return (balances as bigint[]).reduce((sum, bal) => sum + bal, 0n);
 }
