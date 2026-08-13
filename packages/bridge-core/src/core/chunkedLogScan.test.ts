@@ -116,7 +116,27 @@ describe('scanDepositForBurnLogs', () => {
     for (const [from, to] of chain.ranges()) expect(to - from + 1n).toBeLessThanOrEqual(10n);
   });
 
-  it('defaults the chunk size to 10_000 blocks', async () => {
+  // The default is the SAFE-ANYWHERE floor, not a fast one: unconfigured, this must work on a
+  // free tier whose hard cap is 10 blocks. Every real environment sets the probed value.
+  it('defaults the chunk size to 10 blocks', async () => {
+    const chain = fakeClient();
+
+    await scanDepositForBurnLogs(chain.client, {
+      depositors: [WALLET_A],
+      fromBlock: 1n,
+      toBlock: 25n,
+    });
+
+    expect(config.polygonGetLogsChunkBlocks).toBe(10);
+    expect(chain.ranges()).toEqual([
+      [1n, 10n],
+      [11n, 20n],
+      [21n, 25n],
+    ]);
+  });
+
+  it('uses a PROBED wide cap when the env supplies one', async () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000' });
     const chain = fakeClient();
 
     await scanDepositForBurnLogs(chain.client, {
@@ -125,7 +145,6 @@ describe('scanDepositForBurnLogs', () => {
       toBlock: 25_000n,
     });
 
-    expect(config.polygonGetLogsChunkBlocks).toBe(10_000);
     expect(chain.ranges()).toEqual([
       [1n, 10_000n],
       [10_001n, 20_000n],

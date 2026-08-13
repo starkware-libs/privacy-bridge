@@ -392,9 +392,21 @@ export type Config = {
   // Largest INCLUSIVE block span one `eth_getLogs` request may cover on the EVM
   // side. Providers cap this, and the cap belongs to the RPC PLAN rather than the
   // chain — a free tier can be as low as 10 blocks, rejecting anything wider with
-  // -32600. Default 10_000 keeps today's burn-scan sizing; set it to the provider's
-  // real cap, or every scan fails and absence can never be established.
+  // -32600. Default 10 is the SAFE-ANYWHERE floor: it works unconfigured on a free
+  // tier, where a wider default would reject every scan and absence could never be
+  // established. Raise it to the provider's PROBED cap in every real environment.
   polygonGetLogsChunkBlocks: number;
+  // How far back the anchorless return-burn walk may look for a stranded burn.
+  // REQUESTS PER WALK = reach ÷ chunk, so the two are set TOGETHER per environment (a
+  // big reach over a tiny chunk multiplies requests — 2_000_000 over 10 is 200k).
+  //
+  // UNSET, this DERIVES as chunk × 10: always ≤10 requests per walk whatever the cap,
+  // which keeps an unconfigured build cheap. It is also only that deep — at the default
+  // chunk of 10 the horizon is ~100 blocks, about 3 minutes of Polygon. Fine for a dev
+  // box; useless for recovering a real stranding, which is why every real environment
+  // MUST set the pair explicitly (test 10 / 100; production the probed chunk against a
+  // reach up to ~2_000_000). An explicit value wins and is independent of the chunk.
+  polygonWalkReachBlocks: number;
   // How far back a return-recovery sweep may look for a deposit wallet's funding
   // block (≈60 days of ~2 s Polygon blocks). A wallet deployed before it cannot be
   // scanned over its complete history, so the slot is WITHHELD rather than reported
@@ -657,6 +669,14 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
   // matches `/rpc/mainnet` under the same rewrite — verify with its vite.config.
   const suffix = e.dev ? `/${n}` : '';
 
+  // The two EVM getLogs knobs. Read here rather than inline because the walk's reach
+  // DEFAULT is derived from the chunk size — see their Config docs for the pairing rule.
+  const getLogsChunkBlocks = envBlockCount(
+    e.vars.POLYGON_GET_LOGS_CHUNK_BLOCKS,
+    10,
+    'POLYGON_GET_LOGS_CHUNK_BLOCKS',
+  );
+
   return {
     network: n,
     // Starknet chain-id FELT (= constants.StarknetChainId: SN_MAIN '0x534e5f4d41494e',
@@ -804,12 +824,15 @@ export function configFor(n: Network, e: BridgeEnv = requireEnv()): Config {
       usdc: e.vars.POLYGON_USDC_ADDRESS || defaultDest.usdcAddress,
       domain: envInt(e.vars.CCTP_POLYGON_DOMAIN, defaultDest.domain, 'CCTP_POLYGON_DOMAIN'),
     },
-    // Provider getLogs range cap (see the Config doc). Default = today's burn-scan
-    // chunk size, so an unset env changes no existing behavior.
-    polygonGetLogsChunkBlocks: envBlockCount(
-      e.vars.POLYGON_GET_LOGS_CHUNK_BLOCKS,
-      10_000,
-      'POLYGON_GET_LOGS_CHUNK_BLOCKS',
+    // Provider getLogs range cap and the anchorless walk's look-back, in blocks (see
+    // their Config docs for the pairing rule). Unset, the reach is chunk × 10, so an
+    // unconfigured walk is always ≤10 requests whatever the cap — cheap, and only that
+    // shallow. An explicit env value wins and is fully independent of the chunk.
+    polygonGetLogsChunkBlocks: getLogsChunkBlocks,
+    polygonWalkReachBlocks: envBlockCount(
+      e.vars.POLYGON_WALK_REACH_BLOCKS,
+      getLogsChunkBlocks * 10,
+      'POLYGON_WALK_REACH_BLOCKS',
     ),
     // Recovery look-back cap (see the Config doc). Mirrored by RECOVERY_CAP_BLOCKS in
     // fundingAnchor.ts, which pins the two together in a test.

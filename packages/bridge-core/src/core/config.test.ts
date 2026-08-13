@@ -296,7 +296,9 @@ describe('public network defaults (baked in config.ts)', () => {
   // Block counts become bigints at their call sites, where `BigInt(1.5)` would throw far
   // from the env line that caused it — so they are rejected here instead.
   it.each([
-    ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10_000],
+    ['POLYGON_GET_LOGS_CHUNK_BLOCKS', 'polygonGetLogsChunkBlocks', 10],
+    // Derived from the chunk default (10 × 10) — the pairing tests below pin the rule.
+    ['POLYGON_WALK_REACH_BLOCKS', 'polygonWalkReachBlocks', 100],
     ['RECOVERY_CAP_BLOCKS', 'recoveryCapBlocks', 2_592_000],
   ] as const)(
     '%s: blank falls back to its default; fractions and zero fail loud',
@@ -310,6 +312,29 @@ describe('public network defaults (baked in config.ts)', () => {
       expect(() => initTestConfig({ [key]: 'lots' })).toThrow(/must be a numeric string/);
     },
   );
+
+  // The walk's reach DEFAULT tracks the chunk size so an unconfigured build always costs
+  // ≤10 requests per walk, whatever cap it is pointed at. It is only that deep, which is
+  // why a real deployment sets the pair — but a shallow default can never be expensive.
+  it('derives the default walk reach as chunk × 10', () => {
+    initTestConfig({ POLYGON_WALK_REACH_BLOCKS: '' });
+    expect(config.polygonGetLogsChunkBlocks).toBe(10);
+    expect(config.polygonWalkReachBlocks).toBe(100);
+
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000', POLYGON_WALK_REACH_BLOCKS: '' });
+    expect(config.polygonWalkReachBlocks).toBe(100_000);
+  });
+
+  it('an explicit walk reach wins and stays independent of the chunk size', () => {
+    initTestConfig({ POLYGON_GET_LOGS_CHUNK_BLOCKS: '10', POLYGON_WALK_REACH_BLOCKS: '2000000' });
+    expect(config.polygonWalkReachBlocks).toBe(2_000_000);
+
+    initTestConfig({
+      POLYGON_GET_LOGS_CHUNK_BLOCKS: '10000',
+      POLYGON_WALK_REACH_BLOCKS: '2000000',
+    });
+    expect(config.polygonWalkReachBlocks).toBe(2_000_000);
+  });
 
   it('poolAddress: SN mainnet + SN Sepolia defaults are both baked', () => {
     initTestConfig({ NETWORK: 'mainnet', PRIVACY_POOL_ADDRESS: '' });

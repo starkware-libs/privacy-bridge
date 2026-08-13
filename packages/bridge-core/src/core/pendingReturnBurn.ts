@@ -76,10 +76,10 @@ export const TOKEN_MESSENGER_EVENT_ABI = [
 export const PENDING_BURN_DEADLINE_GRACE_MS = 120_000;
 
 // The burn can only execute between the submit and the batch deadline, so the scan window
-// is that span — NOT "everything since the submit". This is what keeps a single getLogs
-// call bounded no matter how old the record is: a week-old record scans the same ~10-minute
-// window, just further back. An elapsed-time span would grow past every provider's
-// eth_getLogs range cap and fail as 'unknown' forever.
+// is that span — NOT "everything since the submit". That is what keeps the window a constant
+// ~10 minutes of blocks no matter how old the record is: a week-old record scans the same
+// span, just further back. The provider's range cap is handled separately, by chunking the
+// window; this bound is what keeps the CHUNK COUNT constant instead of growing with age.
 //
 // Sized against the FASTEST plausible EVM block time rather than a per-chain table: over-
 // estimating the block count only widens a window that is already bounded, whereas
@@ -90,24 +90,17 @@ const FASTEST_BLOCK_TIME_MS = 250;
 // Extra blocks on each side, absorbing clock skew and block-time variance.
 const SCAN_MARGIN_BLOCKS = 600n;
 
-// With no anchor there is no reliable way to MAP a timestamp to a block height — chain block
-// times span ~0.25s to ~15s, so "submitted a day ago" is anywhere from 6k to 350k blocks back
-// and any single estimated window is as likely to sit beside the burn as over it. So the
-// anchorless path WALKS BACK from the head in bounded chunks and stops on a fact rather than
-// an estimate: the first chunk whose lowest block PREDATES the submit. Each chunk costs one
-// getLogs plus one getBlock, and the chunk size stays inside provider range caps.
-const FALLBACK_CHUNK_BLOCKS = 10_000n;
-
-// Ceiling on that walk. Hitting it means we ran out of budget before reaching back past the
-// submit, so absence is NOT established and the result must be 'unknown' — the walk's whole
-// purpose is that a negative answer is earned, never assumed.
-const FALLBACK_MAX_CHUNKS = 12;
+// Floor on the walk's call budget, which the reach requirement raises when the cap is narrow.
+// Running out of budget before reaching back past the submit means absence is NOT established
+// and the result must be 'unknown' — the walk's whole purpose is that a negative answer is
+// earned, never assumed.
+export const FALLBACK_MAX_CHUNKS = 12;
 
 // Ceiling on the submit→deadline span the window is sized from. That span comes off a
-// PERSISTED record, and the whole point of the window is that it stays inside a provider's
-// eth_getLogs range cap — so a record carrying an implausible deadline (corrupted, or
-// written by a future version with a different batch lifetime) must not be able to widen it
-// into a call that always fails. Comfortably above any real relayer batch deadline.
+// PERSISTED record, and it is the only thing bounding how many chunks the anchored window
+// costs — so a record carrying an implausible deadline (corrupted, or written by a future
+// version with a different batch lifetime) must not be able to widen it into a scan that never
+// finishes. Comfortably above any real relayer batch deadline.
 const MAX_DEADLINE_SPAN_MS = 30 * 60_000;
 
 // SELF-CONTAINED like INFLIGHT_RETURN_KEY: device-store (T5) references only the KEY.
@@ -351,6 +344,16 @@ export async function resolvePendingReturnBurn(
   };
 
   try {
+    // The widest INCLUSIVE range this provider accepts — a property of the RPC plan (as low as
+    // 10 blocks), so it belongs to config, not to constants here. Every getLogs below obeys it.
+    // Its ratio against the walk's reach is the request cost of an anchorless resolution.
+    const chunkBlocks = BigInt(config.polygonGetLogsChunkBlocks);
+    const reachBlocks = BigInt(config.polygonWalkReachBlocks);
+    if (chunkBlocks <= 0n || reachBlocks <= 0n) {
+      throw new Error(
+        `getLogs chunk size and walk reach must be positive block counts (got ${chunkBlocks}, ${reachBlocks})`,
+      );
+    }
     const head = await client.getBlockNumber();
 
     // A no-match only becomes a verdict once BOTH hold: the search demonstrably covered where
@@ -359,11 +362,18 @@ export async function resolvePendingReturnBurn(
     // that releases the double-burn guard.
     const searched =
       record.fromBlock === undefined
-        ? await walkBackToSubmit(record, head, findIn, async (block) => {
-            const { timestamp } = await client.getBlock({ blockNumber: block });
-            return Number(timestamp) * 1000;
-          })
-        : await searchExactWindow(record, head, findIn);
+        ? await walkBackToSubmit(
+            record,
+            head,
+            findIn,
+            async (block) => {
+              const { timestamp } = await client.getBlock({ blockNumber: block });
+              return Number(timestamp) * 1000;
+            },
+            chunkBlocks,
+            reachBlocks,
+          )
+        : await searchExactWindow(record, head, findIn, chunkBlocks);
 
     if (searched.burnTx) return { kind: 'landed', burnTx: searched.burnTx };
     if (!searched.coveredSubmit) {
@@ -386,14 +396,36 @@ interface BurnSearch {
   coveredSubmit: boolean;
 }
 
+// Walk [from, to] INCLUSIVE in ranges no wider than `chunkBlocks`, oldest chunk first, and
+// stop at the first match — which is the same burn a single wide getLogs would have matched,
+// since both take the lowest-block hit. A chunk that throws PROPAGATES: the caller's verdict
+// depends on the whole range having answered, so a swallowed chunk would turn an unproven
+// absence into 'never-landed'. No call-count ceiling here, deliberately — the anchored window
+// only licenses a negative once it is fully covered, so capping the calls would put this path
+// back where it started, permanently 'unknown'.
+async function findInChunks(
+  findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+  from: bigint,
+  to: bigint,
+  chunkBlocks: bigint,
+): Promise<`0x${string}` | null> {
+  for (let lo = from; lo <= to; lo += chunkBlocks) {
+    const chunkEnd = lo + chunkBlocks - 1n;
+    const burnTx = await findIn(lo, chunkEnd > to ? to : chunkEnd);
+    if (burnTx) return burnTx;
+  }
+  return null;
+}
+
 // ANCHORED search: the record captured the chain head just before submitting, so the burn —
 // which can only execute between the submit and the deadline — must lie in
-// [anchor, anchor + deadline-span]. One getLogs, a constant ~10 minutes of blocks however old
-// the record is, which is what keeps it inside every provider's range cap.
+// [anchor, anchor + deadline-span]: a constant ~10 minutes of blocks however old the record
+// is, walked in config-sized chunks so the window stays inside the provider's range cap.
 async function searchExactWindow(
   record: PendingReturnBurn,
   head: bigint,
   findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
+  chunkBlocks: bigint,
 ): Promise<BurnSearch> {
   const anchor = BigInt(record.fromBlock as string);
   if (anchor > head) {
@@ -413,25 +445,43 @@ async function searchExactWindow(
   const lower = anchor > SCAN_MARGIN_BLOCKS ? anchor - SCAN_MARGIN_BLOCKS : 0n;
   const upper = anchor + deadlineSpanBlocks + SCAN_MARGIN_BLOCKS;
   return {
-    burnTx: await findIn(lower, upper > head ? head : upper),
+    burnTx: await findInChunks(findIn, lower, upper > head ? head : upper, chunkBlocks),
     coveredSubmit: true,
   };
+}
+
+// Hard ceiling on the calls one walk may spend: reach ÷ chunk, which IS the request cost of a
+// walk and the reason the two knobs are set as a pair. The reach floor below normally ends the
+// walk first, so this is a guard rather than the operative bound.
+function walkChunkBudget(chunkBlocks: bigint, reachBlocks: bigint): number {
+  const needed = (reachBlocks + chunkBlocks - 1n) / chunkBlocks;
+  return needed > BigInt(FALLBACK_MAX_CHUNKS) ? Number(needed) : FALLBACK_MAX_CHUNKS;
 }
 
 // ANCHORLESS search: no height to key off, and timestamps cannot be mapped to heights without
 // knowing the chain's block time (0.25s–15s across chains — a day is 6k or 350k blocks). So
 // walk back from the head in bounded chunks and stop on a FACT: the first chunk whose lowest
 // block predates the submit. At that point the walk has covered every block the burn could be
-// in, so a no-match is real; running out of chunks first leaves it unestablished.
+// in, so a no-match is real; running out of budget first leaves it unestablished. Each chunk
+// costs one getLogs plus one getBlock, and is sized from the same provider cap as every other
+// range here — an over-wide chunk would be REJECTED, which is 'unknown' forever.
 async function walkBackToSubmit(
   record: PendingReturnBurn,
   head: bigint,
   findIn: (from: bigint, to: bigint) => Promise<`0x${string}` | null>,
   blockTimestampMs: (block: bigint) => Promise<number>,
+  chunkBlocks: bigint,
+  reachBlocks: bigint,
 ): Promise<BurnSearch> {
+  const maxChunks = walkChunkBudget(chunkBlocks, reachBlocks);
+  // The oldest block the configured reach allows. Reach is a DISTANCE, so it bounds the walk
+  // itself rather than only its call count — the last chunk is clamped to it instead of
+  // overshooting, and stopping here means absence was never established.
+  const reachFloor = head >= reachBlocks ? head - reachBlocks + 1n : 0n;
   let hi = head;
-  for (let chunk = 0; chunk < FALLBACK_MAX_CHUNKS; chunk++) {
-    const lo = hi > FALLBACK_CHUNK_BLOCKS ? hi - FALLBACK_CHUNK_BLOCKS : 0n;
+  for (let chunk = 0; chunk < maxChunks; chunk++) {
+    const stride = hi >= chunkBlocks ? hi - chunkBlocks + 1n : 0n;
+    const lo = stride > reachFloor ? stride : reachFloor;
     const burnTx = await findIn(lo, hi);
     if (burnTx) return { burnTx, coveredSubmit: true };
     // Genesis: there is nothing older left to search, so absence is as established as it gets.
@@ -439,6 +489,7 @@ async function walkBackToSubmit(
     if ((await blockTimestampMs(lo)) <= record.submittedAtMs) {
       return { burnTx: null, coveredSubmit: true };
     }
+    if (lo === reachFloor) return { burnTx: null, coveredSubmit: false };
     hi = lo - 1n;
   }
   return { burnTx: null, coveredSubmit: false };
