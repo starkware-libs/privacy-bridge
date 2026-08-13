@@ -23,8 +23,14 @@
 //   - The scan runs BEFORE the balance is consulted. Full-balance burns make "balance above
 //     dust" look like "never burned" the moment fresh proceeds land on a wallet whose burn
 //     already succeeded. The scan's window stops at the relayer's contract-enforced batch
-//     deadline rather than at the head, so it is COMPLETE for this intent however old the entry
-//     is; the balance is then read at the head, since a reburn spends what is on the wallet now.
+//     deadline rather than at the head; the balance is then read at the head, since a reburn
+//     spends what is on the wallet now.
+//     The window covers the DEADLINE term of (intentBlock → submit) + deadline, not the first:
+//     the enforced deadline runs from the SUBMIT, so a burn submitted long after its intent was
+//     written can mine past intentBlock + the window. What keeps that gap short is W3 writing
+//     the `burned {txHash}` upgrade right after submit, which moves the entry off this path
+//     entirely. The residual is one case: submitted, the upgrade PUT failed, AND more than the
+//     window elapsed between the intent write and the submit.
 //   - A burn that has not been MINED yet is also indistinguishable from a burn never
 //     submitted, and no chain read can separate them — only the age of the intent can. Inside
 //     the relayer's own deadline window, absence stays `unknown`.
@@ -346,9 +352,10 @@ async function classifyIntent(p: {
   if (head < entry.intentBlock) return unknown('head-behind-intent-block');
 
   // The scan stops at the deadline window, not at the head: the relayer's batch deadline is
-  // contract-enforced, so a burn for THIS intent cannot execute past it — the same property
-  // that licenses concluding "never landed" instead of "not yet". Bounds the call to a fixed
-  // span however stale the entry is, which also keeps it inside one getLogs chunk.
+  // contract-enforced, so a burn submitted for THIS intent cannot execute past it — the same
+  // property that licenses concluding "never landed" instead of "not yet". Bounds the request to
+  // a FIXED span rather than one that grows with the entry's age (see the module header for the
+  // intent→submit gap this does not cover).
   const deadlineEnd = entry.intentBlock + DEADLINE_WINDOW_BLOCKS;
   const scanTo = head < deadlineEnd ? head : deadlineEnd;
 

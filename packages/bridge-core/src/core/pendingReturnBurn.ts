@@ -210,9 +210,7 @@ export function isValidPendingReturnBurn(value: unknown): value is PendingReturn
     Number.isFinite(r.submittedAtMs) &&
     // OPTIONAL: absent when the pre-submit head read failed. "0" is a real anchor.
     (r.fromBlock === undefined ||
-      (typeof r.fromBlock === 'string' &&
-        r.fromBlock.length <= 80 &&
-        /^[0-9]+$/.test(r.fromBlock))) &&
+      (typeof r.fromBlock === 'string' && r.fromBlock.length <= 80 && /^[0-9]+$/.test(r.fromBlock))) &&
     typeof r.deadlineMs === 'number' &&
     Number.isFinite(r.deadlineMs)
   );
@@ -231,9 +229,7 @@ export function writePendingReturnBurn(evmAddress: string, record: PendingReturn
     return false;
   }
   const persisted = readPendingReturnBurn(evmAddress);
-  return (
-    persisted?.commitment === record.commitment && persisted.submittedAtMs === record.submittedAtMs
-  );
+  return persisted?.commitment === record.commitment && persisted.submittedAtMs === record.submittedAtMs;
 }
 
 // Read the pending record for an EVM address, dropping a corrupt one.
@@ -337,10 +333,7 @@ export async function resolvePendingReturnBurn(
   const source = getEvmCctpSource(record.evmChainId);
   if (!source) {
     // Misconfiguration, not evidence about the burn — never report 'never-landed' from it.
-    return {
-      kind: 'unknown',
-      error: new Error(`no EVM CCTP source for chain ${record.evmChainId}`),
-    };
+    return { kind: 'unknown', error: new Error(`no EVM CCTP source for chain ${record.evmChainId}`) };
   }
   // The burn executes on the chain the record names, so the scan MUST run against that
   // chain's RPC — resolving the TokenMessenger for one chain and querying another returns
@@ -527,3 +520,4 @@ async function walkBackToSubmit(
 export function evmClientForSource(source: EvmCctpSource): PublicClient {
   return createPublicClient({ transport: http(source.rpcUrl) }) as PublicClient;
 }
+

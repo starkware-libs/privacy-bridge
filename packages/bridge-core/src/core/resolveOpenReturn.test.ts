@@ -174,6 +174,18 @@ describe('resolveOpenReturn — the intent scan window is deadline-capped', () =
     );
   });
 
+  // The relation above is scale-INVARIANT: it still holds if both sides shrink together, so it
+  // cannot defend the window's magnitude. These two literals can. Without them, narrowing the
+  // window to the rejected deadline+grace candidate (2880 blocks), or relaxing the block-time
+  // floor from 250ms to a Polygon-realistic 2000ms, both stay green.
+  it('holds the window at the 8400-block magnitude the design settled on', () => {
+    expect(DEADLINE_WINDOW_BLOCKS).toBeGreaterThanOrEqual(8400n);
+  });
+
+  it('still counts a 30-minute span at a sub-second block time', () => {
+    expect(blocksForSpanMs(30 * 60_000)).toBeGreaterThanOrEqual(7200n);
+  });
+
   it('caps toBlock at the deadline window while pinning the balance to the live head', async () => {
     const farHead = CAP_END + 500_000n;
     const { client } = fakeClient({ head: farHead });
