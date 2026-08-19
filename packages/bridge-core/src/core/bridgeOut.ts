@@ -25,7 +25,7 @@ import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
-} from '../derivation/index';
+} from '../derivation/index.js';
 // Injectable: given a signature + accountIndex + channel, returns the Polymarket CREATE2
 // deposit wallet address. Trading code provides:
 //   (sig, idx, channel) => deriveDepositWallet(getEoaWalletClient(sig, idx, channel))
@@ -40,25 +40,25 @@ export type ResolveDepositWalletFn = (
   accountIndex: number,
   channel?: string,
 ) => Promise<string>;
-import { makePoolTransfers } from './poolClient';
-import { config, resolveEvmCctpDestination } from './config';
-import { u256Calldata } from './deposit';
-import { getRpcProvider, makeAccount } from './provider';
-import { sanitizeErrorMessage } from './tx';
-import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
-import { discoverPrivateBalance } from './discover';
-import { assertStorageWritable } from './storageProbe';
-import { proveAndSubmitPoolAction } from './provenPoolAction';
-import { deriveAccountNonce } from '../derivation/index';
-import { isTerminalAttestFailure, waitForBridgedMint } from './polygonMint';
+import { makePoolTransfers } from './poolClient.js';
+import { config, resolveEvmCctpDestination } from './config.js';
+import { u256Calldata } from './deposit.js';
+import { getRpcProvider, makeAccount } from './provider.js';
+import { sanitizeErrorMessage } from './tx.js';
+import { fetchPoolFeeAmount, approvePoolFee } from './poolFee.js';
+import { discoverPrivateBalance } from './discover.js';
+import { assertStorageWritable } from './storageProbe.js';
+import { proveAndSubmitPoolAction } from './provenPoolAction.js';
+import { deriveAccountNonce } from '../derivation/index.js';
+import { isTerminalAttestFailure, waitForBridgedMint } from './polygonMint.js';
 import {
   assertAboveForwardFloor,
   fetchForwardMaxFee,
   resolveFinalityThreshold,
   FAST_FINALITY_THRESHOLD,
   STANDARD_FINALITY_THRESHOLD,
-} from './cctpFees';
-import { consumeAccountIndex } from './account-store';
+} from './cctpFees.js';
+import { consumeAccountIndex } from './account-store.js';
 
 // CCTP min_finality_threshold: 2000 = Standard (free, finalized); 1000 = Fast
 // (paid). Decision 4. The default follows config.cctp.fast

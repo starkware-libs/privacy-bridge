@@ -8,8 +8,8 @@ import {
   IndexerDiscoveryProvider,
   type Note,
 } from '@starkware-libs/starknet-privacy-sdk';
-import { config } from './config';
-import { isUnexpectedEndOfJsonError } from '../lib/safe-json';
+import { config } from './config.js';
+import { isUnexpectedEndOfJsonError } from '../lib/safe-json.js';
 
 // The indexer's `/v1/sync/incoming_state` JSON parse lives inside the SDK's
 // IndexerDiscoveryProvider (third-party — we can't guard its raw `resp.json()`

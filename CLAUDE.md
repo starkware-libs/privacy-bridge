@@ -129,6 +129,10 @@ environment. `bridge-core` excludes test files from the `tsc` build via `tsconfi
 ## Conventions
 
 - ESM only (`"type": "module"`), TypeScript, React 19 (automatic JSX runtime).
+- **Relative imports in compiled `bridge-core` sources carry an explicit `.js` extension**
+  (`./core/config.js`). Plain `tsc` emits specifiers verbatim and native Node ESM rejects
+  extensionless ones; `src/distEsmEntryPoints.test.ts` imports every `exports` entry point in a real
+  `node --input-type=module` child so the published `dist` stays loadable outside a bundler.
 - `./react` hooks follow a `running`-flag state-machine pattern.
 - Comment style: see `.claude/skills/concise-comments/SKILL.md` — describe the present, don't narrate
   history.

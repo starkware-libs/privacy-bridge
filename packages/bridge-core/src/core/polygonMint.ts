@@ -16,8 +16,8 @@
 //
 // In-memory only — never log/persist the per-account EOA private key.
 
-import { config, getDefaultEvmCctpDestination } from './config';
-import { safeJsonParse } from '../lib/safe-json';
+import { config, getDefaultEvmCctpDestination } from './config.js';
+import { safeJsonParse } from '../lib/safe-json.js';
 
 export interface AttestationResult {
   // CCTP message bytes (hex) to replay on the destination chain.

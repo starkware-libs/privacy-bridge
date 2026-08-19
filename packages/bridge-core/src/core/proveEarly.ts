@@ -10,14 +10,14 @@
 // makes structurally impossible to repeat.
 
 import type { RpcProvider } from 'starknet';
-import { discoverNoteIdsAtBlock } from './discover';
-import { sanitizeErrorMessage } from './tx';
+import { discoverNoteIdsAtBlock } from './discover.js';
+import { sanitizeErrorMessage } from './tx.js';
 import {
   getCurrentBlock,
   waitForProvingBlock,
   IMMEDIATE_PROVING_BLOCK_DEPTH,
   PROVING_BLOCK_DEPTH,
-} from './proving';
+} from './proving.js';
 
 export interface QuiescenceGateArgs {
   provider: RpcProvider;

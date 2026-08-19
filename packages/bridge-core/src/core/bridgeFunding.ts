@@ -9,12 +9,12 @@
 // micro-units to hold in the wallet); this package stays app-agnostic — the caller
 // (e.g. apps/web, for the Polymarket taker fee) decides what it represents and labels it.
 
-import { config } from './config';
+import { config } from './config.js';
 import {
   fetchForwardMaxFee,
   formatPusdHint,
   type ForwardFeeQuote,
-} from './cctpFees';
+} from './cctpFees.js';
 /** Max slippage floor (bps) on exactInputSingle amountOutMinimum (Uniswap v3 USDC→USDC.e swap). */
 const SWAP_SLIPPAGE_BPS = 50n;
 

@@ -3,13 +3,13 @@
 
 import { PaymasterRpc, RpcError } from 'starknet';
 import type { PaymasterDetails } from 'starknet';
-import { getRpcProvider, makeAccount } from './provider';
-import { config } from './config';
-import { getDepositTokenBalance } from './deposit';
-import { invalidateManagerNonce } from './proven-submit';
-import { READ_BLOCK, submitAndTrack } from './tx';
-import { getStrkBalance } from './balance';
-import { formatTokenAmount } from './discover';
+import { getRpcProvider, makeAccount } from './provider.js';
+import { config } from './config.js';
+import { getDepositTokenBalance } from './deposit.js';
+import { invalidateManagerNonce } from './proven-submit.js';
+import { READ_BLOCK, submitAndTrack } from './tx.js';
+import { getStrkBalance } from './balance.js';
+import { formatTokenAmount } from './discover.js';
 
 // Funding here covers ONLY the account DEPLOY — the single tx in this lifecycle
 // that pays a real fee. The deploy is a server-side tx (not proven), so it carries

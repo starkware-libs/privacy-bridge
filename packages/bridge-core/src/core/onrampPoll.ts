@@ -14,8 +14,8 @@
 // pre-existing funds — only genuinely NEW funds landing (balance >= baseline +
 // target) satisfies the wait.
 
-import { getDepositTokenBalance } from './deposit';
-import { isTransientError } from './errors';
+import { getDepositTokenBalance } from './deposit.js';
+import { isTransientError } from './errors.js';
 
 // Generous deadline for the settlement poll. Card/bank settlement runs through the
 // on-ramp provider and can take MINUTES (KYC, payment rails), far longer than an L2

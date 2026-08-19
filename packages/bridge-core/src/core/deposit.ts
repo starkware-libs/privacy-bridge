@@ -3,10 +3,10 @@
 
 import type { Account, Call } from 'starknet';
 import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
-import { makePoolTransfers } from './poolClient';
-import { config } from './config';
-import { formatUsdcCents } from './discover';
-import { getRpcProvider, makeAccount } from './provider';
+import { makePoolTransfers } from './poolClient.js';
+import { config } from './config.js';
+import { formatUsdcCents } from './discover.js';
+import { getRpcProvider, makeAccount } from './provider.js';
 import {
   READ_BLOCK,
   isRevertedOrRejected,
@@ -14,8 +14,8 @@ import {
   sanitizeErrorMessage,
   submitAndTrack,
   waitForBlockNumber,
-} from './tx';
-import { humanizeFinality } from './errorMessages';
+} from './tx.js';
+import { humanizeFinality } from './errorMessages.js';
 import {
   submitProvenCall,
   paymasterBuildLeg,
@@ -23,17 +23,17 @@ import {
   invalidateManagerNonce,
   type PaymasterBuildCtx,
   type PaymasterFeeAction,
-} from './proven-submit';
+} from './proven-submit.js';
 import {
   waitForProvingBlock,
   isProofExpiredError,
   isNodeLagError,
   PROVING_BLOCK_DEPTH,
   IMMEDIATE_PROVING_BLOCK_DEPTH,
-} from './proving';
-import { submitReusingProofOnNodeLag } from './nodeLagRetry';
-import { isAlreadyRegisteredError } from './register';
-import { buildReceiveMessageCall } from './snMint';
+} from './proving.js';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry.js';
+import { isAlreadyRegisteredError } from './register.js';
+import { buildReceiveMessageCall } from './snMint.js';
 
 // Deposits the configured `depositToken` into the starknet-privacy pool from a
 // derived (in-browser) account. Mirrors the demo's deposit path

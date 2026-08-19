@@ -4,7 +4,7 @@
 // Read-only Polygon client + ERC-20 balance helpers (Polymarket-free).
 import { createPublicClient, http, type PublicClient } from 'viem';
 import { polygon, polygonAmoy } from 'viem/chains';
-import { config } from './config';
+import { config } from './config.js';
 
 // Polygon USDC is 6-decimal native Circle USDC (config.ts:223 "Polygon Amoy USDC (6 dp)").
 export const POLYGON_USDC_DECIMALS = 6;

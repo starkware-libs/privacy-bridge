@@ -11,8 +11,8 @@ import {
   fetchBridgeFundingPlan,
   microToHuman,
   type BridgeFundingPlan,
-} from '../core/bridgeFunding';
-import { config, getEvmCctpSource, getEvmCctpDestination } from '../core/config';
+} from '../core/bridgeFunding.js';
+import { config, getEvmCctpSource, getEvmCctpDestination } from '../core/config.js';
 
 export type BridgeFundingEstimate =
   | { status: 'idle' }

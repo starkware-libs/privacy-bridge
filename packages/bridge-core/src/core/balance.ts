@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import { getRpcProvider } from './provider';
-import { config } from './config';
-import { READ_BLOCK } from './tx';
+import { getRpcProvider } from './provider.js';
+import { config } from './config.js';
+import { READ_BLOCK } from './tx.js';
 
 // Reads the STRK balance (in wei, 18 decimals) of `address`.
 //

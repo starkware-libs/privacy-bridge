@@ -26,7 +26,7 @@
 // Starknet(25)->Polygon(7); the actual forwarded mint is only observable on a
 // live run (.claude/rules/verification.md).
 
-import { config, getDefaultEvmCctpDestination } from './config';
+import { config, getDefaultEvmCctpDestination } from './config.js';
 
 // CCTP finality thresholds: 1000 = Fast (soft finality, ~seconds, + bps fee),
 // 2000 = Standard (hard finality, minutes, 0 bps). Forwarding works with both.

@@ -10,7 +10,7 @@
 // helpers (signMessage with its signer-binding guard, switchChain) live in
 // signMessage.ts; we reuse its EthereumProvider interface rather than redefining it.
 
-import type { EthereumProvider } from './signMessage';
+import type { EthereumProvider } from './signMessage.js';
 
 // EIP-6963 provider metadata an extension announces about itself.
 export interface EIP6963ProviderInfo {

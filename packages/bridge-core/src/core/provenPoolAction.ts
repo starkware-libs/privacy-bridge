@@ -17,23 +17,23 @@ import type {
   PrivateTransfersInterface,
   TokenOperationsBuilder,
 } from '@starkware-libs/starknet-privacy-sdk';
-import { config } from './config';
-import { isRevertedOrRejected, sanitizeErrorMessage, submitAndTrack } from './tx';
-import { humanizeFinality } from './errorMessages';
+import { config } from './config.js';
+import { isRevertedOrRejected, sanitizeErrorMessage, submitAndTrack } from './tx.js';
+import { humanizeFinality } from './errorMessages.js';
 import {
   submitProvenCall,
   paymasterBuildLeg,
   paymasterExecuteLeg,
   type PaymasterBuildCtx,
-} from './proven-submit';
+} from './proven-submit.js';
 import {
   waitForProvingBlock,
   getCurrentBlock,
   isNodeLagError,
   PROVING_BLOCK_DEPTH,
-} from './proving';
-import { submitReusingProofOnNodeLag } from './nodeLagRetry';
-import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
+} from './proving.js';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry.js';
+import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly.js';
 
 export interface ProvenPoolActionArgs {
   transfers: PrivateTransfersInterface;

@@ -8,10 +8,10 @@
 
 import type { Call } from 'starknet';
 import { formatUnits } from 'viem';
-import { config } from './config';
-import { getRpcProvider } from './provider';
-import { managerExecute } from './proven-submit';
-import { submitAndTrack } from './tx';
+import { config } from './config.js';
+import { getRpcProvider } from './provider.js';
+import { managerExecute } from './proven-submit.js';
+import { submitAndTrack } from './tx.js';
 
 // STRK is an 18-decimal token, so `get_fee_amount` (wei) → human units divides by 1e18.
 const STRK_DECIMALS = 18;

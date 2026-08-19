@@ -14,12 +14,12 @@ import {
   requestAccounts,
   selectProvider,
   type EIP6963ProviderInfo,
-} from './injectedProvider';
-import { clearDeviceIdentity, readWalletPick, writeWalletPick } from './device-store';
-import { WalletContext } from './context';
-import type { WalletContextValue } from './types';
-import { resetWalletConnectProvider, registerWalletConnect } from './getWalletConnectProvider';
-import { signMessage as ethSignMessage, type EthereumProvider } from './signMessage';
+} from './injectedProvider.js';
+import { clearDeviceIdentity, readWalletPick, writeWalletPick } from './device-store.js';
+import { WalletContext } from './context.js';
+import type { WalletContextValue } from './types.js';
+import { resetWalletConnectProvider, registerWalletConnect } from './getWalletConnectProvider.js';
+import { signMessage as ethSignMessage, type EthereumProvider } from './signMessage.js';
 
 // Parse an `eth_chainId` result (hex string like "0x89") to a decimal id.
 function parseChainId(raw: unknown): number | null {

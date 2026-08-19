@@ -26,8 +26,8 @@
 // must keep treating a suspiciously short result as suspect.
 import type { PublicClient } from 'viem';
 
-import { config, getEvmCctpSource } from './config';
-import { TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn';
+import { config, getEvmCctpSource } from './config.js';
+import { TOKEN_MESSENGER_EVENT_ABI } from './pendingReturnBurn.js';
 
 // The provider refused the requested block range. Distinct from every other failure because
 // the caller's response differs: absence is unproven for this slot and the window must be

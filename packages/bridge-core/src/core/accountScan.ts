@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import { derivePolygonEoa } from '../derivation/index';
-import { getPolygonPublicClient, readUsdcBalance, POLYGON_USDC_DECIMALS } from './polygonClient';
+import { derivePolygonEoa } from '../derivation/index.js';
+import { getPolygonPublicClient, readUsdcBalance, POLYGON_USDC_DECIMALS } from './polygonClient.js';
 import {
   upsertDerivedAccount,
   readDerivedAccounts,
   seedAccountIndex,
   type DerivedAccountRecord,
-} from './account-store';
-import { formatTokenAmount } from './discover';
+} from './account-store.js';
+import { formatTokenAmount } from './discover.js';
 
 // A per-account index that showed on-chain activity (its deposit wallet — the
 // CCTP mint recipient + order maker — holds USDC; `eoaAddress` is the owning

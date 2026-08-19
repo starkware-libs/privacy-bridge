@@ -30,7 +30,7 @@
 
 import type { Call } from 'starknet';
 import { hash } from 'starknet';
-import { parseJsonResponse } from '../lib/safe-json';
+import { parseJsonResponse } from '../lib/safe-json.js';
 
 const METHOD_BUILD = 'paymaster_buildTransaction';
 const METHOD_EXECUTE = 'paymaster_executeTransaction';

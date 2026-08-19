@@ -43,30 +43,30 @@ import { getCallsStatus, getCapabilities, sendCalls } from 'viem/actions';
 
 import type { Account, BlockIdentifier } from 'starknet';
 
-import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config';
-import { getDepositTokenBalance } from './deposit';
-import { nothingToResumeError } from './errors';
-import { getRpcProvider } from './provider';
-import { READ_BLOCK } from './tx';
+import { config, evmExplorerTxUrl, getEvmCctpSource, type EvmCctpSource } from './config.js';
+import { getDepositTokenBalance } from './deposit.js';
+import { nothingToResumeError } from './errors.js';
+import { getRpcProvider } from './provider.js';
+import { READ_BLOCK } from './tx.js';
 import {
   isTerminalAttestFailure,
   waitForAttestation,
   extractCctpNonce,
   assertCctpMessageMatches,
   decodeCctpMintedAmount,
-} from './polygonMint';
-import { submitStarknetMint, snAddressToBytes32 } from './snMint';
+} from './polygonMint.js';
+import { submitStarknetMint, snAddressToBytes32 } from './snMint.js';
 import {
   FAST_FINALITY_THRESHOLD,
   STANDARD_FINALITY_THRESHOLD,
   assertAboveForwardFloor,
   fetchForwardMaxFee,
-} from './cctpFees';
-import { switchChain, type EthereumProvider } from '../lib/ethereum';
-import { hasAnyInflightReturn } from './returnIn';
-import { hasAnyPendingReturnBurn } from './pendingReturnBurn';
-import { hasAnyInflightBurn } from './account-store';
-import { assertStorageWritable } from './storageProbe';
+} from './cctpFees.js';
+import { switchChain, type EthereumProvider } from '../lib/ethereum.js';
+import { hasAnyInflightReturn } from './returnIn.js';
+import { hasAnyPendingReturnBurn } from './pendingReturnBurn.js';
+import { hasAnyInflightBurn } from './account-store.js';
+import { assertStorageWritable } from './storageProbe.js';
 
 // CCTP Standard finality (free, finalized) — the default. 1000 = Fast (a small fee).
 const STANDARD_FINALITY = STANDARD_FINALITY_THRESHOLD;
@@ -895,7 +895,7 @@ export async function fundFromMetaMask(args: FundFromMetaMaskArgs): Promise<bigi
   const fast = args.fast ?? config.cctp.fast;
   let minFinalityThreshold = args.minFinalityThreshold;
   let maxFee = args.maxFee;
-  let feeQuote: import('./cctpFees').ForwardFeeQuote | undefined;
+  let feeQuote: import('./cctpFees.js').ForwardFeeQuote | undefined;
   if (maxFee === undefined && fast) {
     // Deposit-in ALWAYS burns EVM → Starknet and mints on Starknet, which is NOT a
     // Forwarding-Service destination (Circle 400s on ?forward=true into domain 25).

@@ -28,8 +28,8 @@
 // is E2E_TEST_ADDRESS (derived from E2E_TEST_PRIVATE_KEY below).
 
 import { privateKeyToAccount } from 'viem/accounts';
-import { config } from '../../core/config';
-import type { WcProvider } from './getWalletConnectProvider';
+import { config } from '../../core/config.js';
+import type { WcProvider } from './getWalletConnectProvider.js';
 
 // Throwaway, well-known Hardhat/Anvil account #0 key. PUBLIC by design — it is a
 // test fixture, never a real seed, and only ever signs throwaway E2E sessions.

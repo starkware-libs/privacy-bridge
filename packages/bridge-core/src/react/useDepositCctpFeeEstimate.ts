@@ -9,8 +9,8 @@
 // the UI — mirrors useBridgeFundingEstimate's cancel-on-dep-change guard.
 
 import { useEffect, useState } from 'react';
-import { fetchForwardMaxFee } from '../core/cctpFees';
-import { config, getEvmCctpSource } from '../core/config';
+import { fetchForwardMaxFee } from '../core/cctpFees.js';
+import { config, getEvmCctpSource } from '../core/config.js';
 
 export type DepositCctpFeeEstimate =
   | { status: 'idle'; maxFeeRaw: 0n }

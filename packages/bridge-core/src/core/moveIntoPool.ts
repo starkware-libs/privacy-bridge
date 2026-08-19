@@ -14,35 +14,35 @@
 // localStorage access here — the app owns its Step UI + persisted status mirror.
 
 import type { Account } from 'starknet';
-import type { EthereumProvider } from '../lib/ethereum';
+import type { EthereumProvider } from '../lib/ethereum.js';
 import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
-} from '../derivation/index';
-import { config } from './config';
-import { getRpcProvider, makeAccount } from './provider';
-import { getCurrentBlock } from './proving';
-import { ensureAccountDeployed, isDeployedOnL2 } from './deploy';
-import { isRegistered, registerWithPool } from './register';
+} from '../derivation/index.js';
+import { config } from './config.js';
+import { getRpcProvider, makeAccount } from './provider.js';
+import { getCurrentBlock } from './proving.js';
+import { ensureAccountDeployed, isDeployedOnL2 } from './deploy.js';
+import { isRegistered, registerWithPool } from './register.js';
 import {
   buildDepositProofAhead,
   depositToPool,
   ensureDepositTokenFunded,
   readDepositTokenBalance,
   type PrebuiltDepositProof,
-} from './deposit';
-import { fundFromMetaMask, isCctpMessageNonceUsed } from './depositIn';
-import type { EvmSender } from './depositIn';
+} from './deposit.js';
+import { fundFromMetaMask, isCctpMessageNonceUsed } from './depositIn.js';
+import type { EvmSender } from './depositIn.js';
 import {
   clearPendingPoolDeposit,
   readPendingPoolDeposit,
   recordPendingPoolDeposit,
-} from './poolDepositCursor';
-import { RESIDUAL_DUST_THRESHOLD_WEI } from './residual';
-import { isTransientError, markNonRetryable } from './errors';
-import { humanizeFinality } from './errorMessages';
-import { sanitizeErrorMessage } from './tx';
+} from './poolDepositCursor.js';
+import { RESIDUAL_DUST_THRESHOLD_WEI } from './residual.js';
+import { isTransientError, markNonRetryable } from './errors.js';
+import { humanizeFinality } from './errorMessages.js';
+import { sanitizeErrorMessage } from './tx.js';
 
 export type MoveStep = 'deploy' | 'register' | 'deposit';
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';

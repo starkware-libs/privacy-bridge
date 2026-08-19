@@ -50,11 +50,11 @@
 
 import { encodeFunctionData, parseEventLogs, type Abi, type Log, type PublicClient } from 'viem';
 
-import { config, getEvmCctpSource, resolveEvmCctpDestination } from './config';
-import { isTerminalAttestFailure, waitForAttestation } from './polygonMint';
-import { isCctpMessageNonceUsed } from './depositIn';
-import { snAddressToBytes32 } from './snMint';
-import type { CctpMessageMatch } from './polygonMint';
+import { config, getEvmCctpSource, resolveEvmCctpDestination } from './config.js';
+import { isTerminalAttestFailure, waitForAttestation } from './polygonMint.js';
+import { isCctpMessageNonceUsed } from './depositIn.js';
+import { snAddressToBytes32 } from './snMint.js';
+import type { CctpMessageMatch } from './polygonMint.js';
 import {
   deriveAccountNonce,
   deriveInboundCommitment,
@@ -62,11 +62,11 @@ import {
   deriveStarknetPrivateKey,
   deriveViewingKey,
   encodeCommitmentHookData,
-} from '../derivation/index';
-import { claimToPool, buildAndProveClaim, submitProvenClaim } from './bridgeBack';
-import { assertStorageWritable } from './storageProbe';
-import { markNonRetryable, markTransient } from './errors';
-import { sleep } from './proving';
+} from '../derivation/index.js';
+import { claimToPool, buildAndProveClaim, submitProvenClaim } from './bridgeBack.js';
+import { assertStorageWritable } from './storageProbe.js';
+import { markNonRetryable, markTransient } from './errors.js';
+import { sleep } from './proving.js';
 import {
   clearPendingReturnBurn,
   evmClientForSource,
@@ -78,7 +78,7 @@ import {
   writePendingReturnBurn,
   TOKEN_MESSENGER_EVENT_ABI,
   type PendingReturnBurn,
-} from './pendingReturnBurn';
+} from './pendingReturnBurn.js';
 
 // Identifies OUR return message in an Iris response. The return burn is submitted by
 // the builder relayer, which batches several users' ops into ONE transaction, so the

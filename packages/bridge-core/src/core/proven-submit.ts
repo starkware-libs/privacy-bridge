@@ -3,8 +3,8 @@
 
 import type { Account, AllowArray, Call, RpcProvider } from 'starknet';
 import { stark } from 'starknet';
-import { config } from './config';
-import { makeAccount } from './provider';
+import { config } from './config.js';
+import { makeAccount } from './provider.js';
 import {
   buildTransaction,
   executeTransaction,
@@ -14,7 +14,7 @@ import {
   type AvnuTxType,
   type AvnuExecutableApplyAction,
   type AvnuExecutionParameters,
-} from './avnuPaymaster';
+} from './avnuPaymaster.js';
 
 // --- Manager-paid (proven) transaction submission --------------------------------
 //
