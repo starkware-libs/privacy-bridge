@@ -32,12 +32,12 @@
 
 import type { Account, Call, PaymasterDetails, RpcProvider } from 'starknet';
 
-import { config } from './config';
-import { submitAndTrack } from './tx';
-import { managerExecute } from './proven-submit';
-import { assertCctpMessageMatches } from './polygonMint';
-import { encodeCctpBytes } from './cctpBytes';
-import { toHexFelt } from './avnuPaymaster';
+import { config } from './config.js';
+import { submitAndTrack } from './tx.js';
+import { managerExecute } from './proven-submit.js';
+import { assertCctpMessageMatches } from './polygonMint.js';
+import { encodeCctpBytes } from './cctpBytes.js';
+import { toHexFelt } from './avnuPaymaster.js';
 
 // A Starknet felt address → a left-padded 32-byte word, the CCTP mintRecipient
 // form (Starknet addresses are < 2^252, so they fit in 32 bytes).

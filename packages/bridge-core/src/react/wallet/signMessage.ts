@@ -10,8 +10,8 @@
 // any change here would silently re-key every user. Do not "clean it up".
 
 import { getAddress, isAddressEqual, recoverMessageAddress } from 'viem';
-import { switchChain, type EthereumProvider, type AddChainParams } from '../../lib/ethereum';
-import { withSignTimeout } from '../../core/walletErrors';
+import { switchChain, type EthereumProvider, type AddChainParams } from '../../lib/ethereum.js';
+import { withSignTimeout } from '../../core/walletErrors.js';
 
 export { switchChain, type EthereumProvider, type AddChainParams };
 

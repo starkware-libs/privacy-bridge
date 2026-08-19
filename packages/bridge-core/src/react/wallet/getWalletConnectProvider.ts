@@ -18,9 +18,9 @@
 // request() — WalletProvider gates all pre-session request() calls on whether a
 // session exists.
 
-import { config } from '../../core/config';
-import type { EthereumProvider } from './signMessage';
-import { registerProvider, unregisterProvider } from './injectedProvider';
+import { config } from '../../core/config.js';
+import type { EthereumProvider } from './signMessage.js';
+import { registerProvider, unregisterProvider } from './injectedProvider.js';
 
 // The WC EthereumProvider exposes connect(), disconnect(), and session beyond
 // EIP-1193. We use these for the session lifecycle gates in WalletProvider.
@@ -85,7 +85,7 @@ async function initProvider(): Promise<WcProvider | null> {
   // lazy chunk that a normal build never fetches (config.e2eWallet unset); the inner
   // isE2EWalletEnabled() call is kept for defense in depth. See e2eTestProvider.ts.
   if (config.e2eWallet) {
-    const { isE2EWalletEnabled, createE2ETestProvider } = await import('./e2eTestProvider');
+    const { isE2EWalletEnabled, createE2ETestProvider } = await import('./e2eTestProvider.js');
     if (isE2EWalletEnabled()) {
       return createE2ETestProvider();
     }

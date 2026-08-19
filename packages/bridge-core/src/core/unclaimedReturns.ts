@@ -23,9 +23,9 @@ import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
-} from '../derivation/index';
-import { config } from './config';
-import { listInflightReturns } from './returnIn';
+} from '../derivation/index.js';
+import { config } from './config.js';
+import { listInflightReturns } from './returnIn.js';
 
 // Corrupt-counter insurance ONLY — never the practical bound. accountIndexCount comes
 // from a localStorage-backed counter, so a corrupt-but-integer value (e.g. 1e12) must

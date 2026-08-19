@@ -9,8 +9,8 @@
 // never blocks the form.
 
 import { useEffect, useState } from 'react';
-import { fetchForwardMaxFee } from '../core/cctpFees';
-import { config, getEvmCctpDestination } from '../core/config';
+import { fetchForwardMaxFee } from '../core/cctpFees.js';
+import { config, getEvmCctpDestination } from '../core/config.js';
 
 export type WithdrawCctpFeeEstimate =
   | { status: 'idle'; maxFeeRaw: 0n; forwardFeeRaw: 0n }

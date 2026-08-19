@@ -11,8 +11,8 @@
 // or fallen-through message can never echo a long felt/key/witness hex blob —
 // the same defense-in-depth the fail(...) paths already relied on.
 
-import { sanitizeErrorMessage } from './tx';
-import { WALLET_UNAVAILABLE_COPY, WALLET_UNAVAILABLE_RE } from './walletErrors';
+import { sanitizeErrorMessage } from './tx.js';
+import { WALLET_UNAVAILABLE_COPY, WALLET_UNAVAILABLE_RE } from './walletErrors.js';
 
 // Ordered table. ORDER MATTERS: first matching pattern wins, so list MORE SPECIFIC
 // signatures before broad catch-alls. Entry shape:

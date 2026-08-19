@@ -14,7 +14,7 @@
 // Privacy: this is a generic price query — no address, amount, or identity leaves
 // the browser, and it runs on provider mount (app load), decoupled from the
 // deposit submit, so it can't be timing-correlated with a deposit.
-import { config } from './config';
+import { config } from './config.js';
 
 const DEFAULT_ENDPOINT = 'https://api.coinbase.com/v2/prices/STRK-USD/spot';
 

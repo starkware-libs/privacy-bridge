@@ -29,7 +29,7 @@ import {
   ONRAMP_CLOSE_GRACE_MS,
   ONRAMP_POLL_DEADLINE_MS,
   waitForDepositTokenBalance,
-} from '../core/onrampPoll';
+} from '../core/onrampPoll.js';
 
 export type OnrampPhase =
   | 'idle'

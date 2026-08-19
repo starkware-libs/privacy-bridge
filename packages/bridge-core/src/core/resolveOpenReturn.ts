@@ -46,23 +46,23 @@
 // RPC endpoint (and its key) in their message, and this verdict is rendered by the app.
 import type { PublicClient } from 'viem';
 
-import { config, getEvmCctpSource } from './config';
-import { LogRangeCapError, scanDepositForBurnLogs, type DepositForBurnLog } from './chunkedLogScan';
+import { config, getEvmCctpSource } from './config.js';
+import { LogRangeCapError, scanDepositForBurnLogs, type DepositForBurnLog } from './chunkedLogScan.js';
 import {
   fetchCctpMessageByTxHash,
   IrisMessageUnavailableError,
   type CctpMessageMatch,
-} from './polygonMint';
-import { isCctpMessageNonceUsed } from './depositIn';
+} from './polygonMint.js';
+import { isCctpMessageNonceUsed } from './depositIn.js';
 import {
   writeRecoveredInflightReturn,
   DEFAULT_BATCH_DEADLINE_MS,
   type RecoveredWriteOutcome,
-} from './returnIn';
-import { PENDING_BURN_DEADLINE_GRACE_MS, DEADLINE_WINDOW_BLOCKS } from './pendingReturnBurn';
-import { sumErc20Balances } from './polygonClient';
-import { snAddressToBytes32 } from './snMint';
-import { encodeCommitmentHookData } from '../derivation/index';
+} from './returnIn.js';
+import { PENDING_BURN_DEADLINE_GRACE_MS, DEADLINE_WINDOW_BLOCKS } from './pendingReturnBurn.js';
+import { sumErc20Balances } from './polygonClient.js';
+import { snAddressToBytes32 } from './snMint.js';
+import { encodeCommitmentHookData } from '../derivation/index.js';
 
 // One open return, as the WAL holds it. `burnTx` is REQUIRED once the state is `burned`;
 // the two are checked together because a `burned` entry without it describes nothing.

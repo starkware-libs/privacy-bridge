@@ -42,8 +42,8 @@
 // retry, we can't tell" into a bounded question with a real answer.
 import { createPublicClient, http, type PublicClient, type Abi } from 'viem';
 
-import { config, getEvmCctpSource, type EvmCctpSource } from './config';
-import { encodeCommitmentHookData } from '../derivation/index';
+import { config, getEvmCctpSource, type EvmCctpSource } from './config.js';
+import { encodeCommitmentHookData } from '../derivation/index.js';
 
 // TokenMessengerV2 DepositForBurn — the on-chain proof that a submitted batch executed.
 // Mirrors depositIn.ts's copy (same event, same indexing: burnToken, depositor,

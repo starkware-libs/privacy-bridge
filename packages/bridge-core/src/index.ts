@@ -11,14 +11,14 @@ export {
   VIEWING_KEY_LABEL,
   POLYGON_EOA_LABEL,
   RETURN_WAL_LABEL,
-} from './derivation/index';
-export { deriveStarknetPrivateKey, deriveStarknetAccount } from './derivation/index';
-export type { StarknetAccount } from './derivation/index';
-export { MAX_VIEWING_KEY, deriveViewingKey } from './derivation/index';
-export { derivePolygonEoa } from './derivation/index';
-export type { PolygonEoa } from './derivation/index';
-export { deriveReturnWalKeys } from './derivation/index';
-export type { ReturnWalKeys } from './derivation/index';
+} from './derivation/index.js';
+export { deriveStarknetPrivateKey, deriveStarknetAccount } from './derivation/index.js';
+export type { StarknetAccount } from './derivation/index.js';
+export { MAX_VIEWING_KEY, deriveViewingKey } from './derivation/index.js';
+export { derivePolygonEoa } from './derivation/index.js';
+export type { PolygonEoa } from './derivation/index.js';
+export { deriveReturnWalKeys } from './derivation/index.js';
+export type { ReturnWalKeys } from './derivation/index.js';
 export {
   CLAIM_TAG,
   BIND_TAG,
@@ -27,8 +27,8 @@ export {
   deriveAccountNonce,
   deriveClaimSecret,
   computeClaimH,
-} from './derivation/index';
-export type { ClaimHArgs } from './derivation/index';
+} from './derivation/index.js';
+export type { ClaimHArgs } from './derivation/index.js';
 export {
   IDENTITY_KEY_TAG,
   RETURN_DAPP_NAME,
@@ -36,8 +36,8 @@ export {
   computeInboundCommitment,
   deriveInboundCommitment,
   encodeCommitmentHookData,
-} from './derivation/index';
-export type { InboundCommitmentArgs, DeriveInboundCommitmentArgs } from './derivation/index';
+} from './derivation/index.js';
+export type { InboundCommitmentArgs, DeriveInboundCommitmentArgs } from './derivation/index.js';
 
 // Bridge engine modules
-export * from './api';
+export * from './api.js';

@@ -12,14 +12,14 @@
 // Secret hygiene: no keys here. The raw signature is passed straight through to the
 // orchestrators (in-memory only, never logged/persisted).
 
-import type { EthereumProvider } from '../lib/ethereum';
-import { readPendingPoolDeposit } from './poolDepositCursor';
-import { peekInflightDeposit } from './depositIn';
-import { peekInflightReturn, recoverBridgeIn } from './returnIn';
-import { peekInflightBurn, peekInflightCashOut } from './bridgeOut';
-import { moveIntoPool } from './moveIntoPool';
+import type { EthereumProvider } from '../lib/ethereum.js';
+import { readPendingPoolDeposit } from './poolDepositCursor.js';
+import { peekInflightDeposit } from './depositIn.js';
+import { peekInflightReturn, recoverBridgeIn } from './returnIn.js';
+import { peekInflightBurn, peekInflightCashOut } from './bridgeOut.js';
+import { moveIntoPool } from './moveIntoPool.js';
 // recoverBridgeIn now lives in returnIn.ts (folded return) — imported above.
-import { readUndepositedResidual, RESIDUAL_DUST_THRESHOLD_WEI } from './residual';
+import { readUndepositedResidual, RESIDUAL_DUST_THRESHOLD_WEI } from './residual.js';
 
 export type BridgeDirection = 'into-pool' | 'from-pool';
 export type BridgePhase =

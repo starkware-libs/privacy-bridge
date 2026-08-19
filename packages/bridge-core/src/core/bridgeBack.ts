@@ -44,35 +44,35 @@ import {
   deriveStarknetPrivateKey,
   deriveViewingKey,
   RETURN_DAPP_NAME,
-} from '../derivation/index';
-import { makePoolTransfers } from './poolClient';
-import { config } from './config';
-import { encodeCctpBytes } from './cctpBytes';
-import { assertReturnCctpMessage } from './snMint';
-import { getRpcProvider, makeAccount } from './provider';
+} from '../derivation/index.js';
+import { makePoolTransfers } from './poolClient.js';
+import { config } from './config.js';
+import { encodeCctpBytes } from './cctpBytes.js';
+import { assertReturnCctpMessage } from './snMint.js';
+import { getRpcProvider, makeAccount } from './provider.js';
 import {
   isRevertedOrRejected,
   isTrackedTerminalStatus,
   sanitizeErrorMessage,
   submitAndTrack,
-} from './tx';
-import { humanizeFinality } from './errorMessages';
-import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
+} from './tx.js';
+import { humanizeFinality } from './errorMessages.js';
+import { fetchPoolFeeAmount, approvePoolFee } from './poolFee.js';
 import {
   paymasterBuildLeg,
   paymasterExecuteLeg,
   submitProvenCall,
   type PaymasterBuildCtx,
-} from './proven-submit';
+} from './proven-submit.js';
 import {
   waitForProvingBlock,
   getCurrentBlock,
   isProofExpiredError,
   isNodeLagError,
   IMMEDIATE_PROVING_BLOCK_DEPTH,
-} from './proving';
-import { submitReusingProofOnNodeLag } from './nodeLagRetry';
-import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly';
+} from './proving.js';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry.js';
+import { checkProveEarlyQuiescence, proveWithImmediateFallback } from './proveEarly.js';
 
 export interface ClaimToPoolArgs {
   // EVM wallet signature of the app's identity sign-message — the only secret input;

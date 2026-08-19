@@ -20,15 +20,15 @@ import {
   deriveStarknetAccount,
   deriveStarknetPrivateKey,
   deriveViewingKey,
-} from '../derivation/index';
-import { config } from './config';
-import { getRpcProvider, makeAccount } from './provider';
-import { isDeployed } from './deploy';
-import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
-import { discoverPrivateBalance, formatUsdcCents } from './discover';
-import { readPoolRegistration } from './register';
-import { makePoolTransfers } from './poolClient';
-import { proveAndSubmitPoolAction, type ProvenPoolActionPhase } from './provenPoolAction';
+} from '../derivation/index.js';
+import { config } from './config.js';
+import { getRpcProvider, makeAccount } from './provider.js';
+import { isDeployed } from './deploy.js';
+import { fetchPoolFeeAmount, approvePoolFee } from './poolFee.js';
+import { discoverPrivateBalance, formatUsdcCents } from './discover.js';
+import { readPoolRegistration } from './register.js';
+import { makePoolTransfers } from './poolClient.js';
+import { proveAndSubmitPoolAction, type ProvenPoolActionPhase } from './provenPoolAction.js';
 
 export interface StarknetPayoutArgs {
   // Lazy provider of the raw wallet signature (in-memory only). Called once, after the

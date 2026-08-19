@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import { isNodeLagError, sleep } from './proving';
+import { isNodeLagError, sleep } from './proving.js';
 
 // FULL-NODE-LAG retry budget, shared by every proven-submit leg (claim, deposit,
 // withdraw+burn, register). The validating node (AVNU's paymaster simulation node, or

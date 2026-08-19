@@ -9,7 +9,7 @@
 // balance is the cross-browser source of truth. Reading a public `balance_of` of an
 // address the app already derives leaks nothing new (threat-model unchanged).
 
-import { readDepositTokenBalance } from './deposit';
+import { readDepositTokenBalance } from './deposit.js';
 
 // Sub-epsilon residual (fee change / surplus-note dust) must NOT nag Continue or fail-close a
 // fresh deposit. 0.05 USDC @ 6dp. The moveIntoPool fail-closed AND the status synth both compare

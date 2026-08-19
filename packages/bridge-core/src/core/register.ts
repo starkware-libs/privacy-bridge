@@ -3,15 +3,15 @@
 
 import type { Account, Call } from 'starknet';
 import type { PrivateTransfersInterface } from '@starkware-libs/starknet-privacy-sdk';
-import { makePoolTransfers } from './poolClient';
-import { config } from './config';
-import { getRpcProvider } from './provider';
-import { sanitizeErrorMessage, submitAndTrack } from './tx';
-import { humanizeFinality } from './errorMessages';
-import { submitProvenCall } from './proven-submit';
-import { waitForProvingBlock, isNodeLagError } from './proving';
-import { submitReusingProofOnNodeLag } from './nodeLagRetry';
-import { fetchPoolFeeAmount, approvePoolFee } from './poolFee';
+import { makePoolTransfers } from './poolClient.js';
+import { config } from './config.js';
+import { getRpcProvider } from './provider.js';
+import { sanitizeErrorMessage, submitAndTrack } from './tx.js';
+import { humanizeFinality } from './errorMessages.js';
+import { submitProvenCall } from './proven-submit.js';
+import { waitForProvingBlock, isNodeLagError } from './proving.js';
+import { submitReusingProofOnNodeLag } from './nodeLagRetry.js';
+import { fetchPoolFeeAmount, approvePoolFee } from './poolFee.js';
 
 export interface RegisterArgs {
   account: Account;

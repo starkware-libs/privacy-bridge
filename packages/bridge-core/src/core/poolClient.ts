@@ -12,7 +12,7 @@ import {
   IndexerDiscoveryProvider,
   type PrivateTransfersInterface,
 } from '@starkware-libs/starknet-privacy-sdk';
-import { config } from './config';
+import { config } from './config.js';
 
 export function makePoolTransfers(account: Account, viewingKey: bigint): PrivateTransfersInterface {
   return createPrivateTransfers({

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import type { EthereumProvider } from './signMessage';
-import type { EIP6963ProviderInfo } from './injectedProvider';
+import type { EthereumProvider } from './signMessage.js';
+import type { EIP6963ProviderInfo } from './injectedProvider.js';
 
 // Unified wallet context value: injected EIP-6963 extensions (MetaMask, Rabby, …)
 // AND WalletConnect coexist behind ONE picker. `connect(rdnsOrUuid?)` routes
