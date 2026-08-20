@@ -123,6 +123,39 @@ function toDepositForBurnLog(log: RawLog): DepositForBurnLog {
   };
 }
 
+// Which chain a client is actually connected to, asked ONCE per client.
+//
+// The check this feeds is a fund-safety assertion, not a formality, so it is not being
+// relaxed — every call still compares the connected chain against the one it was asked to
+// scan, and still refuses on a mismatch. What is removed is the repeated eth_chainId behind
+// it. A budgeted walk calls scanDepositForBurnLogs once PER SLICE (each with a one-chunk
+// range), and every one of those was paying its own round trip to re-learn a fact that
+// cannot have changed: a viem client is bound to one transport for its whole life, so its
+// connected chain is a property of the client, not of the call. That made roughly half of a
+// walk's requests redundant — and each of them is subject to the transport's retry budget,
+// so during a throttle they were the expensive half.
+//
+// The PROMISE is cached, not the value, so concurrent first callers share one in-flight
+// request instead of racing to issue several. A rejection is evicted rather than cached, so
+// a transient failure cannot poison the client for the rest of the session.
+//
+// LIMIT, stated deliberately: this cannot notice a URL that is re-pointed at a different
+// chain mid-session (a proxy swapping upstreams behind a stable address). A pre-existing
+// mismatch is still caught by the first scan of the session, which is the case the
+// assertion was written for; a live re-point would need a fresh client.
+const connectedChainIdByClient = new WeakMap<PublicClient, Promise<number>>();
+
+function connectedChainIdOf(client: PublicClient): Promise<number> {
+  const cached = connectedChainIdByClient.get(client);
+  if (cached) return cached;
+  const pending = client.getChainId().catch((err: unknown) => {
+    connectedChainIdByClient.delete(client);
+    throw err;
+  });
+  connectedChainIdByClient.set(client, pending);
+  return pending;
+}
+
 // Scan [fromBlock, toBlock] INCLUSIVE for DepositForBurn events from any of `depositors`.
 // Results are oldest-first: chunks ascend and each provider response is block-ordered.
 //
@@ -155,7 +188,7 @@ export async function scanDepositForBurnLogs(
   if (!source) throw new Error(`no EVM CCTP source configured for chain ${evmChainId}`);
   // A PLAIN error, never LogRangeCapError: a cap means "absence unproven on the right chain",
   // which a caller may act on as a partial answer. A mismatch invalidates the whole query.
-  const connectedChainId = await client.getChainId();
+  const connectedChainId = await connectedChainIdOf(client);
   if (connectedChainId !== evmChainId) {
     throw new Error(
       `refusing to scan chain ${evmChainId} on a client connected to chain ${connectedChainId} — ` +
