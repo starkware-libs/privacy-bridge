@@ -25,27 +25,52 @@ const ERC20_BALANCE_OF_ABI = [
 //
 // The recovery/History scans fan out many balance + code + nonce reads in bursts,
 // which (a) exhaust the browser's ~6-connections-per-host limit — surfacing as
-// "Failed to fetch" — and (b) trip a provider's compute-units-per-second cap
-// (Alchemy free tier, public nodes) — surfacing as HTTP 429. Three mitigations,
-// all provider-agnostic and correctness-neutral (same reads, fewer/paced requests):
-//   - batch.multicall: viem aggregates the concurrent ERC-20 balanceOf readContract
-//     calls (sumErc20Balances) into ONE Multicall3 eth_call, cutting both the
-//     request COUNT and the compute-units billed. Needs `chain` for the multicall3
-//     address (polygon/polygonAmoy both carry the canonical deployment).
-//   - transport batch: coalesces the remaining distinct JSON-RPC calls (getCode,
-//     getTransactionCount, the multicall eth_call) across concurrent probes into a
+// "Failed to fetch" — and (b) trip a provider's per-second method cap — surfacing as
+// HTTP 429. Three mitigations, all provider-agnostic and correctness-neutral (same
+// reads, fewer/paced requests):
+//   - batch.multicall: viem folds concurrent plain `readContract` calls into ONE
+//     Multicall3 eth_call, cutting both the request count and the compute units
+//     billed. Needs `chain` for the multicall3 address (polygon/polygonAmoy both
+//     carry the canonical deployment). NOTE this does NOT cover sumErc20Balances:
+//     that issues an EXPLICIT client.multicall, and viem's call.ts excludes
+//     aggregate3 calldata from the tick batcher (so aggregate3 never nests inside
+//     aggregate3), which is why that helper batches ACROSS ADDRESSES itself —
+//     see sumErc20BalancesMany.
+//   - transport batch: coalesces the distinct JSON-RPC calls (getCode,
+//     getTransactionCount, each aggregate3 eth_call) across concurrent probes into a
 //     single HTTP request, so a burst no longer exhausts browser connections.
-//   - retryCount/retryDelay: viem retries 429 with exponential backoff, self-
-//     throttling to the provider's sustainable rate (Retry-After honored if sent).
+//   - retryCount/retryDelay: viem retries a 429 with exponential backoff, honouring
+//     Retry-After when the provider sends one (buildRequest.js reads the header).
 // NOTE: transport `batch` needs an RPC that accepts JSON-RPC batch arrays (the keyless
 // default + Alchemy do). A provider that rejects them would 400 structurally (not
 // retryable); the multicall batching alone still covers the balance-heavy reads.
+//
+// RETRY BUDGET. Deliberately small. viem's backoff doubles from retryDelay, so the
+// tail dominates: at six retries a single throttled request costs seven POSTs and
+// about sixteen seconds of wall clock before it ever rejects — long enough on its own
+// to exhaust a caller's whole scan timeout, and it re-sends the SAME batch into a
+// provider that is already shedding. At two, the same failure costs three POSTs and
+// under a second, which is a retry budget for a transient blip rather than a
+// self-inflicted stall.
+//
+// Retrying HARDER is also the wrong shape of fix, for the reason a per-worker sleep
+// inside a fan-out is: it paces one request while every other worker keeps hammering
+// the same endpoint. Backpressure belongs where it can hold the whole channel back
+// after one 429 — the consuming app's request gate — not in each request's own
+// private retry loop.
+const RPC_RETRY_COUNT = 2;
+const RPC_RETRY_DELAY_MS = 250;
+
 export function getPolygonPublicClient(): PublicClient {
   const chain = config.polygon.chainId === polygon.id ? polygon : polygonAmoy;
   return createPublicClient({
     chain,
     batch: { multicall: true },
-    transport: http(config.polygon.rpcUrl, { batch: true, retryCount: 6, retryDelay: 250 }),
+    transport: http(config.polygon.rpcUrl, {
+      batch: true,
+      retryCount: RPC_RETRY_COUNT,
+      retryDelay: RPC_RETRY_DELAY_MS,
+    }),
   });
 }
 
