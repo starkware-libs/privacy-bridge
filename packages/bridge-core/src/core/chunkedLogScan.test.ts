@@ -417,3 +417,95 @@ describe('scanDepositForBurnLogs', () => {
     expect(chain.getLogs).not.toHaveBeenCalled();
   });
 });
+
+
+describe('scanDepositForBurnLogs — connected-chain check cost', () => {
+  it('asks eth_chainId ONCE for a client, however many scans it serves', async () => {
+    // A budgeted walk calls this helper once per slice, and each was paying its own round
+    // trip to re-learn a fact bound to the client for its whole life. During a throttle
+    // those redundant calls are also each subject to the transport's retry budget.
+    initTestConfig();
+    const harness = fakeClient();
+    for (let slice = 0; slice < 5; slice += 1) {
+      await scanDepositForBurnLogs(harness.client, {
+        depositors: [WALLET_A],
+        fromBlock: BigInt(slice * 10),
+        toBlock: BigInt(slice * 10 + 9),
+        chunkBlocks: 10n,
+      });
+    }
+    expect(harness.getChainId).toHaveBeenCalledTimes(1);
+    expect(harness.getLogs).toHaveBeenCalledTimes(5);
+  });
+
+  it('checks each client separately — the answer is a property of the client', async () => {
+    initTestConfig();
+    const first = fakeClient();
+    const second = fakeClient();
+    const range = { depositors: [WALLET_A], fromBlock: 0n, toBlock: 9n, chunkBlocks: 10n };
+    await scanDepositForBurnLogs(first.client, range);
+    await scanDepositForBurnLogs(second.client, range);
+    expect(first.getChainId).toHaveBeenCalledTimes(1);
+    expect(second.getChainId).toHaveBeenCalledTimes(1);
+  });
+
+  it('STILL refuses a client connected to the wrong chain', async () => {
+    // The assertion is the whole point of the call — caching must not soften it. An empty
+    // log set from the wrong chain reads as proof that no burn happened.
+    initTestConfig();
+    const harness = fakeClient(() => [], config.polygon.chainId + 1);
+    await expect(
+      scanDepositForBurnLogs(harness.client, {
+        depositors: [WALLET_A],
+        fromBlock: 0n,
+        toBlock: 9n,
+        chunkBlocks: 10n,
+      }),
+    ).rejects.toThrow(/refusing to scan chain/);
+    expect(harness.getLogs).not.toHaveBeenCalled();
+  });
+
+  it('keeps refusing a wrong-chain client on EVERY later call, not just the first', async () => {
+    // Caches the connected chain id, not the verdict — so a mismatch is re-derived and
+    // re-thrown each time rather than being decided once and forgotten.
+    initTestConfig();
+    const harness = fakeClient(() => [], config.polygon.chainId + 1);
+    const range = { depositors: [WALLET_A], fromBlock: 0n, toBlock: 9n, chunkBlocks: 10n };
+    await expect(scanDepositForBurnLogs(harness.client, range)).rejects.toThrow(
+      /refusing to scan chain/,
+    );
+    await expect(scanDepositForBurnLogs(harness.client, range)).rejects.toThrow(
+      /refusing to scan chain/,
+    );
+    expect(harness.getLogs).not.toHaveBeenCalled();
+  });
+
+  it('shares ONE in-flight request between concurrent first callers', async () => {
+    initTestConfig();
+    const harness = fakeClient();
+    const range = { depositors: [WALLET_A], fromBlock: 0n, toBlock: 9n, chunkBlocks: 10n };
+    await Promise.all([
+      scanDepositForBurnLogs(harness.client, range),
+      scanDepositForBurnLogs(harness.client, range),
+      scanDepositForBurnLogs(harness.client, range),
+    ]);
+    // Caching the PROMISE rather than the value is what makes this one call instead of three.
+    expect(harness.getChainId).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a FAILED chain-id read', async () => {
+    // A transient failure must not poison the client for the rest of the session.
+    initTestConfig();
+    const getLogs = vi.fn(async () => []);
+    const getChainId = vi
+      .fn<() => Promise<number>>()
+      .mockRejectedValueOnce(new Error('transport blip'))
+      .mockResolvedValue(config.polygon.chainId);
+    const client = { getLogs, getChainId } as unknown as PublicClient;
+    const range = { depositors: [WALLET_A], fromBlock: 0n, toBlock: 9n, chunkBlocks: 10n };
+
+    await expect(scanDepositForBurnLogs(client, range)).rejects.toThrow('transport blip');
+    await expect(scanDepositForBurnLogs(client, range)).resolves.toEqual([]);
+    expect(getChainId).toHaveBeenCalledTimes(2);
+  });
+});
