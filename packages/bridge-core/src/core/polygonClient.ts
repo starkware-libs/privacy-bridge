@@ -59,7 +59,18 @@ const ERC20_BALANCE_OF_ABI = [
 // after one 429 — the consuming app's request gate — not in each request's own
 // private retry loop.
 const RPC_RETRY_COUNT = 2;
-const RPC_RETRY_DELAY_MS = 250;
+
+// Sized against a PER-SECOND ceiling, which is what a provider actually enforces (Alchemy's
+// throttle names compute units per second). viem's backoff doubles from this value, so at 250ms
+// the three attempts land at 0, 250 and 750ms — all inside the SAME exhausted second. Every
+// retry then re-spends a budget that has not refilled, which is why "if you have retries
+// enabled, you can safely ignore this message" was not holding for us.
+//
+// At 1000ms they land at 0, 1s and 3s: each attempt gets a fresh window. That is the whole
+// point — a retry against a rate limit has to cross the rate's period, and no smaller value
+// can. Worst case before a rejection surfaces is ~3s, still a small fraction of a caller's
+// scan timeout, and only paid when the endpoint is actually shedding.
+const RPC_RETRY_DELAY_MS = 1_000;
 
 export function getPolygonPublicClient(): PublicClient {
   const chain = config.polygon.chainId === polygon.id ? polygon : polygonAmoy;
