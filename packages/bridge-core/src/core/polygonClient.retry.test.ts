@@ -36,12 +36,18 @@ describe('getPolygonPublicClient retry budget', () => {
   });
 
   it('keeps the whole backoff well inside a caller scan timeout', () => {
-    // The property that actually broke: a budget whose backoff alone can outlast the
-    // caller's timeout turns a recoverable throttle into an unrecoverable stall. Consumers
-    // bound a full chain scan at tens of seconds and issue many waves inside that, so one
-    // request's retry tail has to stay a small fraction of it.
+    // The property that actually broke: a budget whose backoff alone can outlast the caller's
+    // timeout turns a recoverable throttle into an unrecoverable stall. Consumers bound a full
+    // chain scan at tens of seconds (FAST_SCAN_TIMEOUT_MS is 30s in the app) and issue many
+    // waves inside that, so one request's retry tail has to stay a small fraction of it.
+    //
+    // The bound is derived, not picked. A per-second ceiling forces retryDelay >= 1000ms (see
+    // the test below), and viem's doubling backoff then makes delay * (2^count - 1) = 3000ms
+    // the FLOOR at two retries. So the ceiling here is a fraction of the consumer's timeout —
+    // ~1/6 of it — rather than the 2000ms this asserted when the delay was 250ms and crossing
+    // the rate period had not been accounted for.
     const { retryCount, retryDelay } = getPolygonPublicClient().transport;
-    expect(backoffTotalMs(retryCount as number, retryDelay as number)).toBeLessThan(2_000);
+    expect(backoffTotalMs(retryCount as number, retryDelay as number)).toBeLessThanOrEqual(5_000);
   });
 
   it('pins the arithmetic this budget was chosen against', () => {
@@ -50,6 +56,16 @@ describe('getPolygonPublicClient retry budget', () => {
     expect(backoffTotalMs(2, 250)).toBe(750);
     expect(backoffTotalMs(6, 250)).toBe(15_750);
   });
+
+  it('spaces retries across the RATE PERIOD a per-second limit enforces', () => {
+    // The property, not the number. A provider's ceiling is per second, so a retry that lands
+    // inside the same second re-spends a budget that has not refilled. viem's first retry waits
+    // exactly retryDelay, so that delay is what decides whether attempt two gets a fresh
+    // window — at 250ms all three attempts land inside one second and none of them can pass.
+    const { retryDelay } = getPolygonPublicClient().transport;
+    expect(retryDelay as number).toBeGreaterThanOrEqual(1_000);
+  });
+
 
   it('is still an HTTP transport, so a wave stays one round trip', () => {
     // Unrelated to the count but the same cost contract, and cheap to lose in a refactor of
