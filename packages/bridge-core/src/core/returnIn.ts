@@ -145,19 +145,26 @@ const TOKEN_MESSENGER_HOOK_ABI = [
   },
 ] as const satisfies Abi;
 
-// FEE-FREE-RETURN INVARIANT: the return path is fee-free (Standard finality, maxFee
-// 0). The proven claim (claimToPool / ComputeAndInvoke) drains ledger[commitment],
-// which `receive_and_bind` credits with the GROSS burned `amount`; a per-call CCTP
-// fee would make the NET mint (amount − fee) fall short of what the claim tries to
-// drain → the claim reverts INSUFFICIENT_CLAIMABLE. Rather than silently strand
-// funds, FAIL LOUD if a caller passes a fee-bearing config. The params stay in the
-// signature (so call sites don't break) — only non-fee-free values are rejected.
-// Behavior-preserving for all current callers (they pass maxFee 0 / Standard finality).
+// FEE-FREE-RETURN INVARIANT: the return path is fee-free (Standard finality, maxFee 0).
+// The claim credits whatever actually MINTED — InboundAnonymizer snapshots balance_of,
+// calls receive_message, and hands the pool `after - before`; the proof carries no
+// amount (the Open sentinel). So a per-call CCTP fee does not revert the claim, it
+// silently mints a SMALLER note. FAIL LOUD instead: a caller asking to return N must
+// get N back or an error, never N - fee. The params stay in the signature (so call
+// sites don't break) — only non-fee-free values are rejected.
+//
+// This costs nothing today: Circle sells no Fast tier from Polygon (standard
+// attestation ~8s) and quotes 0 bps on both tiers for this route.
+//
+// NOTE: "fee-free" is live-quoted state, not a protocol constant — CCTP v2 documents a
+// per-deployment TokenMessengerV2 fee switch that can impose a minimum fee on STANDARD
+// transfers. If that switch is ever set for this route, this guard fails the leg closed
+// rather than shrinking the note, which is the intended direction.
 function assertFeeFreeReturn(maxFee: bigint, minFinalityThreshold: number): void {
   if (maxFee !== 0n) {
     throw new Error(
       `returnToPool: the return path is fee-free — maxFee must be 0 (got ${maxFee}). A per-call ` +
-        'CCTP fee under-mints the gross claim amount and would revert the claim (INSUFFICIENT_CLAIMABLE).',
+        'CCTP fee is deducted from the mint, so the pool would credit a smaller note than requested.',
     );
   }
   if (minFinalityThreshold < STANDARD_FINALITY) {

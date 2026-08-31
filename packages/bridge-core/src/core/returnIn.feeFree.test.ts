@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-// returnToPool / returnBurnToPool must enforce the fee-free-return invariant. The
-// proven claim (claimToPool) drains ledger[commitment], which receive_and_bind credits
-// with the GROSS burned amount, so a per-call CCTP fee would leave the NET mint
-// (amount − fee) short of that target and the claim would revert INSUFFICIENT_CLAIMABLE.
-// A fee-bearing config must therefore fail loud at the return entry points rather than
-// stranding funds.
+// returnToPool / returnBurnToPool must enforce the fee-free-return invariant. The claim
+// credits whatever actually MINTED (InboundAnonymizer hands the pool `after - before`,
+// and the proof carries no amount), so a per-call CCTP fee does not revert the claim —
+// it silently credits a SMALLER note. A fee-bearing config must therefore fail loud at
+// the return entry points, so a caller asking to return N gets N or an error, never
+// N - fee.
 //
 // Harness style mirrors returnToPool.test.ts: the REAL returnToPool + returnBurnToPool
 // run; only the outermost edges are mocked.
