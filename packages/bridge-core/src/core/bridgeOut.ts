@@ -229,15 +229,33 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
   // the eventual private return pays its AVNU pool fee from a pre-existing note,
   // and draining the pool now would make that return revert at proof-build with
   // "Insufficient balance" (see the RETURN_FEE_BUFFER_WEI note above).
-  if (poolBalance < amount + RETURN_FEE_BUFFER_WEI) {
-    const maxSpendable = poolBalance > RETURN_FEE_BUFFER_WEI ? poolBalance - RETURN_FEE_BUFFER_WEI : 0n;
+  //
+  // This withdraw ALSO pays its own pool fee out of the SAME balance — under the AVNU
+  // paymaster it is baked into this proof as an extra withdraw (provenPoolAction.ts),
+  // on top of `amount`, and it is not known until `onPoolFee` fires (paymasterBuildLeg
+  // is called after this point). So a poolFeeRaw-blind check here can pass while the
+  // real spend (amount + this withdraw's own fee) still leaves less than the buffer for
+  // the return. assertBufferHolds is checked once now (0 fee, cheap early exit) and
+  // again from `onPoolFee` below once the live fee is known, still pre-prove.
+  const assertBufferHolds = (poolFeeRaw: bigint): void => {
+    const required = amount + poolFeeRaw + RETURN_FEE_BUFFER_WEI;
+    if (poolBalance >= required) return;
+    const reserved = poolFeeRaw + RETURN_FEE_BUFFER_WEI;
+    const maxSpendable = poolBalance > reserved ? poolBalance - reserved : 0n;
     throw new Error(
-      `Bridging ${humanAmount(amount)} USDC would leave less than the required ` +
-        `${humanAmount(RETURN_FEE_BUFFER_WEI)} USDC pool fee-buffer needed to pay the ` +
-        `private return fee later. In-pool balance is ${humanAmount(poolBalance)} USDC; ` +
-        `bridge at most ${humanAmount(maxSpendable)} USDC (or add funds to the pool first).`,
+      poolFeeRaw > 0n
+        ? `Bridging ${humanAmount(amount)} USDC would leave less than the required ` +
+            `${humanAmount(reserved)} USDC pool fee-buffer (this withdrawal's own ` +
+            `${humanAmount(poolFeeRaw)} USDC fee plus the ${humanAmount(RETURN_FEE_BUFFER_WEI)} ` +
+            `private-return buffer). In-pool balance is ${humanAmount(poolBalance)} USDC; ` +
+            `bridge at most ${humanAmount(maxSpendable)} USDC (or add funds to the pool first).`
+        : `Bridging ${humanAmount(amount)} USDC would leave less than the required ` +
+            `${humanAmount(RETURN_FEE_BUFFER_WEI)} USDC pool fee-buffer needed to pay the ` +
+            `private return fee later. In-pool balance is ${humanAmount(poolBalance)} USDC; ` +
+            `bridge at most ${humanAmount(maxSpendable)} USDC (or add funds to the pool first).`,
     );
-  }
+  };
+  assertBufferHolds(0n);
 
   // mint_recipient: 20-byte EVM address as a u256 (numeric value of the addr).
   const mintRecipient = BigInt(depositWallet);
@@ -275,6 +293,7 @@ export async function bridgeOut(args: BridgeOutArgs): Promise<BridgeOutResult> {
     destDomain,
     lastTxBlockNumber,
     onStatus,
+    onPoolFee: assertBufferHolds,
   });
 
   onStatus?.('Withdraw + burn submitted; awaiting CCTP attestation.');
@@ -1326,6 +1345,10 @@ interface ProveAndSubmitArgs {
   destDomain: number;
   lastTxBlockNumber: number | undefined;
   onStatus?: (s: string) => void;
+  // Re-checked once the live pool fee for THIS withdraw is known (bridgeOut's
+  // fee-buffer gate — see the FEE-BUFFER GATE comment there). Absent for
+  // bridgeOutToWallet, which has no future return leg to reserve for.
+  onPoolFee?: (poolFeeRaw: bigint) => void;
 }
 
 // Withdraw to the Anonymizer + ONE InvokeExternal -> Anonymizer.privacy_invoke(Buy),
@@ -1352,6 +1375,7 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     destDomain,
     lastTxBlockNumber,
     onStatus,
+    onPoolFee,
   } = opts;
   const { txHash } = await proveAndSubmitPoolAction({
     transfers,
@@ -1360,6 +1384,7 @@ async function proveAndSubmitBridgeOut(opts: ProveAndSubmitArgs): Promise<string
     viewingKey,
     lastTxBlockNumber,
     onStatus,
+    onPoolFee,
     label: 'withdraw + burn',
     // The pool runs Withdraw BEFORE the InvokeExternal, so the Anonymizer already holds
     // the USDC when privacy_invoke approves + deposit_for_burn. privacy_invoke returns an

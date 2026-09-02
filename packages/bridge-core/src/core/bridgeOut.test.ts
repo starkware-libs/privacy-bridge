@@ -840,6 +840,44 @@ describe('bridgeOut — AVNU paymaster path (fee baked into the proof)', () => {
     expect(lastCall[3]).toBe(8);
   });
 
+  // The fee-buffer gate (Phase 3, describe block above) only reserves RETURN_FEE_BUFFER_WEI
+  // against `amount` — it does not know this withdraw's OWN pool fee (baked in above as a
+  // second withdraw to FORWARDER). A balance that clears the OLD check but not
+  // `amount + FEE + RETURN_FEE_BUFFER_WEI` must still fail closed, pre-prove — otherwise the
+  // withdraw lands, the pool fee comes out of the SAME balance on top of `amount`, and the
+  // later private return starves for its own fee (live-observed 2026-09-01: pool 1.589, a 1.28
+  // bid cleared the old gate by 460 micro, the withdraw consumed 1.472, the return then needed
+  // ~0.19 and only 0.117 was left).
+  it('rejects a bid whose balance covers amount + buffer but not amount + this withdraw\'s own fee + buffer', async () => {
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT + RETURN_FEE_BUFFER_WEI + FEE - 1n);
+    await expect(
+      bridgeOut({
+        signature: SIGNATURE,
+        accountIndex: ACCOUNT_INDEX,
+        accountNonce: ACCOUNT_NONCE,
+        amount: AMOUNT,
+        resolveDepositWallet,
+      }),
+    ).rejects.toThrow(/fee-buffer/i);
+    expect(avnuExecute).not.toHaveBeenCalled();
+    // A caller's refusal from onPoolFee is settled arithmetic, not a transient — it must
+    // not trigger a rebuild-and-retry (which would re-fire paymasterBuildLeg for the
+    // same answer, behind a misleading "retrying" line). Exactly one build.
+    expect(avnuBuild).toHaveBeenCalledOnce();
+  });
+
+  it('allows a bid whose balance covers amount + this withdraw\'s own fee + buffer', async () => {
+    discoverPrivateBalance.mockResolvedValueOnce(AMOUNT + RETURN_FEE_BUFFER_WEI + FEE);
+    const res = await bridgeOut({
+      signature: SIGNATURE,
+      accountIndex: ACCOUNT_INDEX,
+      accountNonce: ACCOUNT_NONCE,
+      amount: AMOUNT,
+      resolveDepositWallet,
+    });
+    expect(res.burnTxHash).toBe(BURN_TX_HASH);
+  });
+
   it('throws if the AVNU fee token is not the deposit token', async () => {
     avnuBuild.mockResolvedValue({
       type: 'apply_action',
