@@ -164,4 +164,24 @@ describe('E2: moveIntoPool.runStep TRANSIENT-retries an AMBIGUOUS paymaster thro
       expect(mDeposit).toHaveBeenCalledTimes(1);
     }
   });
+
+  it('fails closed on an AbortSignal TimeoutError too — as a DOMException AND as an Error-less object', async () => {
+    // 2026-09-09 incident shape: the AVNU fetch's AbortSignal.timeout fired post-relay and
+    // deposit.ts rethrew the DOMException verbatim. errors.ts now classifies TimeoutError
+    // transient BY NAME, so the deposit step's brand must cover any thrown object — a
+    // `{ name: 'TimeoutError' }` that does not extend Error included — or the retry loop
+    // would re-prove and double-deposit.
+    const SHAPES: unknown[] = [
+      new DOMException('signal timed out', 'TimeoutError'),
+      { name: 'TimeoutError', message: 'signal timed out' },
+    ];
+    for (const shape of SHAPES) {
+      mDeposit.mockReset();
+      mDeposit.mockRejectedValueOnce(shape).mockResolvedValue(undefined);
+      await expect(
+        moveIntoPool({ signature: SIGNATURE, funding: 'treasury', amountWei: AMOUNT }),
+      ).rejects.toBe(shape);
+      expect(mDeposit).toHaveBeenCalledTimes(1);
+    }
+  });
 });

@@ -198,6 +198,39 @@ describe('depositToPool — AVNU paymaster path (combined register+deposit)', ()
     expect(h.executeTransaction).toHaveBeenCalledOnce();
   });
 
+  // 2026-09-09 incident: the AVNU fetch's AbortSignal.timeout(30s) fired against a hung
+  // same-origin proxy. errors.ts now classifies that DOMException TRANSIENT — but on the
+  // EXECUTE leg it fires AFTER onRelayStart, so the relayer may already hold the tx. The
+  // paymasterSubmissionStarted guard must still rethrow it verbatim: no rebuild, no fresh
+  // SNIP-9 signature, no second executeTransaction.
+  it('does NOT retry when paymaster_executeTransaction rejects with an AbortSignal TimeoutError (transient-classified)', async () => {
+    const timeout = new DOMException('signal timed out', 'TimeoutError');
+    h.executeTransaction.mockRejectedValueOnce(timeout);
+
+    await expect(
+      depositToPool({ account: fakeAccount(), viewingKey: 7n, amountWei: 1_000_000n }),
+    ).rejects.toBe(timeout);
+
+    expect(h.buildTransaction).toHaveBeenCalledOnce();
+    expect(h.executeTransaction).toHaveBeenCalledOnce();
+  });
+
+  // The BUILD leg (paymaster_buildTransaction) runs before any relay, so the same timeout
+  // there relays nothing and stays on the retryable side of the guard: deposit.ts rebuilds
+  // once. Pins that the pre-relay retry still works for the timeout shape and never
+  // reaches executeTransaction.
+  it('DOES rebuild once when paymaster_buildTransaction rejects with an AbortSignal TimeoutError (pre-relay)', async () => {
+    h.buildTransaction.mockReset();
+    h.buildTransaction.mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'));
+
+    await expect(
+      depositToPool({ account: fakeAccount(), viewingKey: 7n, amountWei: 1_000_000n }),
+    ).rejects.toThrow(/signal timed out/);
+
+    expect(h.buildTransaction).toHaveBeenCalledTimes(2);
+    expect(h.executeTransaction).not.toHaveBeenCalled();
+  });
+
   // B2 (inverse of B1): a signMessage rejection happens BEFORE the AVNU relay starts,
   // so it relays NOTHING — it must stay retryable. The fix flips paymasterSubmissionStarted
   // only at onRelayStart (after signMessage), so this rejection rebuilds + re-proves once.

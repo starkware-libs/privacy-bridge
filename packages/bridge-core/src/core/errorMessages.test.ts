@@ -94,6 +94,41 @@ describe('humanizeError', () => {
     });
   });
 
+  describe('AbortSignal.timeout() fetch abort (2026-09-09 incident: "signal timed out")', () => {
+    const TIMEOUT_COPY = 'A network request timed out. Check your connection and try again.';
+
+    it('maps the DOMException TimeoutError the browser rejects the AVNU fetch with', () => {
+      // Raw, this surfaced to the user as "Add funds didn't go through: signal timed out".
+      expect(humanizeError(new DOMException('signal timed out', 'TimeoutError'))).toBe(TIMEOUT_COPY);
+    });
+
+    it('maps the string forms across browsers / Node', () => {
+      expect(humanizeError('signal timed out')).toBe(TIMEOUT_COPY);
+      expect(humanizeError(new Error('The operation timed out.'))).toBe(TIMEOUT_COPY);
+      expect(humanizeError(new Error('The operation was aborted due to timeout'))).toBe(TIMEOUT_COPY);
+      expect(humanizeError('TimeoutError: signal timed out')).toBe(TIMEOUT_COPY);
+    });
+
+    it('never claims nothing was sent (an execute-leg timeout may have been relayed)', () => {
+      expect(humanizeError(new DOMException('signal timed out', 'TimeoutError'))).not.toMatch(/nothing was sent/i);
+    });
+
+    it('leaves the wallet "Signature request timed out" to its own (more specific) copy', () => {
+      const out = humanizeError(new Error('Signature request timed out'));
+      expect(out).not.toBe(TIMEOUT_COPY);
+      expect(out).toMatch(/lost its connection|refresh this page/i);
+    });
+
+    it('does not rewrite a plain caller abort (no copy claims it was a network hiccup)', () => {
+      // Assert on containment, not equality: jsdom's DOMException lives in another realm,
+      // so under vitest `instanceof Error` is false and the sanitizer stringifies it with
+      // its "AbortError: " prefix (a real browser yields the bare message).
+      const out = humanizeError(new DOMException('The user aborted a request.', 'AbortError'));
+      expect(out).not.toBe(TIMEOUT_COPY);
+      expect(out).toContain('The user aborted a request.');
+    });
+  });
+
   describe('full-node-lag block-hash-mismatch (code 156, ValidationFailure)', () => {
     it('maps the code-156 node-lag ValidationFailure to honest copy, not the raw blob', () => {
       // The field shape from the claim submit: an AVNU code-156 TRANSACTION_EXECUTION_ERROR

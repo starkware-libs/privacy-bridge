@@ -32,8 +32,44 @@
 // Circle serves those mid-attestation, so they are RESUMABLE (the burn is
 // replayable by burnTxHash), never terminal (defense-in-depth for auto-resume —
 // pollIris already retries them in-loop).
+// `signal timed out` (Chrome) / `The operation timed out.` (Safari) / `aborted due to
+// timeout` (Node/undici) / a bare `TimeoutError` are the STRING forms of an
+// `AbortSignal.timeout()` fetch abort — avnuPaymaster.ts's rpc() bounds every AVNU
+// JSON-RPC call this way (2026-09-09 incident: a same-origin proxy hung on a stale
+// upstream and the 30s abort surfaced as a terminal "signal timed out"). The object
+// form is matched by name in isTransientError; see isAbortTimeout / isCallerAbort.
 const TRANSIENT_RE =
-  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network error|fetch failed|failed to fetch|empty body \(expected JSON\)|was not valid JSON|\b(429|50[234])\b|temporarily unavailable|rate limit/i;
+  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network error|fetch failed|failed to fetch|empty body \(expected JSON\)|was not valid JSON|\b(429|50[234])\b|temporarily unavailable|rate limit|signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i;
+
+// An `AbortSignal.timeout()` abort, matched on the error OBJECT: browsers and Node reject
+// the fetch with a DOMException named `TimeoutError` (viem / undici use the same name).
+// Duck-typed on `name` rather than `instanceof DOMException` so a cross-realm or
+// library-defined error classifies the same way.
+function isAbortTimeout(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError';
+}
+
+// A CALLER-initiated abort — `controller.abort()` — rejects with name `AbortError`, NOT
+// `TimeoutError`. Nothing in this package lets one reach the classifier (strkPrice.ts and
+// useWithdrawCctpFeeEstimate.ts abort their own fetches and swallow the rejection
+// locally), so an AbortError here means a consumer cancelled the operation (unmount,
+// account switch, user cancel). Cancelling is a decision, not a hiccup: never retry it.
+// Checked by name only — Firefox words its AbortError "The operation was aborted.",
+// which is why the STRING form deliberately does NOT match `operation was aborted` /
+// `user aborted a request` (fail closed: a stringified abort of unknown kind is terminal).
+function isCallerAbort(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
+}
+
+// The message text of a thrown value. Reads `message` off any object (not just
+// `instanceof Error`) so a cross-realm DOMException still classifies by its wording.
+function messageOf(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && typeof (err as { message?: unknown }).message === 'string') {
+    return (err as { message: string }).message;
+  }
+  return String(err);
+}
 
 // A handful of unambiguously TERMINAL markers that must NEVER be retried even
 // if some transient keyword happens to appear in the same message.
@@ -53,7 +89,10 @@ const TERMINAL_RE =
 // the message because sanitization / wrapping strips text but not properties.
 export const NON_RETRYABLE = Symbol.for('bridge-core.NON_RETRYABLE');
 
-export function markNonRetryable<E extends Error>(err: E): E {
+// Accepts any object (not just `Error`) so a thrown DOMException or a library error that
+// does not extend Error can still be branded — the brand is what keeps a post-relay
+// paymaster throw out of the transient-retry loop, whatever its prototype chain.
+export function markNonRetryable<E extends object>(err: E): E {
   (err as unknown as Record<PropertyKey, unknown>)[NON_RETRYABLE] = true;
   return err;
 }
@@ -98,9 +137,12 @@ export function nothingToResumeError(message: string): NothingToResumeError {
   return markNonRetryable(err);
 }
 
+// Precedence: NON_RETRYABLE brand → TERMINAL_RE → caller abort (all terminal), then the
+// TRANSIENT brand / an AbortSignal timeout by name / TRANSIENT_RE by wording.
 export function isTransientError(err: unknown): boolean {
   if (isNonRetryable(err)) return false;
-  const message = err instanceof Error ? err.message : String(err);
+  const message = messageOf(err);
   if (TERMINAL_RE.test(message)) return false;
-  return isMarkedTransient(err) || TRANSIENT_RE.test(message);
+  if (isCallerAbort(err)) return false;
+  return isMarkedTransient(err) || isAbortTimeout(err) || TRANSIENT_RE.test(message);
 }

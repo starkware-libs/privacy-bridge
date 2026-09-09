@@ -925,7 +925,13 @@ export async function moveIntoPool(
       // re-submit. Pre-relay throws are also caught here, but the ambiguity is
       // unresolvable from outside deposit.ts's own on-relay boundary, so the
       // safe policy under a paymaster is: never auto-retry the deposit step.
-      if (config.paymaster && err instanceof Error) throw markNonRetryable(err);
+      // Brand ANY thrown object, not just `instanceof Error`: isTransientError also
+      // classifies by `name` (an AbortSignal `TimeoutError`, e.g. from a hung AVNU proxy),
+      // so an Error-less throw must not slip past the brand into the retry loop. A thrown
+      // primitive is wrapped so the brand has somewhere to live.
+      if (config.paymaster) {
+        throw markNonRetryable(typeof err === 'object' && err !== null ? err : new Error(String(err)));
+      }
       throw err;
     }
     // Deposit landed → the operation is complete; drop the resume cursor so a genuinely
