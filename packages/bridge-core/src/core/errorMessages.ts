@@ -26,6 +26,18 @@ const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: 
   // worker suspended on idle / extension updated), so personal_sign rejects with an
   // opaque string or times out (see walletErrors.ts). Swap it for actionable copy.
   { pattern: WALLET_UNAVAILABLE_RE, message: WALLET_UNAVAILABLE_COPY },
+  // An `AbortSignal.timeout()` fetch abort (avnuPaymaster.ts rpc(), 30s): Chrome says
+  // "signal timed out", Safari "The operation timed out.", Node "aborted due to timeout";
+  // a stringified DOMException reads "TimeoutError: …". Raw, it surfaced as
+  // "Add funds didn't go through: signal timed out" (2026-09-09 incident). The copy
+  // deliberately does NOT claim "nothing was sent": the same timeout can fire on
+  // paymaster_executeTransaction AFTER the relayer accepted the tx, and this table sees
+  // only the message, not which leg threw. Must follow the wallet rule above so
+  // "Signature request timed out" keeps its own (more specific) copy.
+  {
+    pattern: /signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i,
+    message: 'A network request timed out. Check your connection and try again.',
+  },
   // Write-once register: the pool stores the viewing key once, so re-registering
   // an already-registered account reverts with NON_ZERO_VALUE.
   { pattern: /NON_ZERO_VALUE/i, message: 'This account is already registered.' },
