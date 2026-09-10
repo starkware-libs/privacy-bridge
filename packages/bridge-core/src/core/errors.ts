@@ -3,6 +3,9 @@
 
 // Transient-vs-terminal error classification for the orchestrators.
 //
+// Text comes from `errorText`, the extractor sanitizeErrorMessage also uses, so the
+// classifier judges the same string the user is shown.
+//
 // The starknet-core layer (proven-submit's manager nonce, the proving-block
 // wait, submitAndTrack) already recovers most hiccups in-call and surfaces
 // SUCCESS. This predicate is the orchestrator's safety net for the RESIDUAL
@@ -18,6 +21,8 @@
 // rejected signature, a terminal CCTP attestation. Those are surfaced as an
 // error without retrying.
 
+import { errorText } from './errorText.js';
+
 // `waitForAttestation: timed out` / `waitForForwardedMint: timed out` are the
 // Iris poll DEADLINE timeouts (polygonMint.ts): Iris / Circle's Forwarding Service
 // is merely SLOW (Standard finality or a backgrounded tab can exceed the 30-min
@@ -25,8 +30,6 @@
 // replayable forever by burnTxHash — so these are RESUMABLE, never terminal. (The
 // genuinely-terminal Iris "failed"/"rejected" status throws a distinct
 // `attestation failed` message that TERMINAL_RE catches first.)
-// The HTTP status codes are word-boundary-anchored (`\b(429|50[234])\b`) so they
-// match a real "HTTP 503" but NOT the same digits embedded in a hash/amount.
 // `empty body (expected JSON)` / `was not valid JSON` are the safeJsonParse
 // failures polygonMint's Iris poll can throw on an OK-but-blank/partial 200 body:
 // Circle serves those mid-attestation, so they are RESUMABLE (the burn is
@@ -38,8 +41,15 @@
 // JSON-RPC call this way (2026-09-09 incident: a same-origin proxy hung on a stale
 // upstream and the 30s abort surfaced as a terminal "signal timed out"). The object
 // form is matched by name in isTransientError; see isAbortTimeout / isCallerAbort.
+// `Load failed` (Safari/iOS) and `NetworkError…` (Firefox, one word — hence
+// `network\s?error`) are those browsers' wording for Chrome's `Failed to fetch`.
+// The HTTP allowlist is the justified set only — 408, 429, 500/502/503/504 and
+// Cloudflare 520-524 — never a whole \d\d range: any other 5xx-shaped number is far more
+// likely a felt, an amount or a gas value. `(^|[^\w.])` keeps even those digits from
+// matching inside a hex string or a decimal; a lookbehind would be a parse-time
+// SyntaxError on Safari < 16.4.
 const TRANSIENT_RE =
-  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network error|fetch failed|failed to fetch|empty body \(expected JSON\)|was not valid JSON|\b(429|50[234])\b|temporarily unavailable|rate limit|signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i;
+  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network\s?error|fetch failed|failed to fetch|\bload failed\b|empty body \(expected JSON\)|was not valid JSON|(^|[^\w.])(408|429|50[0234]|52[0-4])\b|temporarily unavailable|rate limit|signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i;
 
 // An `AbortSignal.timeout()` abort, matched on the error OBJECT: browsers and Node reject
 // the fetch with a DOMException named `TimeoutError` (viem / undici use the same name).
@@ -61,14 +71,19 @@ function isCallerAbort(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
 }
 
-// The message text of a thrown value. Reads `message` off any object (not just
-// `instanceof Error`) so a cross-realm DOMException still classifies by its wording.
-function messageOf(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'object' && err !== null && typeof (err as { message?: unknown }).message === 'string') {
-    return (err as { message: string }).message;
+// A thrown value and up to two `cause` levels: a wrapper's own message hides the network
+// failure or the revert underneath it. Both verdicts read this chain, so a terminal cause
+// is never out-voted by a transient wrapper.
+function errorChain(err: unknown): unknown[] {
+  const chain: unknown[] = [err];
+  let current = err;
+  for (let depth = 0; depth < 2; depth += 1) {
+    const cause = (current as { cause?: unknown } | null)?.cause;
+    if (cause === undefined || cause === null) break;
+    chain.push(cause);
+    current = cause;
   }
-  return String(err);
+  return chain;
 }
 
 // A handful of unambiguously TERMINAL markers that must NEVER be retried even
@@ -77,8 +92,21 @@ function messageOf(err: unknown): string {
 // (polygonMint.ts): a redirected/tampered attestation must fail safely,
 // never resume-loop — even though its message text contains the word
 // "attestation" (which would otherwise match the transient `attestation \w+`).
+// `user abort\b` (not `abort`) so Argent's `User abort` matches but the AbortError
+// wording "The user aborted a request." does not — a caller abort is judged by name.
+// The EVM/viem revert markers keep a revert terminal when its message also carries a
+// status-shaped number (`gas: 500`).
 const TERMINAL_RE =
-  /REVERTED|REJECTED|NON_ZERO_VALUE|insufficient (balance|funds)|proof (verification|invalid)|invalid proof|user (rejected|denied)|attestation failed|recipient\/domain mismatch/i;
+  /NON_ZERO_VALUE|insufficient (balance|funds|max fee)|proof (verification|invalid)|invalid proof|user (rejected|denied|abort\b)|rejected by user|attestation failed|recipient\/domain mismatch|execution reverted|contract function reverted|reverted on/i;
+
+// CASE-SENSITIVE: `REVERTED` / `REJECTED` are the literal tokens submitAndTrack writes
+// (tx.ts isRevertedOrRejected reads them the same way). Case-insensitively they also
+// match prose — the WAF block page safe-json.ts appends to a 503 body says "rejected".
+const TERMINAL_TX_STATUS_RE = /\bREVERTED\b|\bREJECTED\b/;
+
+function isTerminalText(text: string): boolean {
+  return TERMINAL_TX_STATUS_RE.test(text) || TERMINAL_RE.test(text);
+}
 
 // Object-brand for "this error MUST NOT be retried, whatever its message says."
 // Callers set this on an error before rethrowing when a normally-transient shape
@@ -137,12 +165,19 @@ export function nothingToResumeError(message: string): NothingToResumeError {
   return markNonRetryable(err);
 }
 
-// Precedence: NON_RETRYABLE brand → TERMINAL_RE → caller abort (all terminal), then the
-// TRANSIENT brand / an AbortSignal timeout by name / TRANSIENT_RE by wording.
+// Precedence: NON_RETRYABLE brand → terminal wording → caller abort (all terminal), then
+// the TRANSIENT brand / an AbortSignal timeout by name / TRANSIENT_RE by wording. Wording
+// and name checks run over the whole cause chain; the brands are read off the thrown
+// object only, since call sites set them on what they rethrow.
 export function isTransientError(err: unknown): boolean {
   if (isNonRetryable(err)) return false;
-  const message = messageOf(err);
-  if (TERMINAL_RE.test(message)) return false;
-  if (isCallerAbort(err)) return false;
-  return isMarkedTransient(err) || isAbortTimeout(err) || TRANSIENT_RE.test(message);
+  const chain = errorChain(err);
+  const texts = chain.map(errorText);
+  if (texts.some(isTerminalText)) return false;
+  if (chain.some(isCallerAbort)) return false;
+  return (
+    isMarkedTransient(err) ||
+    chain.some(isAbortTimeout) ||
+    texts.some((text) => TRANSIENT_RE.test(text))
+  );
 }

@@ -135,14 +135,25 @@ export interface AvnuClientOpts {
   apiKey?: string;
   fetchImpl?: typeof fetch;
   // #104: bounds the fetch so a stalled AVNU relayer can't wedge the deposit flow
-  // forever (no cancel path beyond closing the tab). Defaults to DEFAULT_RPC_TIMEOUT_MS.
+  // forever (no cancel path beyond closing the tab). Defaults per leg — see rpcTimeoutMs.
   timeoutMs?: number;
 }
 
-// Default fetch timeout for a paymaster JSON-RPC call (#104) — generous for a
-// build/execute round-trip, but bounded so a stalled relayer surfaces a clear error
-// instead of hanging indefinitely.
-export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+// Default fetch timeout for a paymaster JSON-RPC call (#104): bounded so a stalled
+// relayer surfaces an error, but NESTED OUTSIDE the proxy budgets in front of it (LB cuts
+// a backend at 30s; nginx 5s connect + ≤15s next_upstream + 25s read) so the proxy's
+// definitive answer wins over a client abort's unknown status.
+export const DEFAULT_RPC_TIMEOUT_MS = 45_000;
+
+// The execute leg SUBMITS: a client abort there leaves the outcome unknown and the flow
+// fails closed, so it gets headroom over every other budget.
+export const EXECUTE_RPC_TIMEOUT_MS = 60_000;
+
+// An explicit opts.timeoutMs always wins (tests inject tiny budgets).
+export function rpcTimeoutMs(method: string, timeoutMs?: number): number {
+  if (timeoutMs !== undefined) return timeoutMs;
+  return method === METHOD_EXECUTE ? EXECUTE_RPC_TIMEOUT_MS : DEFAULT_RPC_TIMEOUT_MS;
+}
 
 // Normalises a felt (string/number/bigint) to a 0x-prefixed hex string. AVNU's
 // JSON-RPC REQUIRES 0x-hex felts in calldata; SDK / encoder calldata is often decimal,
@@ -242,7 +253,7 @@ async function rpc<T>(method: string, params: unknown, opts: AvnuClientOpts): Pr
       ...(opts.apiKey ? { 'x-paymaster-api-key': opts.apiKey } : {}),
     },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
+    signal: AbortSignal.timeout(rpcTimeoutMs(method, opts.timeoutMs)),
   });
   const body = await parseJsonResponse<{
     result?: T;

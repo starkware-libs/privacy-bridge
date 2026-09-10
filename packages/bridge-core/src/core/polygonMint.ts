@@ -91,6 +91,11 @@ const FAST_POLL_INTERVAL_MS = 1_500;
 // Standard CCTP finality on Polygon can take many minutes; allow up to 30.
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60_000;
 
+// Per-request budget for one Iris GET: the poll deadline is only checked after the
+// awaited fetch resolves, so an unbounded request stalls the poll indefinitely. The
+// abort is caught below as a `transient` outcome and backed off like any Iris hiccup.
+export const IRIS_FETCH_TIMEOUT_MS = 15_000;
+
 // Exponential-backoff bounds for TRANSIENT Iris HTTP errors (5xx / 429): the
 // service is busy / rate-limiting, not permanently broken. Back off from ~1s,
 // doubling, capped at ~30s, all within the existing poll deadline (Bundle B1).
@@ -135,6 +140,8 @@ interface PollOpts {
   // (5s). Only selects the base cadence — the transient (5xx/429) backoff is unchanged.
   fast?: boolean;
   timeoutMs?: number;
+  // Per-REQUEST abort budget; `timeoutMs` is the deadline for the whole poll.
+  fetchTimeoutMs?: number;
   backoffBaseMs?: number;
   backoffCapMs?: number;
   onStatus?: (s: string) => void;
@@ -157,11 +164,17 @@ type IrisFetchOutcome =
   | { kind: 'not-indexed' }
   | { kind: 'transient'; detail: string };
 
-async function fetchIrisMessagesOnce(url: string): Promise<IrisFetchOutcome> {
+async function fetchIrisMessagesOnce(
+  url: string,
+  fetchTimeoutMs: number = IRIS_FETCH_TIMEOUT_MS,
+): Promise<IrisFetchOutcome> {
   const asDetail = (err: unknown): string => (err instanceof Error ? err.message : String(err));
   let res: Response;
   try {
-    res = await fetch(url, { headers: { accept: 'application/json' } });
+    res = await fetch(url, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(fetchTimeoutMs),
+    });
   } catch (err) {
     return { kind: 'transient', detail: asDetail(err) };
   }
@@ -241,7 +254,7 @@ async function pollIris<T>(
 
     // A `transient` outcome (network failure, 5xx/429, unparseable 200) is retried with
     // exponential backoff below; a non-retryable HTTP status already threw inside the fetch.
-    const outcome = await fetchIrisMessagesOnce(url);
+    const outcome = await fetchIrisMessagesOnce(url, opts?.fetchTimeoutMs);
     const transient = outcome.kind === 'transient';
 
     if (outcome.kind === 'messages') {
