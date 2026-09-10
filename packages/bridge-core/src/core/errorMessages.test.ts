@@ -129,6 +129,49 @@ describe('humanizeError', () => {
     });
   });
 
+  describe('cross-browser network failures get one honest network row', () => {
+    const NETWORK_COPY = 'Network request failed. Check your connection and try again.';
+
+    it('maps the Chrome / Node / Safari / Firefox wordings', () => {
+      expect(humanizeError(new TypeError('Failed to fetch'))).toBe(NETWORK_COPY);
+      expect(humanizeError(new TypeError('fetch failed'))).toBe(NETWORK_COPY);
+      expect(humanizeError(new TypeError('Load failed'))).toBe(NETWORK_COPY);
+      expect(humanizeError(new TypeError('NetworkError when attempting to fetch resource.'))).toBe(
+        NETWORK_COPY,
+      );
+    });
+
+    it('leaves the timeout wording to its own row', () => {
+      expect(humanizeError(new DOMException('signal timed out', 'TimeoutError'))).not.toBe(
+        NETWORK_COPY,
+      );
+    });
+  });
+
+  describe('wallet cancellations read as a cancellation, not an on-chain rejection', () => {
+    const CANCEL_COPY = 'You cancelled the request in your wallet.';
+
+    it('maps MetaMask / Argent wordings', () => {
+      expect(humanizeError(new Error('User rejected the request.'))).toBe(CANCEL_COPY);
+      expect(humanizeError(new Error('MetaMask Tx Signature: User denied transaction signature.'))).toBe(
+        CANCEL_COPY,
+      );
+      // Argent wordings unverified live; taken from the Argent X / starknet.js surface.
+      expect(humanizeError(new Error('User abort'))).toBe(CANCEL_COPY);
+      expect(humanizeError(new Error('Rejected by user'))).toBe(CANCEL_COPY);
+    });
+
+    it('leaves an on-chain REJECTED tx to the chain copy', () => {
+      expect(humanizeError(new Error('submitAndTrack: 0xabc REJECTED'))).not.toBe(CANCEL_COPY);
+    });
+
+    it('does not swallow a caller abort into the cancel copy', () => {
+      expect(humanizeError(new DOMException('The user aborted a request.', 'AbortError'))).toContain(
+        'The user aborted a request.',
+      );
+    });
+  });
+
   describe('full-node-lag block-hash-mismatch (code 156, ValidationFailure)', () => {
     it('maps the code-156 node-lag ValidationFailure to honest copy, not the raw blob', () => {
       // The field shape from the claim submit: an AVNU code-156 TRANSACTION_EXECUTION_ERROR

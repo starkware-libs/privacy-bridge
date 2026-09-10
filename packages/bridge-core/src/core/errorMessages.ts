@@ -38,6 +38,21 @@ const ERROR_MAP: ReadonlyArray<{ pattern: RegExp; message?: string; appendRaw?: 
     pattern: /signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i,
     message: 'A network request timed out. Check your connection and try again.',
   },
+  // Three browser wordings for one failure — the request never reached the server:
+  // `Load failed` (Safari/iOS), `NetworkError when attempting to fetch resource.`
+  // (Firefox), `Failed to fetch` / `fetch failed` (Chrome, Node). Follows the timeout
+  // row so a timeout keeps its own copy.
+  {
+    pattern: /failed to fetch|fetch failed|\bload failed\b|network\s?error/i,
+    message: 'Network request failed. Check your connection and try again.',
+  },
+  // The user dismissed the wallet prompt: MetaMask "User rejected the request.", Argent
+  // "User abort" / "Rejected by user". Must precede the REVERTED/REJECTED rows, which
+  // would otherwise describe a cancellation as an on-chain failure.
+  {
+    pattern: /user (rejected|denied|abort\b)|rejected by user/i,
+    message: 'You cancelled the request in your wallet.',
+  },
   // Write-once register: the pool stores the viewing key once, so re-registering
   // an already-registered account reverts with NON_ZERO_VALUE.
   { pattern: /NON_ZERO_VALUE/i, message: 'This account is already registered.' },
