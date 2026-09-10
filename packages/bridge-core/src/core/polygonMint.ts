@@ -91,10 +91,9 @@ const FAST_POLL_INTERVAL_MS = 1_500;
 // Standard CCTP finality on Polygon can take many minutes; allow up to 30.
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60_000;
 
-// Per-request budget for one Iris GET. The poll deadline is only checked AFTER the
-// awaited fetch resolves, so without this a blackholed connection stalls the mint
-// forever. The abort rejects with a TimeoutError, which errors.ts classifies transient
-// and the loop below backs off on like any other Iris hiccup.
+// Per-request budget for one Iris GET: the poll deadline is only checked after the
+// awaited fetch resolves, so an unbounded request stalls the poll indefinitely. The
+// abort is caught below as a `transient` outcome and backed off like any Iris hiccup.
 export const IRIS_FETCH_TIMEOUT_MS = 15_000;
 
 // Exponential-backoff bounds for TRANSIENT Iris HTTP errors (5xx / 429): the
@@ -141,8 +140,7 @@ interface PollOpts {
   // (5s). Only selects the base cadence — the transient (5xx/429) backoff is unchanged.
   fast?: boolean;
   timeoutMs?: number;
-  // Per-REQUEST abort budget (IRIS_FETCH_TIMEOUT_MS) — distinct from `timeoutMs`, which
-  // is the deadline for the whole poll.
+  // Per-REQUEST abort budget; `timeoutMs` is the deadline for the whole poll.
   fetchTimeoutMs?: number;
   backoffBaseMs?: number;
   backoffCapMs?: number;

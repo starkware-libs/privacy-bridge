@@ -3,8 +3,8 @@
 
 // Transient-vs-terminal error classification for the orchestrators.
 //
-// Text comes from `errorText`, the same extractor sanitizeErrorMessage uses, so what the
-// user is shown and what the classifier judges are never different strings.
+// Text comes from `errorText`, the extractor sanitizeErrorMessage also uses, so the
+// classifier judges the same string the user is shown.
 //
 // The starknet-core layer (proven-submit's manager nonce, the proving-block
 // wait, submitAndTrack) already recovers most hiccups in-call and surfaces
@@ -30,8 +30,6 @@ import { errorText } from './errorText.js';
 // replayable forever by burnTxHash — so these are RESUMABLE, never terminal. (The
 // genuinely-terminal Iris "failed"/"rejected" status throws a distinct
 // `attestation failed` message that TERMINAL_RE catches first.)
-// The HTTP status codes are word-boundary-anchored (`\b(429|50[234])\b`) so they
-// match a real "HTTP 503" but NOT the same digits embedded in a hash/amount.
 // `empty body (expected JSON)` / `was not valid JSON` are the safeJsonParse
 // failures polygonMint's Iris poll can throw on an OK-but-blank/partial 200 body:
 // Circle serves those mid-attestation, so they are RESUMABLE (the burn is
@@ -43,15 +41,15 @@ import { errorText } from './errorText.js';
 // JSON-RPC call this way (2026-09-09 incident: a same-origin proxy hung on a stale
 // upstream and the 30s abort surfaced as a terminal "signal timed out"). The object
 // form is matched by name in isTransientError; see isAbortTimeout / isCallerAbort.
-// `Load failed` (Safari/iOS) and `NetworkError when attempting to fetch resource.`
-// (Firefox — one word, hence `network\s?error`) are those browsers' wording for what
-// Chrome calls `Failed to fetch`.
-// The HTTP allowlist spans 408 (request timeout), 429 and the whole 5xx range: the LB /
-// nginx path in front of AVNU, the RPCs and Iris also answers 500 and Cloudflare
-// 520-524. `(^|[^\w.])` keeps those digits from matching inside a hex string or a
-// decimal fraction — a lookbehind would be a parse-time SyntaxError on Safari < 16.4.
+// `Load failed` (Safari/iOS) and `NetworkError…` (Firefox, one word — hence
+// `network\s?error`) are those browsers' wording for Chrome's `Failed to fetch`.
+// The HTTP allowlist is the justified set only — 408, 429, 500/502/503/504 and
+// Cloudflare 520-524 — never a whole \d\d range: any other 5xx-shaped number is far more
+// likely a felt, an amount or a gas value. `(^|[^\w.])` keeps even those digits from
+// matching inside a hex string or a decimal; a lookbehind would be a parse-time
+// SyntaxError on Safari < 16.4.
 const TRANSIENT_RE =
-  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network\s?error|fetch failed|failed to fetch|\bload failed\b|empty body \(expected JSON\)|was not valid JSON|(^|[^\w.])(408|429|5\d\d)\b|temporarily unavailable|rate limit|signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i;
+  /submitAndTrack: timed out|mint confirmation timed out|waitForAttestation: timed out|waitForForwardedMint: timed out|invalid transaction nonce|\bcode:?\s*52\b|nonce too (old|low|big)|attestation \w+…?|pending_confirmations|re-?seed|ECONNRESET|ETIMEDOUT|network\s?error|fetch failed|failed to fetch|\bload failed\b|empty body \(expected JSON\)|was not valid JSON|(^|[^\w.])(408|429|50[0234]|52[0-4])\b|temporarily unavailable|rate limit|signal timed out|operation timed out|aborted due to timeout|\bTimeoutError\b/i;
 
 // An `AbortSignal.timeout()` abort, matched on the error OBJECT: browsers and Node reject
 // the fetch with a DOMException named `TimeoutError` (viem / undici use the same name).
@@ -73,9 +71,9 @@ function isCallerAbort(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
 }
 
-// A thrown value and up to two `cause` levels — a wrapper's own message hides the
-// network failure or the revert underneath it. Both verdicts read this same chain so a
-// terminal cause can never be out-voted by a transient wrapper.
+// A thrown value and up to two `cause` levels: a wrapper's own message hides the network
+// failure or the revert underneath it. Both verdicts read this chain, so a terminal cause
+// is never out-voted by a transient wrapper.
 function errorChain(err: unknown): unknown[] {
   const chain: unknown[] = [err];
   let current = err;
@@ -96,14 +94,14 @@ function errorChain(err: unknown): unknown[] {
 // "attestation" (which would otherwise match the transient `attestation \w+`).
 // `user abort\b` (not `abort`) so Argent's `User abort` matches but the AbortError
 // wording "The user aborted a request." does not — a caller abort is judged by name.
+// The EVM/viem revert markers keep a revert terminal when its message also carries a
+// status-shaped number (`gas: 500`).
 const TERMINAL_RE =
-  /NON_ZERO_VALUE|insufficient (balance|funds)|proof (verification|invalid)|invalid proof|user (rejected|denied|abort\b)|rejected by user|attestation failed|recipient\/domain mismatch/i;
+  /NON_ZERO_VALUE|insufficient (balance|funds|max fee)|proof (verification|invalid)|invalid proof|user (rejected|denied|abort\b)|rejected by user|attestation failed|recipient\/domain mismatch|execution reverted|contract function reverted|reverted on/i;
 
-// The tx-status markers, CASE-SENSITIVE: `REVERTED` / `REJECTED` are the literal tokens
-// submitAndTrack puts in its message (tx.ts isRevertedOrRejected matches them the same
-// way). Case-insensitively they also matched prose — a WAF block page ("The requested
-// URL was rejected…") that safe-json.ts appends to a 503 status line made a plain
-// gateway failure terminal, killing the retry.
+// CASE-SENSITIVE: `REVERTED` / `REJECTED` are the literal tokens submitAndTrack writes
+// (tx.ts isRevertedOrRejected reads them the same way). Case-insensitively they also
+// match prose — the WAF block page safe-json.ts appends to a 503 body says "rejected".
 const TERMINAL_TX_STATUS_RE = /\bREVERTED\b|\bREJECTED\b/;
 
 function isTerminalText(text: string): boolean {
@@ -168,9 +166,9 @@ export function nothingToResumeError(message: string): NothingToResumeError {
 }
 
 // Precedence: NON_RETRYABLE brand → terminal wording → caller abort (all terminal), then
-// the TRANSIENT brand / an AbortSignal timeout by name / TRANSIENT_RE by wording. Every
-// wording and name check runs over the whole cause chain; the brands are read off the
-// thrown object only, since call sites set them on what they rethrow.
+// the TRANSIENT brand / an AbortSignal timeout by name / TRANSIENT_RE by wording. Wording
+// and name checks run over the whole cause chain; the brands are read off the thrown
+// object only, since call sites set them on what they rethrow.
 export function isTransientError(err: unknown): boolean {
   if (isNonRetryable(err)) return false;
   const chain = errorChain(err);

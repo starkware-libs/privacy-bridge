@@ -61,6 +61,7 @@ function rpcErrorReason(err: unknown): string | undefined {
       const status = b.status !== undefined ? ` ${String(b.status)}` : '';
       const statusText = b.statusText ? ` ${String(b.statusText)}` : '';
       const bodyText = typeof b.body === 'string' ? b.body.trim() : '';
+      // Body is truncated to 200 chars, so classification leans on the status, not it.
       const preview = bodyText ? `: ${bodyText.slice(0, 200)}` : '';
       return `Starknet RPC error (HTTP${status}${statusText})${preview}`;
     }
@@ -82,9 +83,8 @@ function rpcErrorReason(err: unknown): string | undefined {
 }
 
 // The classifiable text of a thrown value: the structured RPC reason when there is one,
-// else the `message` of any object (a cross-realm DOMException or a non-Error library
-// error included), else its stringification. Shared with errors.ts so isTransientError
-// and sanitizeErrorMessage never judge different text.
+// else the `message` of any object (a cross-realm DOMException included), else its
+// stringification. Shared so isTransientError and sanitizeErrorMessage judge one text.
 export function errorText(err: unknown): string {
   const reason = rpcErrorReason(err);
   if (reason !== undefined) return reason;

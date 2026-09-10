@@ -139,16 +139,14 @@ export interface AvnuClientOpts {
   timeoutMs?: number;
 }
 
-// Default fetch timeout for a paymaster JSON-RPC call (#104) — bounded so a stalled
-// relayer surfaces a clear error instead of hanging indefinitely, but NESTED OUTSIDE the
-// proxy budgets in front of it (Google LB cuts a backend at 30s; nginx uses 5s connect +
-// ≤15s next_upstream + 25s read). At 30s the client abort raced the LB, replacing a
-// definitive 502/504 with an unknown-status TimeoutError.
+// Default fetch timeout for a paymaster JSON-RPC call (#104): bounded so a stalled
+// relayer surfaces an error, but NESTED OUTSIDE the proxy budgets in front of it (LB cuts
+// a backend at 30s; nginx 5s connect + ≤15s next_upstream + 25s read) so the proxy's
+// definitive answer wins over a client abort's unknown status.
 export const DEFAULT_RPC_TIMEOUT_MS = 45_000;
 
-// The execute leg SUBMITS: once the relayer has the tx, a client-side abort makes the
-// outcome unknown and the flow fails closed. Give it headroom over every other budget so
-// the proxy's answer — even an error — arrives first.
+// The execute leg SUBMITS: a client abort there leaves the outcome unknown and the flow
+// fails closed, so it gets headroom over every other budget.
 export const EXECUTE_RPC_TIMEOUT_MS = 60_000;
 
 // An explicit opts.timeoutMs always wins (tests inject tiny budgets).

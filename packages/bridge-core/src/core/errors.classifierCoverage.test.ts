@@ -43,6 +43,31 @@ describe('HTTP status allowlist covers every gateway/overload status', () => {
   it('does NOT match a decimal fraction that happens to contain the digits', () => {
     expect(isTransientError(new Error('price drifted to 0.503 STRK'))).toBe(false);
   });
+
+  it('does NOT read an arbitrary 5xx-shaped number in calldata or an amount as a status', () => {
+    expect(
+      isTransientError(
+        new Error('paymaster_executeTransaction: calldata ["0x1","540","0"] … Account validation failed'),
+      ),
+    ).toBe(false);
+    expect(isTransientError(new Error('ERC20 transfer of 550 failed'))).toBe(false);
+  });
+});
+
+describe('revert / fee vocabulary outranks a status-shaped number in the same message', () => {
+  it('keeps a viem contract revert terminal', () => {
+    expect(
+      isTransientError(
+        new Error('The contract function reverted.\n gas: 500\n Details: execution reverted'),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps a max-fee shortfall terminal', () => {
+    expect(isTransientError(new Error('Insufficient max fee: max fee is 500, actual fee is 900'))).toBe(
+      false,
+    );
+  });
 });
 
 describe('a WAF/proxy block page whose BODY says "rejected" stays transient', () => {
