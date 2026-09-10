@@ -68,12 +68,23 @@ describe('Iris poll — per-request abort budget', () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('defaults the per-request budget far below the 30-minute poll deadline', () => {
+  it('defaults the per-request budget to IRIS_FETCH_TIMEOUT_MS, far below the poll deadline', async () => {
     expect(IRIS_FETCH_TIMEOUT_MS).toBeLessThan(30 * 60_000);
-    expect(IRIS_FETCH_TIMEOUT_MS).toBeGreaterThan(0);
+    const spy = vi.spyOn(AbortSignal, 'timeout');
+    fetchMock.mockResolvedValue(
+      okRes({ messages: [{ status: 'complete', message: MESSAGE, attestation: ATTESTATION }] }),
+    );
+
+    const promise = waitForAttestation(BURN_TX, { intervalMs: 10, backoffBaseMs: 1 });
+    await vi.runAllTimersAsync();
+    await promise;
+
+    expect(spy).toHaveBeenCalledWith(IRIS_FETCH_TIMEOUT_MS);
+    spy.mockRestore();
   });
 
   it('honours an injected fetchTimeoutMs', async () => {
+    const spy = vi.spyOn(AbortSignal, 'timeout');
     fetchMock.mockResolvedValue(
       okRes({ messages: [{ status: 'complete', message: MESSAGE, attestation: ATTESTATION }] }),
     );
@@ -86,7 +97,8 @@ describe('Iris poll — per-request abort budget', () => {
     await vi.runAllTimersAsync();
     await promise;
 
-    expect(fetchMock).toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith(1_234);
+    spy.mockRestore();
   });
 
   it('treats the abort rejection as transient and keeps polling', async () => {
