@@ -188,12 +188,13 @@ describe('moveIntoPool — fund-then-deploy state table', () => {
     mEnsureFunded.mockImplementation(async () => {
       order.push('fund');
     });
-    mDeposit.mockImplementation(async () => {
+    mDeposit.mockImplementation(async (args) => {
       order.push('deposit');
+      args.onPoolFee?.(1_500n);
     });
 
     const rec = stepRecorder();
-    const { depositedNetWei } = await moveIntoPool({
+    const { depositedNetWei, poolFeeWei } = await moveIntoPool({
       signature: SIGNATURE,
       funding: 'treasury',
       amountWei: AMOUNT,
@@ -207,6 +208,7 @@ describe('moveIntoPool — fund-then-deploy state table', () => {
     expect(order).toEqual(['deploy', 'register', 'fund', 'deposit']);
     // Treasury lands the full gross.
     expect(depositedNetWei).toBe(AMOUNT);
+    expect(poolFeeWei).toBe(1_500n);
     expect(mDeposit.mock.calls[0][0].amountWei).toBe(AMOUNT);
     // onStep fires running→done for each step, in order.
     expect(rec.statusesFor('deploy')).toContain('done');
@@ -230,7 +232,7 @@ describe('moveIntoPool — fund-then-deploy state table', () => {
 
     // Explicit Continue: resume:true auto-consumes the pending cursor (a fresh press
     // would instead FAIL CLOSED with PENDING_POOL_DEPOSIT — see the C1 test below).
-    const { depositedNetWei } = await moveIntoPool({
+    const { depositedNetWei, poolFeeWei } = await moveIntoPool({
       signature: SIGNATURE,
       funding: 'metamask',
       amountWei: AMOUNT,
@@ -248,6 +250,7 @@ describe('moveIntoPool — fund-then-deploy state table', () => {
     // the prior run actually deposited (not the gross).
     expect(mClearPending).toHaveBeenCalledWith(ACCOUNT);
     expect(depositedNetWei).toBe(NET);
+    expect(poolFeeWei).toBeUndefined();
   });
 
   it("Row 1 (deploy-fee OFF, metamask, resume:true, funds MINTED but NOT yet deposited): NO re-fund, deposits the live balance", async () => {

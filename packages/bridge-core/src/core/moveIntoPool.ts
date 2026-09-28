@@ -254,7 +254,7 @@ async function fundDepositToken(args: FundDepositTokenArgs): Promise<bigint> {
 //     committed deploy short-circuits rather than submitting a second deploy tx.
 export async function moveIntoPool(
   args: MoveIntoPoolArgs,
-): Promise<{ depositedNetWei: bigint; deposited: boolean }> {
+): Promise<{ depositedNetWei: bigint; deposited: boolean; poolFeeWei?: bigint }> {
   const {
     signature,
     funding,
@@ -372,6 +372,9 @@ export async function moveIntoPool(
   let depositFundingBlock: number | undefined;
   let deployBlock: number | undefined;
   let accountDeployed = false;
+  // AVNU can re-quote on a safe deposit retry. Keep the latest quote and return it only
+  // when this invocation actually deposits, never for a cross-run resume short-circuit.
+  let poolFeeWei: bigint | undefined;
   // True once the account's viewing key is KNOWN to be on-chain by the time the
   // deposit runs — either it was ALREADY registered (isRegistered), or a non-paymaster
   // registerWithPool actually registered it THIS run. Gates the deposit's `autoRegister`
@@ -831,6 +834,9 @@ export async function moveIntoPool(
         onTx: (hash) => {
           depositTxHash = hash;
         },
+        onPoolFee: (amountWei) => {
+          poolFeeWei = amountWei;
+        },
         onStatus: (m) => emit('deposit', 'running', m),
       });
     } catch (err) {
@@ -948,5 +954,9 @@ export async function moveIntoPool(
   // `deposited` is true iff depositToPool ran THIS invocation; false on the resume
   // short-circuit (a prior run's deposit already landed — depositedNetWei>0 but no
   // new deposit was made this run).
-  return { depositedNetWei: depositWei ?? amountWei, deposited };
+  return {
+    depositedNetWei: depositWei ?? amountWei,
+    deposited,
+    ...(deposited && poolFeeWei !== undefined ? { poolFeeWei } : {}),
+  };
 }

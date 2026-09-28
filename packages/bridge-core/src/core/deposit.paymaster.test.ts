@@ -111,7 +111,13 @@ beforeEach(() => {
 
 describe('depositToPool — AVNU paymaster path (combined register+deposit)', () => {
   it('bakes the pool fee into the proof as a withdraw to the forwarder, then AVNU submits', async () => {
-    await depositToPool({ account: fakeAccount(), viewingKey: 7n, amountWei: 1_000_000n });
+    const onPoolFee = vi.fn();
+    await depositToPool({
+      account: fakeAccount(),
+      viewingKey: 7n,
+      amountWei: 1_000_000n,
+      onPoolFee,
+    });
 
     // buildTransaction ran BEFORE proving (to learn the fee).
     expect(h.buildTransaction).toHaveBeenCalledOnce();
@@ -127,6 +133,48 @@ describe('depositToPool — AVNU paymaster path (combined register+deposit)', ()
     // AVNU's relayer executed the proven leg (proof forwarded).
     expect(h.executeTransaction).toHaveBeenCalledOnce();
     expect(h.executeTransaction.mock.calls[0]![0].transaction.apply_action.proof).toBe('0xdepositproof');
+    expect(onPoolFee).toHaveBeenCalledOnce();
+    expect(onPoolFee).toHaveBeenCalledWith(FEE);
+  });
+
+  it('reports the re-quoted fee from the attempt that succeeds', async () => {
+    const requotedFee = 900n;
+    h.buildTransaction
+      .mockResolvedValueOnce({
+        type: 'invoke_and_apply_action',
+        typed_data: HONEST_TYPED_DATA,
+        fee_action: {
+          type: 'withdraw',
+          recipient: FORWARDER,
+          token: USDC,
+          amount: `0x${FEE.toString(16)}`,
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'invoke_and_apply_action',
+        typed_data: HONEST_TYPED_DATA,
+        fee_action: {
+          type: 'withdraw',
+          recipient: FORWARDER,
+          token: USDC,
+          amount: `0x${requotedFee.toString(16)}`,
+        },
+      });
+    let signatureAttempts = 0;
+    const account = {
+      address: '0xACCT',
+      signMessage: vi.fn(async () => {
+        signatureAttempts += 1;
+        if (signatureAttempts === 1) throw new Error('user rejected first signature');
+        return ['0xaa', '0xbb'];
+      }),
+    } as never;
+    const onPoolFee = vi.fn();
+
+    await depositToPool({ account, viewingKey: 7n, amountWei: 1_000_000n, onPoolFee });
+
+    expect(onPoolFee.mock.calls.map(([amount]) => amount)).toEqual([FEE, requotedFee]);
+    expect(h.executeTransaction).toHaveBeenCalledOnce();
   });
 
   // Deposit-aging fix: the paymaster path has NO separate approve tx to seed the
