@@ -193,6 +193,10 @@ export interface DepositArgs {
   // the paymaster path this is the AVNU-relayed invoke_and_apply_action; on the
   // manager path the proven apply_actions submit.
   onTx?: (hash: string) => void;
+  // Fires with the pool fee quoted for each proof attempt. Safe retries may re-quote,
+  // so callers should retain the latest value and consume it only after this deposit
+  // resolves successfully.
+  onPoolFee?: (amountWei: bigint) => void;
   // Fold register() into this deposit's apply_actions (default true — the common
   // case for a fresh account). A retry after a partially-committed autoRegister
   // deposit (the account IS already registered, so a second autoRegister:true
@@ -441,6 +445,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     immediateProve = false,
     onStatus,
     onTx,
+    onPoolFee,
     autoRegister = true,
     foldMint,
     prebuiltProof,
@@ -504,6 +509,7 @@ export async function depositToPool(args: DepositArgs): Promise<void> {
     foldMint,
     prebuiltProof,
     foldCalls,
+    onPoolFee,
   );
 
   onStatus?.('Deposited into pool.');
@@ -533,6 +539,7 @@ async function proveAndSubmitDeposit(
   foldMint?: { message: `0x${string}`; attestation: `0x${string}` },
   prebuiltProof?: PrebuiltDepositProof,
   foldCalls?: Call[],
+  onPoolFee?: (amountWei: bigint) => void,
 ): Promise<void> {
   // MUTABLE proving anchor + depth so the PART-C rebuild-on-expiry can re-pick a FRESH
   // anchor from the current head (undefined → waitForProvingBlock reads latest now) at the
@@ -610,6 +617,9 @@ async function proveAndSubmitDeposit(
       });
       feeWithdraw = feeWithdrawFromAction(paymasterCtx.feeAction);
     }
+    // A safe retry can receive a different AVNU quote. Expose every attempt so the
+    // caller can keep the quote attached to the attempt that eventually succeeds.
+    onPoolFee?.(feeWithdraw?.amount ?? 0n);
 
     // PROVE-AHEAD reuse: the caller may have generated this exact proof CONCURRENTLY with
     // the CCTP attestation (moveIntoPool → buildDepositProofAhead). Reuse it — skipping the
