@@ -12,6 +12,7 @@ import {
   microToHuman,
   type BridgeFundingPlan,
 } from '../core/bridgeFunding.js';
+import { ESTIMATE_FEE_MAX_AGE_MS } from '../core/cctpFees.js';
 import { config, getEvmCctpSource, getEvmCctpDestination } from '../core/config.js';
 
 export type BridgeFundingEstimate =
@@ -35,7 +36,8 @@ export type BridgeFundingEstimate =
       capError: string | null;
     };
 
-const DEBOUNCE_MS = 400;
+// Short: the fee-rows cache + in-flight dedupe absorb keystroke bursts.
+const DEBOUNCE_MS = 150;
 
 /** Optional per-caller cap on the total bridge (`plan.fundMicro`), e.g. a per-order limit. */
 export interface BridgeFundingCap {
@@ -120,6 +122,7 @@ export function useBridgeFundingEstimate(
             destDomain,
             extraReserveMicro,
             fast,
+            maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
           });
           if (cancelled) return;
           const exceedsCap = cap !== undefined && plan.fundMicro > cap.amountMicro;

@@ -11,7 +11,9 @@
 
 import { config } from './config.js';
 import {
-  fetchForwardMaxFee,
+  computeForwardFeeQuote,
+  fetchCctpFeeRows,
+  resolveFeeRoute,
   formatPusdHint,
   type ForwardFeeQuote,
 } from './cctpFees.js';
@@ -150,6 +152,8 @@ export async function fetchBridgeFundingPlan(
     // fund total so the CCTP max_fee (which has a bps-of-amount component) is sized
     // for the FULL burn, not just the bet.
     extraReserveMicro?: bigint;
+    // Opt-in fee-rows cache age (ms) for estimate callers; omitted = fresh fetch.
+    maxAgeMs?: number;
   },
 ): Promise<BridgeFundingPlan> {
   if (betMicro <= 0n) {
@@ -157,17 +161,19 @@ export async function fetchBridgeFundingPlan(
   }
   const fast = opts?.fast ?? config.cctp.fast;
   const tier = opts?.tier ?? 'med';
-  const fetchImpl = opts?.fetchImpl;
-  const { sourceDomain, destDomain } = opts ?? {};
+  const route = resolveFeeRoute(opts);
+  // Rows don't depend on the amount: fetch once, converge locally.
+  const rows = await fetchCctpFeeRows(route, { fetchImpl: opts?.fetchImpl, maxAgeMs: opts?.maxAgeMs });
   const extraReserveMicro = opts?.extraReserveMicro ?? 0n;
+  const quoteFor = (amount: bigint) => computeForwardFeeQuote(rows, amount, { fast, tier, route });
 
   let fundMicro = betMicro;
-  let quote = await fetchForwardMaxFee(fundMicro, { fast, tier, fetchImpl, sourceDomain, destDomain });
+  let quote = quoteFor(fundMicro);
   for (let i = 0; i < 4; i++) {
     const nextFund = totalBridgeFundMicro(betMicro, quote.maxFee, extraReserveMicro);
     if (nextFund === fundMicro) break;
     fundMicro = nextFund;
-    quote = await fetchForwardMaxFee(fundMicro, { fast, tier, fetchImpl, sourceDomain, destDomain });
+    quote = quoteFor(fundMicro);
   }
   return buildBridgeFundingPlan(betMicro, quote, extraReserveMicro);
 }

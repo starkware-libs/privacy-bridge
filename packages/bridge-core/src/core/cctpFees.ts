@@ -46,7 +46,7 @@ export function resolveFinalityThreshold(fast: boolean = config.cctp.fast): numb
 }
 
 // Shape of a single fee row from the Iris /v2/burn/USDC/fees endpoint.
-interface IrisFeeRow {
+export interface IrisFeeRow {
   finalityThreshold: number;
   // Protocol fee in basis points (e.g. 14 = 0.14%; 0 for Standard).
   minimumFee: number;
@@ -65,64 +65,88 @@ export interface ForwardFeeQuote {
   finalityThreshold: number;
 }
 
-// Compute the CCTP `max_fee` for a burn of `amount` (USDC base units). `fast`
-// selects the finality tier (defaults to config.cctp.fast); `tier` picks the
-// forward-fee buffer (defaults 'med'); `fetchImpl` is injectable for tests.
-//
-// `sourceDomain`/`destDomain` override the fee ROUTE. They default to
-// starknetDomain→polygonDomain, correct for the fund/return legs; the deposit-in
-// leg burns EVM→Starknet and MUST pass its own route (sourceDomain = EVM source,
-// destDomain = starknetDomain) or the fee is quoted for the wrong route.
-//
-// DIRECTION-AWARE forwarding (issue #199): the Forwarding Service is a per-
-// DESTINATION capability. Circle auto-mints only on our forwarded route →Polygon
-// (SN→Polygon: BUY + fund/return legs). Starknet is a supported CCTP SOURCE but
-// NOT a forwarding DESTINATION — `?forward=true` into domain 25 returns HTTP 400
-// ("Destination domain not supported for forwarding") and aborted the whole
-// deposit before any on-chain tx. So the forwarding dimension is DERIVED from the
-// route (dst === polygonDomain) and we NEVER forward into Starknet:
-//   - forwarded routes (→Polygon): max_fee = flat forwardFee + protocol bps;
-//   - non-forwarded routes (EVM→Starknet, where WE submit the SN mint via
-//     receive_message): max_fee = protocol bps ONLY (no forwardFee, forwardFee 0).
-export async function fetchForwardMaxFee(
-  amount: bigint,
-  opts?: {
-    fast?: boolean;
-    tier?: 'low' | 'med' | 'high';
-    fetchImpl?: typeof fetch;
-    sourceDomain?: number;
-    destDomain?: number;
-  },
-): Promise<ForwardFeeQuote> {
-  const { irisUrl, starknetDomain } = config.cctp;
-  const fast = opts?.fast ?? config.cctp.fast;
-  const tier = opts?.tier ?? 'med';
-  const doFetch = opts?.fetchImpl ?? fetch;
+export interface FeeRoute {
+  src: number;
+  dst: number;
+  forwarding: boolean;
+}
+
+// Resolve the fee route (defaults: Starknet → default EVM destination).
+export function resolveFeeRoute(opts?: { sourceDomain?: number; destDomain?: number }): FeeRoute {
+  const { starknetDomain } = config.cctp;
   const src = opts?.sourceDomain ?? starknetDomain;
   // Default the destination to the default bridge-OUT chain's domain (Polygon) when
   // the caller doesn't specify a route — the fund/cash-out legs pass their chosen
   // dest explicitly; the deposit-in leg passes destDomain = starknetDomain.
   const dst = opts?.destDomain ?? getDefaultEvmCctpDestination().domain;
-
   // Forwarding is supported for every EVM CCTP destination (Circle's Forwarding
   // Service mints on Polygon/Base/Arbitrum/Ethereum/Optimism). Starknet (domain 25)
   // is a CCTP SOURCE but NOT a forwarding destination — ?forward=true into domain 25
   // returns HTTP 400, so a route INTO Starknet queries ?forward=false.
-  const forwarding = dst !== starknetDomain;
+  return { src, dst, forwarding: dst !== starknetDomain };
+}
 
-  const base = irisUrl.replace(/\/+$/, '');
-  const url = `${base}/v2/burn/USDC/fees/${src}/${dst}?forward=${forwarding}`;
+// Estimate-only cache age for the order-ticket hooks. Execution paths never pass
+// `maxAgeMs`: the burn's max_fee must come from a fresh quote.
+export const ESTIMATE_FEE_MAX_AGE_MS = 30_000;
+
+const feeRowsCache = new Map<string, { rows: IrisFeeRow[]; fetchedAtMs: number }>();
+const feeRowsInFlight = new Map<string, Promise<IrisFeeRow[]>>();
+
+/** Test helper: drop cached and in-flight fee rows. */
+export function resetCctpFeeCache(): void {
+  feeRowsCache.clear();
+  feeRowsInFlight.clear();
+}
+
+async function fetchRowsUncached(url: string, doFetch: typeof fetch): Promise<IrisFeeRow[]> {
   const res = await doFetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) {
     throw new Error(`CCTP fee query failed: HTTP ${res.status} (${url}).`);
   }
-
   const rows = (await res.json()) as IrisFeeRow[];
   if (!Array.isArray(rows)) {
     throw new Error(
       `CCTP fee response is not an array (got ${typeof rows}) — Iris API shape mismatch.`,
     );
   }
+  return rows;
+}
+
+// Fetch the per-finality fee rows for a route. The rows don't depend on the amount.
+// `maxAgeMs > 0` opts into a URL-keyed cache + in-flight dedupe; default = always fresh.
+export async function fetchCctpFeeRows(
+  route: FeeRoute,
+  opts?: { fetchImpl?: typeof fetch; maxAgeMs?: number },
+): Promise<IrisFeeRow[]> {
+  const base = config.cctp.irisUrl.replace(/\/+$/, '');
+  const url = `${base}/v2/burn/USDC/fees/${route.src}/${route.dst}?forward=${route.forwarding}`;
+  const doFetch = opts?.fetchImpl ?? fetch;
+  const maxAgeMs = opts?.maxAgeMs ?? 0;
+  if (!(maxAgeMs > 0)) return fetchRowsUncached(url, doFetch);
+
+  const hit = feeRowsCache.get(url);
+  if (hit && Date.now() - hit.fetchedAtMs < maxAgeMs) return hit.rows;
+  const pending = feeRowsInFlight.get(url);
+  if (pending) return pending;
+  const p = fetchRowsUncached(url, doFetch)
+    .then((rows) => {
+      feeRowsCache.set(url, { rows, fetchedAtMs: Date.now() });
+      return rows;
+    })
+    .finally(() => feeRowsInFlight.delete(url));
+  feeRowsInFlight.set(url, p);
+  return p;
+}
+
+// Pure: derive the quote for `amount` from already-fetched rows.
+export function computeForwardFeeQuote(
+  rows: IrisFeeRow[],
+  amount: bigint,
+  opts: { fast: boolean; tier: 'low' | 'med' | 'high'; route: FeeRoute },
+): ForwardFeeQuote {
+  const { fast, tier, route } = opts;
+  const { src, dst, forwarding } = route;
   const wantThreshold = resolveFinalityThreshold(fast);
   const row = rows.find((r) => r.finalityThreshold === wantThreshold);
   if (!row) {
@@ -177,6 +201,46 @@ export async function fetchForwardMaxFee(
   const protocolFee = (amount * bpsScaled + 999_999n) / 1_000_000n;
   const maxFee = forwardFee + protocolFee;
   return { maxFee, forwardFee, protocolFee, finalityThreshold: row.finalityThreshold };
+}
+
+// Compute the CCTP `max_fee` for a burn of `amount` (USDC base units). `fast`
+// selects the finality tier (defaults to config.cctp.fast); `tier` picks the
+// forward-fee buffer (defaults 'med'); `fetchImpl` is injectable for tests.
+//
+// `sourceDomain`/`destDomain` override the fee ROUTE. They default to
+// starknetDomain→polygonDomain, correct for the fund/return legs; the deposit-in
+// leg burns EVM→Starknet and MUST pass its own route (sourceDomain = EVM source,
+// destDomain = starknetDomain) or the fee is quoted for the wrong route.
+//
+// DIRECTION-AWARE forwarding (issue #199): the Forwarding Service is a per-
+// DESTINATION capability. Circle auto-mints only on our forwarded route →Polygon
+// (SN→Polygon: BUY + fund/return legs). Starknet is a supported CCTP SOURCE but
+// NOT a forwarding DESTINATION — `?forward=true` into domain 25 returns HTTP 400
+// ("Destination domain not supported for forwarding") and aborted the whole
+// deposit before any on-chain tx. So the forwarding dimension is DERIVED from the
+// route (dst === polygonDomain) and we NEVER forward into Starknet:
+//   - forwarded routes (→Polygon): max_fee = flat forwardFee + protocol bps;
+//   - non-forwarded routes (EVM→Starknet, where WE submit the SN mint via
+//     receive_message): max_fee = protocol bps ONLY (no forwardFee, forwardFee 0).
+export async function fetchForwardMaxFee(
+  amount: bigint,
+  opts?: {
+    fast?: boolean;
+    tier?: 'low' | 'med' | 'high';
+    fetchImpl?: typeof fetch;
+    sourceDomain?: number;
+    destDomain?: number;
+    // Opt-in cache age (ms) for estimate-only callers; omitted/0 = always fetch fresh.
+    maxAgeMs?: number;
+  },
+): Promise<ForwardFeeQuote> {
+  const route = resolveFeeRoute(opts);
+  const rows = await fetchCctpFeeRows(route, opts);
+  return computeForwardFeeQuote(rows, amount, {
+    fast: opts?.fast ?? config.cctp.fast,
+    tier: opts?.tier ?? 'med',
+    route,
+  });
 }
 
 // Format a USDC/pUSD human amount for inline hints (2 dp when ≥ $1, else up to 4).
