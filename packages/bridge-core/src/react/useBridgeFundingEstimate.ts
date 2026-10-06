@@ -10,9 +10,10 @@ import {
   bridgeFundingHint,
   fetchBridgeFundingPlan,
   microToHuman,
+  planFromFeeRows,
   type BridgeFundingPlan,
 } from '../core/bridgeFunding.js';
-import { ESTIMATE_FEE_MAX_AGE_MS } from '../core/cctpFees.js';
+import { ESTIMATE_FEE_MAX_AGE_MS, peekCctpFeeRows, resolveFeeRoute } from '../core/cctpFees.js';
 import { config, getEvmCctpSource, getEvmCctpDestination } from '../core/config.js';
 
 export type BridgeFundingEstimate =
@@ -36,7 +37,7 @@ export type BridgeFundingEstimate =
       capError: string | null;
     };
 
-// Short: the fee-rows cache + in-flight dedupe absorb keystroke bursts.
+// Only the cold path (no fresh cached fee rows) debounces; a warm cache quotes synchronously.
 const DEBOUNCE_MS = 150;
 
 /** Optional per-caller cap on the total bridge (`plan.fundMicro`), e.g. a per-order limit. */
@@ -102,14 +103,52 @@ export function useBridgeFundingEstimate(
       sourceChainId !== undefined ? getEvmCctpSource(sourceChainId)?.domain : undefined;
     const outDestDomain =
       destChainId !== undefined ? getEvmCctpDestination(destChainId)?.domain : undefined;
-    const destDomain =
-      sourceDomain !== undefined ? config.cctp.starknetDomain : outDestDomain;
+    const destDomain = sourceDomain !== undefined ? config.cctp.starknetDomain : outDestDomain;
 
-    // Invalidate any prior estimate IMMEDIATELY (synchronously) on ANY input change —
-    // amount OR source-chain route. Otherwise a stale `ready` (quoted for the PREVIOUS
-    // route) lingers through the debounce window and the caller's submit stays enabled,
-    // pairing the new sourceChainId with a fundMicro sized for the old route (#198
-    // Bugbot: "stale reserve after chain change"). Flipping to `loading` here gates
+    const toReady = (plan: BridgeFundingPlan): BridgeFundingEstimate => {
+      const exceedsCap = cap !== undefined && plan.fundMicro > cap.amountMicro;
+      const capError = exceedsCap
+        ? `Total bridge ($${microToHuman(plan.fundMicro, decimals).toFixed(2)} ${cap.symbol}, bet + reserve) exceeds the ${microToHuman(cap.amountMicro, decimals)} ${cap.symbol} cap.`
+        : null;
+      return {
+        status: 'ready',
+        plan,
+        betHuman: microToHuman(plan.betMicro, decimals),
+        fundHuman: microToHuman(plan.fundMicro, decimals),
+        reserveHuman: microToHuman(plan.reserveMicro, decimals),
+        extraReserveHuman: microToHuman(plan.extraReserveMicro, decimals),
+        feeHuman: microToHuman(plan.quote.maxFee, decimals),
+        projectedOrderHuman: microToHuman(plan.projectedOrderMicro, decimals),
+        belowFloor: plan.belowFloor,
+        exceedsCap,
+        capError,
+      };
+    };
+    const toError = (err: unknown): BridgeFundingEstimate => ({
+      status: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    });
+
+    // Warm cache: quote synchronously — the new plan replaces the old one in this same
+    // effect, so no stale `ready` survives the input change and no `loading` flashes.
+    const route = resolveFeeRoute({ sourceDomain, destDomain });
+    const cachedRows = peekCctpFeeRows(route, ESTIMATE_FEE_MAX_AGE_MS);
+    if (cachedRows) {
+      try {
+        setEstimate(
+          toReady(planFromFeeRows(betWei, cachedRows, route, { extraReserveMicro, fast })),
+        );
+      } catch (err) {
+        setEstimate(toError(err));
+      }
+      return;
+    }
+
+    // Cold path. Invalidate any prior estimate IMMEDIATELY (synchronously) on ANY input
+    // change — amount OR source-chain route. Otherwise a stale `ready` (quoted for the
+    // PREVIOUS route) lingers through the debounce window and the caller's submit stays
+    // enabled, pairing the new sourceChainId with a fundMicro sized for the old route
+    // (#198 Bugbot: "stale reserve after chain change"). Flipping to `loading` here gates
     // submit until the new quote lands.
     setEstimate({ status: 'loading' });
 
@@ -125,27 +164,10 @@ export function useBridgeFundingEstimate(
             maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
           });
           if (cancelled) return;
-          const exceedsCap = cap !== undefined && plan.fundMicro > cap.amountMicro;
-          const capError = exceedsCap
-            ? `Total bridge ($${microToHuman(plan.fundMicro, decimals).toFixed(2)} ${cap.symbol}, bet + reserve) exceeds the ${microToHuman(cap.amountMicro, decimals)} ${cap.symbol} cap.`
-            : null;
-          setEstimate({
-            status: 'ready',
-            plan,
-            betHuman: microToHuman(plan.betMicro, decimals),
-            fundHuman: microToHuman(plan.fundMicro, decimals),
-            reserveHuman: microToHuman(plan.reserveMicro, decimals),
-            extraReserveHuman: microToHuman(plan.extraReserveMicro, decimals),
-            feeHuman: microToHuman(plan.quote.maxFee, decimals),
-            projectedOrderHuman: microToHuman(plan.projectedOrderMicro, decimals),
-            belowFloor: plan.belowFloor,
-            exceedsCap,
-            capError,
-          });
+          setEstimate(toReady(plan));
         } catch (err) {
           if (cancelled) return;
-          const message = err instanceof Error ? err.message : String(err);
-          setEstimate({ status: 'error', message });
+          setEstimate(toError(err));
         }
       })();
     }, DEBOUNCE_MS);

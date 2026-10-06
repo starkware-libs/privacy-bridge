@@ -15,7 +15,9 @@ import {
   fetchCctpFeeRows,
   resolveFeeRoute,
   formatPusdHint,
+  type FeeRoute,
   type ForwardFeeQuote,
+  type IrisFeeRow,
 } from './cctpFees.js';
 /** Max slippage floor (bps) on exactInputSingle amountOutMinimum (Uniswap v3 USDC→USDC.e swap). */
 const SWAP_SLIPPAGE_BPS = 50n;
@@ -159,11 +161,27 @@ export async function fetchBridgeFundingPlan(
   if (betMicro <= 0n) {
     throw new Error('Bet amount must be greater than zero.');
   }
-  const fast = opts?.fast ?? config.cctp.fast;
-  const tier = opts?.tier ?? 'med';
   const route = resolveFeeRoute(opts);
   // Rows don't depend on the amount: fetch once, converge locally.
-  const rows = await fetchCctpFeeRows(route, { fetchImpl: opts?.fetchImpl, maxAgeMs: opts?.maxAgeMs });
+  const rows = await fetchCctpFeeRows(route, {
+    fetchImpl: opts?.fetchImpl,
+    maxAgeMs: opts?.maxAgeMs,
+  });
+  return planFromFeeRows(betMicro, rows, route, opts);
+}
+
+// Pure: converge the plan on already-fetched fee rows (max_fee has a bps-of-amount term).
+export function planFromFeeRows(
+  betMicro: bigint,
+  rows: IrisFeeRow[],
+  route: FeeRoute,
+  opts?: { fast?: boolean; tier?: 'low' | 'med' | 'high'; extraReserveMicro?: bigint },
+): BridgeFundingPlan {
+  if (betMicro <= 0n) {
+    throw new Error('Bet amount must be greater than zero.');
+  }
+  const fast = opts?.fast ?? config.cctp.fast;
+  const tier = opts?.tier ?? 'med';
   const extraReserveMicro = opts?.extraReserveMicro ?? 0n;
   const quoteFor = (amount: bigint) => computeForwardFeeQuote(rows, amount, { fast, tier, route });
 

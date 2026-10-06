@@ -113,20 +113,30 @@ async function fetchRowsUncached(url: string, doFetch: typeof fetch): Promise<Ir
   return rows;
 }
 
+function feeRowsUrl(route: FeeRoute): string {
+  const base = config.cctp.irisUrl.replace(/\/+$/, '');
+  return `${base}/v2/burn/USDC/fees/${route.src}/${route.dst}?forward=${route.forwarding}`;
+}
+
+// Synchronous cache read: the route's rows if fetched within `maxAgeMs`, else null.
+export function peekCctpFeeRows(route: FeeRoute, maxAgeMs: number): IrisFeeRow[] | null {
+  const hit = feeRowsCache.get(feeRowsUrl(route));
+  return hit && Date.now() - hit.fetchedAtMs < maxAgeMs ? hit.rows : null;
+}
+
 // Fetch the per-finality fee rows for a route. The rows don't depend on the amount.
 // `maxAgeMs > 0` opts into a URL-keyed cache + in-flight dedupe; default = always fresh.
 export async function fetchCctpFeeRows(
   route: FeeRoute,
   opts?: { fetchImpl?: typeof fetch; maxAgeMs?: number },
 ): Promise<IrisFeeRow[]> {
-  const base = config.cctp.irisUrl.replace(/\/+$/, '');
-  const url = `${base}/v2/burn/USDC/fees/${route.src}/${route.dst}?forward=${route.forwarding}`;
+  const url = feeRowsUrl(route);
   const doFetch = opts?.fetchImpl ?? fetch;
   const maxAgeMs = opts?.maxAgeMs ?? 0;
   if (!(maxAgeMs > 0)) return fetchRowsUncached(url, doFetch);
 
-  const hit = feeRowsCache.get(url);
-  if (hit && Date.now() - hit.fetchedAtMs < maxAgeMs) return hit.rows;
+  const hit = peekCctpFeeRows(route, maxAgeMs);
+  if (hit) return hit;
   const pending = feeRowsInFlight.get(url);
   if (pending) return pending;
   const p = fetchRowsUncached(url, doFetch)
