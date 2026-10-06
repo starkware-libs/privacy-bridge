@@ -9,11 +9,14 @@
 // micro-units to hold in the wallet); this package stays app-agnostic — the caller
 // (e.g. apps/web, for the Polymarket taker fee) decides what it represents and labels it.
 
-import { config } from './config.js';
 import {
-  fetchForwardMaxFee,
+  computeForwardFeeQuote,
+  fetchCctpFeeRows,
+  resolveFeeRoute,
   formatPusdHint,
+  type FeeRoute,
   type ForwardFeeQuote,
+  type IrisFeeRow,
 } from './cctpFees.js';
 /** Max slippage floor (bps) on exactInputSingle amountOutMinimum (Uniswap v3 USDC→USDC.e swap). */
 const SWAP_SLIPPAGE_BPS = 50n;
@@ -150,24 +153,43 @@ export async function fetchBridgeFundingPlan(
     // fund total so the CCTP max_fee (which has a bps-of-amount component) is sized
     // for the FULL burn, not just the bet.
     extraReserveMicro?: bigint;
+    // Opt-in fee-rows cache age (ms) for estimate callers; omitted = fresh fetch.
+    maxAgeMs?: number;
   },
 ): Promise<BridgeFundingPlan> {
   if (betMicro <= 0n) {
     throw new Error('Bet amount must be greater than zero.');
   }
-  const fast = opts?.fast ?? config.cctp.fast;
-  const tier = opts?.tier ?? 'med';
-  const fetchImpl = opts?.fetchImpl;
-  const { sourceDomain, destDomain } = opts ?? {};
+  const route = resolveFeeRoute(opts);
+  // Rows don't depend on the amount: fetch once, converge locally.
+  const rows = await fetchCctpFeeRows(route, {
+    fetchImpl: opts?.fetchImpl,
+    maxAgeMs: opts?.maxAgeMs,
+  });
+  return planFromFeeRows(betMicro, rows, route, opts);
+}
+
+// Pure: converge the plan on already-fetched fee rows (max_fee has a bps-of-amount term).
+export function planFromFeeRows(
+  betMicro: bigint,
+  rows: IrisFeeRow[],
+  route: FeeRoute,
+  opts?: { fast?: boolean; tier?: 'low' | 'med' | 'high'; extraReserveMicro?: bigint },
+): BridgeFundingPlan {
+  if (betMicro <= 0n) {
+    throw new Error('Bet amount must be greater than zero.');
+  }
   const extraReserveMicro = opts?.extraReserveMicro ?? 0n;
+  const quoteFor = (amount: bigint) =>
+    computeForwardFeeQuote(rows, amount, { fast: opts?.fast, tier: opts?.tier, route });
 
   let fundMicro = betMicro;
-  let quote = await fetchForwardMaxFee(fundMicro, { fast, tier, fetchImpl, sourceDomain, destDomain });
+  let quote = quoteFor(fundMicro);
   for (let i = 0; i < 4; i++) {
     const nextFund = totalBridgeFundMicro(betMicro, quote.maxFee, extraReserveMicro);
     if (nextFund === fundMicro) break;
     fundMicro = nextFund;
-    quote = await fetchForwardMaxFee(fundMicro, { fast, tier, fetchImpl, sourceDomain, destDomain });
+    quote = quoteFor(fundMicro);
   }
   return buildBridgeFundingPlan(betMicro, quote, extraReserveMicro);
 }

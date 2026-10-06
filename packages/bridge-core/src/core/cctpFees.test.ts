@@ -8,14 +8,16 @@
 // maxFee = forwardFee.med (the chosen tier) + protocolFee (bps of amount), and
 // the configurable-floor guard (assertAboveForwardFloor).
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   fetchForwardMaxFee,
+  resetCctpFeeCache,
   assertAboveForwardFloor,
   formatPusdHint,
   resolveFinalityThreshold,
 } from './cctpFees.js';
+import { fetchBridgeFundingPlan } from './bridgeFunding.js';
 import { initTestConfig } from '../../vitest.setup';
 
 // Iris GET /v2/burn/USDC/fees/{src}/{dst}?forward=true shape: one row per finality
@@ -378,5 +380,121 @@ describe('formatPusdHint', () => {
   it('formats small and large amounts for inline hints', () => {
     expect(formatPusdHint(0.888494)).toBe('0.8885');
     expect(formatPusdHint(1.5)).toBe('1.50');
+  });
+});
+
+describe('fee rows cache (opt-in maxAgeMs)', () => {
+  const AGE = 30_000;
+  beforeEach(() => {
+    resetCctpFeeCache();
+    vi.useRealTimers();
+  });
+
+  it('without maxAgeMs: every call fetches fresh', async () => {
+    const fetchImpl = feeFetch();
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl });
+    await fetchForwardMaxFee(2_000_000n, { fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('without maxAgeMs: never reads a cache populated by a cached call', async () => {
+    const cached = feeFetch();
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl: cached, maxAgeMs: AGE });
+    const fresh = feeFetch();
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl: fresh });
+    expect(fresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('with maxAgeMs: second call within age is served from cache, other amounts reuse rows', async () => {
+    const fetchImpl = feeFetch();
+    const a = await fetchForwardMaxFee(10_000_000n, { fast: true, fetchImpl, maxAgeMs: AGE });
+    const b = await fetchForwardMaxFee(20_000_000n, { fast: true, fetchImpl, maxAgeMs: AGE });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(a.protocolFee).toBe(14_000n);
+    expect(b.protocolFee).toBe(28_000n);
+  });
+
+  it('with maxAgeMs: refetches once the age expires', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = feeFetch();
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl, maxAgeMs: AGE });
+    vi.advanceTimersByTime(AGE - 1);
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl, maxAgeMs: AGE });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl, maxAgeMs: AGE });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('with maxAgeMs: concurrent calls share one in-flight fetch', async () => {
+    const fetchImpl = feeFetch();
+    await Promise.all([
+      fetchForwardMaxFee(1_000_000n, { fetchImpl, maxAgeMs: AGE }),
+      fetchForwardMaxFee(2_000_000n, { fetchImpl, maxAgeMs: AGE }),
+      fetchForwardMaxFee(3_000_000n, { fetchImpl, maxAgeMs: AGE }),
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('a non-ok response is not cached and clears the in-flight entry', async () => {
+    const bad = feeFetch(FEE_ROWS, 500);
+    await expect(fetchForwardMaxFee(1_000_000n, { fetchImpl: bad, maxAgeMs: AGE })).rejects.toThrow(
+      /HTTP 500/,
+    );
+    const good = feeFetch();
+    await fetchForwardMaxFee(1_000_000n, { fetchImpl: good, maxAgeMs: AGE });
+    expect(good).toHaveBeenCalledTimes(1);
+  });
+
+  it('a rejected fetch is not cached', async () => {
+    const boom = vi.fn(async () => {
+      throw new Error('network down');
+    }) as unknown as typeof fetch;
+    await expect(fetchForwardMaxFee(1n, { fetchImpl: boom, maxAgeMs: AGE })).rejects.toThrow(
+      /network down/,
+    );
+    const good = feeFetch();
+    await fetchForwardMaxFee(1n, { fetchImpl: good, maxAgeMs: AGE });
+    expect(good).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hung shared fetch times out, aborts, and does not pin later callers', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const hung = vi.fn((_input: unknown, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as unknown as typeof fetch;
+    const settled = Promise.allSettled([
+      fetchForwardMaxFee(1n, { fetchImpl: hung, maxAgeMs: AGE }),
+      fetchForwardMaxFee(2n, { fetchImpl: hung, maxAgeMs: AGE }),
+    ]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const results = await settled;
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    expect(String((results[0] as PromiseRejectedResult).reason)).toMatch(/timed out/);
+    expect(hung).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(true);
+
+    const good = feeFetch();
+    await fetchForwardMaxFee(1n, { fetchImpl: good, maxAgeMs: AGE });
+    expect(good).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchBridgeFundingPlan — single fee fetch', () => {
+  beforeEach(() => resetCctpFeeCache());
+
+  it('fetches rows once even when the convergence loop iterates, with the converged quote', async () => {
+    const fetchImpl = feeFetch();
+    const bet = 10_000_000n;
+    const plan = await fetchBridgeFundingPlan(bet, { fast: true, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Fixed point: the quote is sized on the plan's own fund total (loop iterated >1).
+    const direct = await fetchForwardMaxFee(plan.fundMicro, { fast: true, fetchImpl: feeFetch() });
+    expect(plan.quote).toEqual(direct);
+    expect(plan.fundMicro).toBeGreaterThan(bet);
+    expect(plan.quote.protocolFee).toBe((plan.fundMicro * 1400n + 999_999n) / 1_000_000n);
   });
 });

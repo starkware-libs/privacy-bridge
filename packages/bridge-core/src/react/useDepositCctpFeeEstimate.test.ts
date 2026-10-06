@@ -10,6 +10,7 @@ import { act, renderHook } from '@testing-library/react';
 const mockFetchForwardMaxFee = vi.fn();
 vi.mock('../core/cctpFees', () => ({
   fetchForwardMaxFee: (...args: unknown[]) => mockFetchForwardMaxFee(...args),
+  ESTIMATE_FEE_MAX_AGE_MS: 30_000,
 }));
 
 import { useDepositCctpFeeEstimate } from './useDepositCctpFeeEstimate';

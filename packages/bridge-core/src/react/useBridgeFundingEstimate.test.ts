@@ -17,6 +17,7 @@ vi.mock('../core/bridgeFunding', () => ({
   microToHuman: (micro: bigint, decimals: number) => Number(micro) / 10 ** decimals,
 }));
 
+import { ESTIMATE_FEE_MAX_AGE_MS } from '../core/cctpFees';
 import { bridgeFundingEstimateHint, useBridgeFundingEstimate } from './useBridgeFundingEstimate';
 
 beforeEach(() => {
@@ -65,6 +66,7 @@ describe('useBridgeFundingEstimate', () => {
       destDomain: undefined,
       extraReserveMicro: 0n,
       fast: undefined,
+      maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
     });
   });
 
@@ -85,6 +87,7 @@ describe('useBridgeFundingEstimate', () => {
       destDomain: undefined,
       extraReserveMicro: 0n,
       fast: true,
+      maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
     });
 
     // Flipping the tier is a dependency change → the effect re-runs and re-quotes.
@@ -97,6 +100,7 @@ describe('useBridgeFundingEstimate', () => {
       destDomain: undefined,
       extraReserveMicro: 0n,
       fast: false,
+      maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
     });
   });
 });
@@ -173,6 +177,7 @@ describe('useBridgeFundingEstimate cap option', () => {
       sourceDomain: undefined,
       destDomain: undefined,
       extraReserveMicro: 3_500_000n,
+      maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
     });
     if (result.current.status !== 'ready') throw new Error('expected ready');
     expect(result.current.fundHuman).toBeCloseTo(4.801372, 5);

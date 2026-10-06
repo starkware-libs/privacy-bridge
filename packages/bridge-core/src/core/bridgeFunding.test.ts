@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 StarkWare Industries Ltd.
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// computeForwardFeeQuote is the (pure) per-amount quote; fetchCctpFeeRows the single fetch.
 const mockFetchForwardMaxFee = vi.fn();
+const mockFetchRows = vi.fn(async () => []);
 
 vi.mock('./cctpFees.js', () => ({
-  fetchForwardMaxFee: (...args: unknown[]) => mockFetchForwardMaxFee(...args),
+  computeForwardFeeQuote: (...args: unknown[]) => mockFetchForwardMaxFee(...args),
+  fetchCctpFeeRows: (...args: unknown[]) => mockFetchRows(...args),
+  resolveFeeRoute: (o?: { sourceDomain?: number; destDomain?: number }) => ({
+    src: o?.sourceDomain,
+    dst: o?.destDomain,
+    forwarding: true,
+  }),
   formatPusdHint: (n: number) => String(Number(n.toFixed(4))),
 }));
 
@@ -47,6 +55,8 @@ describe('depositNetMicro', () => {
 });
 
 describe('bridgeFunding', () => {
+  beforeEach(() => mockFetchRows.mockClear());
+
   const quote = {
     maxFee: 246_346n,
     forwardFee: 200_000n,
@@ -152,40 +162,43 @@ describe('bridgeFunding', () => {
   // fee must be quoted for THAT EVM→Starknet route — not the default
   // (SN→Polygon fund-account) route. RED before the sourceDomain/destDomain passthrough (opts were dropped);
   // GREEN after.
-  it('forwards the source/dest fee route to fetchForwardMaxFee when given', async () => {
+  it('forwards the source/dest fee route to the rows fetch when given', async () => {
     mockFetchForwardMaxFee.mockReset();
-    mockFetchForwardMaxFee.mockResolvedValue(quote);
+    mockFetchForwardMaxFee.mockReturnValue(quote);
     await fetchBridgeFundingPlan(1_000_000n, { sourceDomain: 6, destDomain: 12 });
-    const opts = mockFetchForwardMaxFee.mock.calls[0][1] as {
-      sourceDomain?: number;
-      destDomain?: number;
-    };
-    expect(opts.sourceDomain).toBe(6);
-    expect(opts.destDomain).toBe(12);
+    const route = (mockFetchRows.mock.calls[0] as unknown[])[0] as { src?: number; dst?: number };
+    expect(route.src).toBe(6);
+    expect(route.dst).toBe(12);
   });
 
   it('leaves the fee route to cctpFees defaults when source/dest are omitted', async () => {
     mockFetchForwardMaxFee.mockReset();
-    mockFetchForwardMaxFee.mockResolvedValue(quote);
+    mockFetchForwardMaxFee.mockReturnValue(quote);
     await fetchBridgeFundingPlan(1_000_000n);
-    const opts = mockFetchForwardMaxFee.mock.calls[0][1] as {
-      sourceDomain?: number;
-      destDomain?: number;
-    };
-    expect(opts.sourceDomain).toBeUndefined();
-    expect(opts.destDomain).toBeUndefined();
+    const route = (mockFetchRows.mock.calls[0] as unknown[])[0] as { src?: number; dst?: number };
+    expect(route.src).toBeUndefined();
+    expect(route.dst).toBeUndefined();
   });
 
   it('fetchBridgeFundingPlan re-quotes until the fund total stabilizes', async () => {
     mockFetchForwardMaxFee.mockReset();
     mockFetchForwardMaxFee
-      .mockResolvedValueOnce({ ...quote, maxFee: 240_000n })
-      .mockResolvedValueOnce({ ...quote, maxFee: 246_346n })
-      .mockResolvedValueOnce({ ...quote, maxFee: 246_346n });
+      .mockReturnValueOnce({ ...quote, maxFee: 240_000n })
+      .mockReturnValueOnce({ ...quote, maxFee: 246_346n })
+      .mockReturnValueOnce({ ...quote, maxFee: 246_346n });
 
     const plan = await fetchBridgeFundingPlan(1_000_000n);
     expect(plan.fundMicro).toBe(1_000_000n + quote.maxFee + BRIDGE_FEE_CUSHION_MICRO + 5_026n);
     expect(mockFetchForwardMaxFee.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(mockFetchRows).toHaveBeenCalledTimes(1); // rows fetched once, loop is local
+  });
+
+  it('forwards maxAgeMs and fetchImpl to the rows fetch', async () => {
+    mockFetchForwardMaxFee.mockReset();
+    mockFetchForwardMaxFee.mockReturnValue(quote);
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    await fetchBridgeFundingPlan(1_000_000n, { maxAgeMs: 30_000, fetchImpl });
+    expect((mockFetchRows.mock.calls[0] as unknown[])[1]).toEqual({ fetchImpl, maxAgeMs: 30_000 });
   });
 
   // Generic extra reserve (apps/web uses it for the Polymarket taker fee). It must
@@ -220,20 +233,20 @@ describe('bridgeFunding', () => {
 
     it('fetchBridgeFundingPlan includes extraReserveMicro in the burned fund total', async () => {
       mockFetchForwardMaxFee.mockReset();
-      mockFetchForwardMaxFee.mockResolvedValue(quote);
+      mockFetchForwardMaxFee.mockReturnValue(quote);
       const plan = await fetchBridgeFundingPlan(bet, { extraReserveMicro: extra });
       expect(plan.extraReserveMicro).toBe(extra);
       expect(plan.fundMicro).toBe(
         bet + quote.maxFee + BRIDGE_FEE_CUSHION_MICRO + 5_026n + extra,
       );
       // Re-quote loop must quote on the FULL fund (bet + reserve incl. extra), not the bet.
-      const quotedAmount = mockFetchForwardMaxFee.mock.calls.at(-1)?.[0] as bigint;
+      const quotedAmount = mockFetchForwardMaxFee.mock.calls.at(-1)?.[1] as bigint;
       expect(quotedAmount).toBe(plan.fundMicro);
     });
 
     it('default (no extraReserveMicro) leaves the plan identical to the pre-feature path', async () => {
       mockFetchForwardMaxFee.mockReset();
-      mockFetchForwardMaxFee.mockResolvedValue(quote);
+      mockFetchForwardMaxFee.mockReturnValue(quote);
       const plan = await fetchBridgeFundingPlan(bet);
       expect(plan.extraReserveMicro).toBe(0n);
       expect(plan.fundMicro).toBe(bet + quote.maxFee + BRIDGE_FEE_CUSHION_MICRO + 5_026n);
