@@ -131,16 +131,18 @@ export function useBridgeFundingEstimate(
 
     // Warm cache: quote synchronously — the new plan replaces the old one in this same
     // effect, so no stale `ready` survives the input change and no `loading` flashes.
-    const route = resolveFeeRoute({ sourceDomain, destDomain });
-    const cachedRows = peekCctpFeeRows(route, ESTIMATE_FEE_MAX_AGE_MS);
-    if (cachedRows) {
-      try {
+    // Route resolution can throw on bad config: surface it as `error`, never out of the effect.
+    try {
+      const route = resolveFeeRoute({ sourceDomain, destDomain });
+      const cachedRows = peekCctpFeeRows(route, ESTIMATE_FEE_MAX_AGE_MS);
+      if (cachedRows) {
         setEstimate(
           toReady(planFromFeeRows(betWei, cachedRows, route, { extraReserveMicro, fast })),
         );
-      } catch (err) {
-        setEstimate(toError(err));
+        return;
       }
+    } catch (err) {
+      setEstimate(toError(err));
       return;
     }
 

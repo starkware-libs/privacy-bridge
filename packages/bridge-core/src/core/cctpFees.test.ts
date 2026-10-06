@@ -457,6 +457,29 @@ describe('fee rows cache (opt-in maxAgeMs)', () => {
     await fetchForwardMaxFee(1n, { fetchImpl: good, maxAgeMs: AGE });
     expect(good).toHaveBeenCalledTimes(1);
   });
+
+  it('a hung shared fetch times out, aborts, and does not pin later callers', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const hung = vi.fn((_input: unknown, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as unknown as typeof fetch;
+    const settled = Promise.allSettled([
+      fetchForwardMaxFee(1n, { fetchImpl: hung, maxAgeMs: AGE }),
+      fetchForwardMaxFee(2n, { fetchImpl: hung, maxAgeMs: AGE }),
+    ]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const results = await settled;
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    expect(String((results[0] as PromiseRejectedResult).reason)).toMatch(/timed out/);
+    expect(hung).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(true);
+
+    const good = feeFetch();
+    await fetchForwardMaxFee(1n, { fetchImpl: good, maxAgeMs: AGE });
+    expect(good).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('fetchBridgeFundingPlan — single fee fetch', () => {

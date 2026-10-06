@@ -86,9 +86,11 @@ export function resolveFeeRoute(opts?: { sourceDomain?: number; destDomain?: num
   return { src, dst, forwarding: dst !== starknetDomain };
 }
 
-// Estimate-only cache age for the order-ticket hooks. Execution paths never pass
-// `maxAgeMs`: the burn's max_fee must come from a fresh quote.
+// Estimate-only cache age. Core execution paths (bridgeOut, depositIn) never pass
+// `maxAgeMs`: their burn's max_fee comes from a fresh quote.
 export const ESTIMATE_FEE_MAX_AGE_MS = 30_000;
+// Upper bound on a shared (cached-mode) fee fetch.
+const FEE_ROWS_FETCH_TIMEOUT_MS = 10_000;
 
 const feeRowsCache = new Map<string, { rows: IrisFeeRow[]; fetchedAtMs: number }>();
 const feeRowsInFlight = new Map<string, Promise<IrisFeeRow[]>>();
@@ -139,12 +141,28 @@ export async function fetchCctpFeeRows(
   if (hit) return hit;
   const pending = feeRowsInFlight.get(url);
   if (pending) return pending;
-  const p = fetchRowsUncached(url, doFetch)
+
+  // A shared fetch must settle: one hung request would otherwise pin every later estimate.
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`CCTP fee query timed out after ${FEE_ROWS_FETCH_TIMEOUT_MS}ms (${url}).`));
+    }, FEE_ROWS_FETCH_TIMEOUT_MS);
+  });
+  const fetching = fetchRowsUncached(url, (input, init) =>
+    doFetch(input, { ...init, signal: controller.signal }),
+  );
+  const p = Promise.race([fetching, timeout])
     .then((rows) => {
       feeRowsCache.set(url, { rows, fetchedAtMs: Date.now() });
       return rows;
     })
-    .finally(() => feeRowsInFlight.delete(url));
+    .finally(() => {
+      clearTimeout(timer);
+      if (feeRowsInFlight.get(url) === p) feeRowsInFlight.delete(url);
+    });
   feeRowsInFlight.set(url, p);
   return p;
 }
@@ -153,9 +171,10 @@ export async function fetchCctpFeeRows(
 export function computeForwardFeeQuote(
   rows: IrisFeeRow[],
   amount: bigint,
-  opts: { fast: boolean; tier: 'low' | 'med' | 'high'; route: FeeRoute },
+  opts: { fast?: boolean; tier?: 'low' | 'med' | 'high'; route: FeeRoute },
 ): ForwardFeeQuote {
-  const { fast, tier, route } = opts;
+  const { fast, route } = opts;
+  const tier = opts.tier ?? 'med';
   const { src, dst, forwarding } = route;
   const wantThreshold = resolveFinalityThreshold(fast);
   const row = rows.find((r) => r.finalityThreshold === wantThreshold);
@@ -246,11 +265,7 @@ export async function fetchForwardMaxFee(
 ): Promise<ForwardFeeQuote> {
   const route = resolveFeeRoute(opts);
   const rows = await fetchCctpFeeRows(route, opts);
-  return computeForwardFeeQuote(rows, amount, {
-    fast: opts?.fast ?? config.cctp.fast,
-    tier: opts?.tier ?? 'med',
-    route,
-  });
+  return computeForwardFeeQuote(rows, amount, { fast: opts?.fast, tier: opts?.tier, route });
 }
 
 // Format a USDC/pUSD human amount for inline hints (2 dp when ≥ $1, else up to 4).

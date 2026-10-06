@@ -14,6 +14,7 @@ import {
   resolveFeeRoute,
   type IrisFeeRow,
 } from '../core/cctpFees';
+import { initTestConfig } from '../../vitest.setup';
 import { useBridgeFundingEstimate } from './useBridgeFundingEstimate';
 
 const DECIMALS = 6;
@@ -96,6 +97,14 @@ describe('useBridgeFundingEstimate — warm fee-rows cache', () => {
     rerender({ bet: BET_A, sourceChainId: SOURCE_CHAIN_ID });
 
     expect(result.current.status).toBe('loading');
+  });
+
+  it('a misconfigured default destination surfaces as an error estimate, not a throw', () => {
+    initTestConfig({ CCTP_DEFAULT_DEST_CHAIN_ID: '424242' });
+    const { result } = renderEstimate({ bet: BET_A });
+
+    expect(result.current.status).toBe('error');
+    if (result.current.status === 'error') expect(result.current.message).toMatch(/424242/);
   });
 
   it('expired rows take the debounced cold path', async () => {

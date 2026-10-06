@@ -9,7 +9,6 @@
 // micro-units to hold in the wallet); this package stays app-agnostic — the caller
 // (e.g. apps/web, for the Polymarket taker fee) decides what it represents and labels it.
 
-import { config } from './config.js';
 import {
   computeForwardFeeQuote,
   fetchCctpFeeRows,
@@ -180,10 +179,9 @@ export function planFromFeeRows(
   if (betMicro <= 0n) {
     throw new Error('Bet amount must be greater than zero.');
   }
-  const fast = opts?.fast ?? config.cctp.fast;
-  const tier = opts?.tier ?? 'med';
   const extraReserveMicro = opts?.extraReserveMicro ?? 0n;
-  const quoteFor = (amount: bigint) => computeForwardFeeQuote(rows, amount, { fast, tier, route });
+  const quoteFor = (amount: bigint) =>
+    computeForwardFeeQuote(rows, amount, { fast: opts?.fast, tier: opts?.tier, route });
 
   let fundMicro = betMicro;
   let quote = quoteFor(fundMicro);
