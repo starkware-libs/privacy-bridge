@@ -12,7 +12,7 @@ import { TEST_ENV_VARS } from '../../../vitest.setup';
 
 // Capture the rpcMap passed to EthereumProvider.init on each (re)init.
 const initCalls: Array<Record<number, string>> = [];
-const fakeProvider = { session: undefined, disconnect: vi.fn(async () => {}) };
+const fakeProvider = { session: undefined as unknown, disconnect: vi.fn(async () => {}) };
 
 vi.mock('@walletconnect/ethereum-provider', () => ({
   EthereumProvider: {
@@ -105,5 +105,43 @@ describe('resetWalletConnectProvider — drops the stale discovery entry (#234)'
     // Pre-fix: resetWalletConnectProvider never calls unregisterProvider at all —
     // the picker keeps listing a WC entry that routes to the dropped instance.
     expect(mockUnregisterProvider).toHaveBeenCalledWith(WALLETCONNECT_RDNS);
+  });
+});
+
+describe('resetWalletConnectProvider — nothing reaches the session being deleted', () => {
+  it('drops the entry before the delete settles, and re-inits only after it', async () => {
+    mockUnregisterProvider.mockClear();
+    const { getWalletConnectProvider, resetWalletConnectProvider, WALLETCONNECT_RDNS } =
+      await loadModules();
+    await getWalletConnectProvider();
+    expect(initCalls).toHaveLength(1);
+
+    // A live session whose delete waits on the relay until released.
+    let releaseDelete: () => void = () => {};
+    fakeProvider.session = { topic: 'live' };
+    fakeProvider.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDelete = () => {
+            fakeProvider.session = undefined;
+            resolve();
+          };
+        }),
+    );
+
+    const reset = resetWalletConnectProvider();
+    expect(mockUnregisterProvider).toHaveBeenCalledWith(WALLETCONNECT_RDNS);
+
+    // A caller asking for the provider mid-teardown waits for it instead of
+    // initialising one that could rehydrate the stored session.
+    const next = getWalletConnectProvider();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fakeProvider.disconnect).toHaveBeenCalled();
+    expect(initCalls).toHaveLength(1);
+
+    releaseDelete();
+    await reset;
+    await next;
+    expect(initCalls).toHaveLength(2);
   });
 });

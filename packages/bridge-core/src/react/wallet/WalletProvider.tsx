@@ -89,39 +89,44 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Kick off EIP-6963 discovery on mount and keep the picker list fresh as
-  // wallets announce themselves. We poll the module snapshot briefly because
-  // announcements arrive asynchronously right after `requestProvider`.
-  useEffect(() => {
-    discoverProviders();
-    // Only setState when the announced set actually changed (avoids redundant
-    // renders / act noise from the safety poll below).
-    const refresh = () =>
+  // Re-snapshot the discovery registry into the picker list. Only setState when the
+  // announced set actually changed (avoids redundant renders / act noise from the
+  // safety poll below).
+  const refreshProviders = useCallback(
+    () =>
       setProviders((prev) => {
         const next = getDiscoveredProviders().map((d) => d.info);
         if (prev.length === next.length && prev.every((p, i) => p.uuid === next[i]?.uuid)) {
           return prev;
         }
         return next;
-      });
-    refresh();
-    window.addEventListener('eip6963:announceProvider', refresh as EventListener);
+      }),
+    [],
+  );
+
+  // Kick off EIP-6963 discovery on mount and keep the picker list fresh as
+  // wallets announce themselves. We poll the module snapshot briefly because
+  // announcements arrive asynchronously right after `requestProvider`.
+  useEffect(() => {
+    discoverProviders();
+    refreshProviders();
+    window.addEventListener('eip6963:announceProvider', refreshProviders as EventListener);
     // Register WalletConnect as a synthetic EIP-6963 entry once its provider
-    // initialises (async, dynamic import). The `then(refresh)` re-snapshots the
+    // initialises (async, dynamic import). The `then(refreshProviders)` re-snapshots the
     // registry so the WC button appears in the picker without a re-mount.
-    void registerWalletConnect().then(refresh).catch(() => {});
+    void registerWalletConnect().then(refreshProviders).catch(() => {});
     // Safety poll: a few quick passes in case an extension announces just before
     // our listener attached. Stops itself after the window closes.
     let passes = 0;
     const interval = setInterval(() => {
-      refresh();
+      refreshProviders();
       if (++passes >= 6) clearInterval(interval);
     }, 250);
     return () => {
       clearInterval(interval);
-      window.removeEventListener('eip6963:announceProvider', refresh as EventListener);
+      window.removeEventListener('eip6963:announceProvider', refreshProviders as EventListener);
     };
-  }, []);
+  }, [refreshProviders]);
 
   // Restore the REMEMBERED wallet pick as soon as that wallet announces itself. This is
   // what makes a reload cheap for a multi-wallet user: `selectedRdns` is per-page-load
@@ -440,8 +445,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     // reconnect after the switch would keep the OLD network's rpcMap (Bugbot MEDIUM
     // "WC config stale after switch"). The next connect re-inits from the now-active
     // config. Harmless for a plain sign-out (re-inits with the same config).
-    void resetWalletConnectProvider();
-  }, []);
+    //
+    // The reset drops the WC entry synchronously, so the refresh below removes it from
+    // the picker and the silent read can't reach the session being deleted. Once that
+    // session is gone, a fresh entry is registered so WalletConnect sign-in works again
+    // without a reload.
+    const teardown = resetWalletConnectProvider();
+    refreshProviders();
+    void teardown
+      .then(registerWalletConnect)
+      .then(refreshProviders)
+      .catch(() => {});
+  }, [refreshProviders]);
 
   const requireWallet = useCallback(() => {
     if (address) return true;
