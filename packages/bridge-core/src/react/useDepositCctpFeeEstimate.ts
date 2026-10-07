@@ -9,7 +9,7 @@
 // the UI — mirrors useBridgeFundingEstimate's cancel-on-dep-change guard.
 
 import { useEffect, useState } from 'react';
-import { fetchForwardMaxFee } from '../core/cctpFees.js';
+import { ESTIMATE_FEE_MAX_AGE_MS, fetchForwardMaxFee } from '../core/cctpFees.js';
 import { config, getEvmCctpSource } from '../core/config.js';
 
 export type DepositCctpFeeEstimate =
@@ -58,6 +58,7 @@ export function useDepositCctpFeeEstimate(
             fast: true,
             sourceDomain: src.domain,
             destDomain: config.cctp.starknetDomain,
+            maxAgeMs: ESTIMATE_FEE_MAX_AGE_MS,
           });
           if (cancelled) return;
           setEstimate({ status: 'ready', maxFeeRaw: quote.maxFee });

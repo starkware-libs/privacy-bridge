@@ -3,7 +3,7 @@
 
 /**
  * Bug 1 (value-path): useBridgeFundingEstimate must NOT serve the previous bet's
- * `ready` plan during the 400ms debounce after the bet changes. If it did, a
+ * `ready` plan during the 150ms debounce after the bet changes. If it did, a
  * consumer that reads `estimate.plan.fundMicro` (e.g. OrderTicket.runBuy) within
  * that window would burn the OLD bet's fund amount for the NEW bet.
  *
@@ -54,7 +54,7 @@ afterEach(() => {
 });
 
 describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the debounce', () => {
-  it('does NOT serve bet A\'s ready plan while bet B is still inside the 400ms debounce', async () => {
+  it('does NOT serve bet A\'s ready plan while bet B is still inside the 150ms debounce', async () => {
     const BET_A = 1_000_000n;
     const BET_B = 5_000_000n;
 
@@ -64,7 +64,7 @@ describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the deb
 
     // Settle bet A: advance past the debounce, let the async plan resolve.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(150);
     });
     expect(result.current.status).toBe('ready');
     if (result.current.status === 'ready') {
@@ -74,7 +74,7 @@ describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the deb
     // Change to bet B and advance LESS than the debounce (still mid-debounce).
     rerender({ bet: BET_B });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200); // < 400ms
+      await vi.advanceTimersByTimeAsync(100); // < 150ms
     });
 
     // RED before the fix: status is still 'ready' with bet A's plan.
@@ -83,7 +83,7 @@ describe('useBridgeFundingEstimate — Bug 1: no stale ready plan during the deb
 
     // After the debounce elapses it settles to bet B's plan.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200); // now past 400ms total
+      await vi.advanceTimersByTimeAsync(100); // now past 150ms total
     });
     expect(result.current.status).toBe('ready');
     if (result.current.status === 'ready') {
