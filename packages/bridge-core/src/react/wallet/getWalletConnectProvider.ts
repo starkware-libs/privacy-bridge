@@ -64,17 +64,24 @@ function buildRpcMap(): Record<number, string> {
 // calls (StrictMode double-mount, repeated connect touches) reuse the same
 // instance without re-initialising the relay connection.
 let providerPromise: Promise<WcProvider | null> | null = null;
+// Session teardown started by resetWalletConnectProvider(). A new provider initialises
+// only after it settles, so it can't rehydrate the session that is being deleted.
+let teardown: Promise<void> | null = null;
 
 export function getWalletConnectProvider(): Promise<WcProvider | null> {
   if (providerPromise) return providerPromise;
+  const pendingTeardown = teardown;
   // On failure (bad projectId, relay unreachable, dynamic-import error) RESET the
   // singleton so a later attempt can re-init, rather than locking every caller to
   // a permanently-rejected promise until a full page reload.
-  providerPromise = initProvider().catch((err) => {
-    providerPromise = null;
+  const pending: Promise<WcProvider | null> = (
+    pendingTeardown ? pendingTeardown.then(initProvider) : initProvider()
+  ).catch((err) => {
+    if (providerPromise === pending) providerPromise = null;
     throw err;
   });
-  return providerPromise;
+  providerPromise = pending;
+  return pending;
 }
 
 async function initProvider(): Promise<WcProvider | null> {
@@ -174,8 +181,12 @@ export async function registerWalletConnect(): Promise<void> {
 // localStorage session can't silently rehydrate on the next visit. Swallows all
 // errors — never throws (called from the fire-and-forget disconnect() path).
 export async function disconnectWalletConnect(): Promise<void> {
+  await endSession(getWalletConnectProvider());
+}
+
+async function endSession(pending: Promise<WcProvider | null>): Promise<void> {
   try {
-    const provider = await getWalletConnectProvider();
+    const provider = await pending;
     // Only disconnect if a live session exists; a session-less provider has
     // nothing to tear down and calling disconnect() on it may throw.
     if (provider?.session) {
@@ -194,14 +205,20 @@ export async function disconnectWalletConnect(): Promise<void> {
 // network's RPC. On switch, tear down the session AND NULL the singleton so the
 // NEXT getWalletConnectProvider() re-inits and rebuilds the rpcMap from the now-
 // active config. Best-effort; never throws (called from the switch/disconnect path).
+//
+// The singleton and the registry entry are dropped SYNCHRONOUSLY, before awaiting the
+// session delete (which waits on the relay): until then getEthereumProvider() and the
+// silent eth_accounts read would still reach the dying provider, which answers with
+// the signed-out account and never answers a signature. Resolves once the old session
+// is gone; registerWalletConnect() then adds a fresh entry.
 export async function resetWalletConnectProvider(): Promise<void> {
-  await disconnectWalletConnect();
-  // Drop the memoized instance: the next getWalletConnectProvider() re-runs
-  // initProvider(), which calls buildRpcMap() against the current config.
+  const previous = getWalletConnectProvider();
   providerPromise = null;
-  // #234: also drop the stale entry from the shared EIP-6963 discovery registry —
-  // otherwise the picker keeps listing WalletConnect as available even though
-  // selecting it would route through this now-dropped instance. registerWalletConnect()
-  // re-adds it the next time a caller resolves the provider.
+  // #234: drop the entry from the shared EIP-6963 discovery registry, so the picker
+  // and provider resolution never route through the dropped instance.
   unregisterProvider(WALLETCONNECT_RDNS);
+  const done = Promise.all([teardown, endSession(previous)]).then(() => {});
+  teardown = done;
+  await done;
+  if (teardown === done) teardown = null;
 }
